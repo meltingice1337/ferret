@@ -16,6 +16,10 @@
   <img alt="SolidJS" src="https://img.shields.io/badge/SolidJS-UI-2C4F7C?logo=solid&logoColor=white">
 </p>
 
+<p align="center">
+  <img src="docs/hero.png" alt="Ferret showing a project folder with the README previewed in the side pane">
+</p>
+
 ---
 
 ## Features

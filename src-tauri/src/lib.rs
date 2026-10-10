@@ -29,6 +29,11 @@ pub fn run() {
     #[cfg(debug_assertions)]
     if std::env::var_os("FERRET_DEVTOOLS").is_some() && std::env::var_os("WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS").is_none() {
         std::env::set_var("WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS", "--remote-debugging-port=9333");
+        // A WebView2 profile runs with one set of options at a time; keep this one apart so it
+        // can run next to normal Ferret windows.
+        if let Some(dir) = dirs::data_local_dir() {
+            std::env::set_var("WEBVIEW2_USER_DATA_FOLDER", dir.join("com.ferret.app").join("EBWebView-devtools"));
+        }
     }
     integration::init_launch_targets();
     integration::init_window_registry();

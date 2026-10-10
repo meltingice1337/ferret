@@ -447,3 +447,5 @@ body.reordering, body.reordering * { cursor: grabbing !important; }
 .crumb-seg { display: inline-flex; align-items: center; flex: none; min-width: 0; }
 .crumb.squeezed { overflow: hidden; text-overflow: ellipsis; }
 .crumb-fold { font-weight: 700; letter-spacing: 1px; color: var(--fg-2); }
+/* Segoe UI sits ~1px low in a 24px box: lift names so they share the chevrons' center. */
+.crumb { padding-bottom: 2px; }
