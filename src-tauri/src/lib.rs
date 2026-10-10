@@ -1,0 +1,162 @@
+mod archive;
+mod commands;
+mod db;
+mod details;
+mod fileops;
+mod integration;
+mod jobs;
+mod listing;
+mod paths;
+mod places;
+mod protocol;
+mod recycle;
+pub mod search;
+mod shell;
+mod shellmenu;
+mod shellops;
+mod watch;
+
+use std::sync::Mutex;
+use tauri::Manager;
+
+use commands::AppState;
+
+#[cfg_attr(mobile, tauri::mobile_entry_point)]
+pub fn run() {
+    // UI tests drive a dev build over the WebView2 DevTools protocol. Any local program
+    // could use that port, so it only opens when explicitly asked for (FERRET_DEVTOOLS=1),
+    // and never in release builds.
+    #[cfg(debug_assertions)]
+    if std::env::var_os("FERRET_DEVTOOLS").is_some() && std::env::var_os("WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS").is_none() {
+        std::env::set_var("WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS", "--remote-debugging-port=9333");
+    }
+    integration::init_launch_targets();
+    integration::init_window_registry();
+
+    // Every launch is its own window. An elevated window (restarted as administrator, or
+    // started from one) uses its own WebView2 profile: a profile can't be shared across
+    // privilege levels.
+    let admin = integration::admin_mode();
+    if admin {
+        if let Some(dir) = dirs::data_local_dir() {
+            std::env::set_var("WEBVIEW2_USER_DATA_FOLDER", dir.join("com.ferret.app").join("EBWebView-admin"));
+        }
+    }
+    tauri::Builder::default()
+        .plugin(tauri_plugin_opener::init())
+        .plugin(tauri_plugin_drag::init())
+        .plugin(tauri_plugin_dialog::init())
+        .register_asynchronous_uri_scheme_protocol("fs", |_ctx, req, responder| {
+            tauri::async_runtime::spawn_blocking(move || responder.respond(protocol::serve_file(req)));
+        })
+        .register_asynchronous_uri_scheme_protocol("thumb", |_ctx, req, responder| {
+            tauri::async_runtime::spawn_blocking(move || {
+                // Shell thumbnail extraction (esp. video) is heavy; cap concurrency.
+                let _permit = protocol::THUMB_SLOTS.acquire();
+                responder.respond(protocol::serve_thumb(req))
+            });
+        })
+        .setup(move |app| {
+            let dir = app.path().app_data_dir()?;
+            std::fs::create_dir_all(&dir)?;
+            let conn = db::open(&dir.join("ferret.db"))?;
+            app.manage(AppState {
+                db: Mutex::new(conn),
+                watcher: Mutex::new(watch::DirWatcher::new(app.handle().clone())),
+            });
+            // The window starts hidden so a restarted window appears right where the old one was.
+            if let Some(window) = app.get_webview_window("main") {
+                shell::set_big_icon(&window);
+                if admin {
+                    let _ = window.set_title("Ferret (Administrator)");
+                }
+                integration::apply_placement(&window);
+                let _ = window.show();
+                let _ = window.set_focus();
+            }
+            if !admin {
+                integration::refresh_registration(&app.state::<AppState>());
+            }
+            shellmenu::warm_up();
+            Ok(())
+        })
+        .invoke_handler(tauri::generate_handler![
+            commands::bootstrap,
+            commands::get_places,
+            commands::shared_state,
+            commands::list_dir,
+            commands::resolve_input,
+            commands::open_path,
+            commands::watch_dirs,
+            commands::save_settings,
+            commands::save_session,
+            commands::set_folder_view,
+            commands::clear_folder_view,
+            commands::list_folder_views,
+            commands::clear_all_folder_views,
+            commands::add_favorite,
+            commands::remove_favorite,
+            commands::update_favorite,
+            commands::reorder_favorites,
+            commands::push_recent,
+            commands::remove_recent,
+            commands::clear_recents,
+            commands::set_backdrop,
+            commands::drag_icon,
+            jobs::cancel_job,
+            fileops::create_folder,
+            fileops::create_file,
+            fileops::rename_item,
+            fileops::check_conflicts,
+            fileops::transfer,
+            fileops::undo_moves,
+            fileops::delete_items,
+            fileops::restore_from_trash,
+            fileops::find_in_trash,
+            fileops::item_info,
+            fileops::folder_stats,
+            fileops::set_attributes,
+            fileops::read_text,
+            fileops::read_bytes,
+            details::file_details,
+            shellops::shell_op,
+            // shellmenu.rs (Explorer's third-party entries in Ferret's menu)
+            shellmenu::shell_menu_items,
+            shellmenu::shell_menu_invoke,
+            // shell.rs commands (registered by the shell agent)
+            shell::show_native_menu,
+            shell::show_native_background_menu,
+            shell::show_properties,
+            shell::open_with_dialog,
+            shell::list_open_with,
+            shell::open_with,
+            shell::clipboard_write_files,
+            shell::clipboard_read_files,
+            shell::open_terminal,
+            shell::open_in_vscode,
+            shell::reveal_in_explorer,
+            // archive.rs commands (registered by the archive agent)
+            archive::archive_materialize,
+            archive::archive_extract,
+            archive::archive_extract_smart,
+            archive::compress_zip,
+            archive::archive_info,
+            archive::archive_unlock,
+            // search (whole-disk index)
+            search::search_query,
+            search::search_status,
+            search::search_install_service,
+            // Recycle Bin and Windows integration
+            recycle::recycle_info,
+            recycle::empty_recycle_bin,
+            integration::launch_targets,
+            integration::default_manager_status,
+            integration::set_default_manager,
+            integration::open_in_explorer,
+            integration::window_info,
+            integration::new_window,
+            integration::restart_elevated,
+        ])
+        .run(tauri::generate_context!())
+        .expect("error while running Ferret");
+}

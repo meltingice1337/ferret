@@ -1,0 +1,101 @@
+[package]
+name = "ferret"
+version = "0.1.0"
+description = "Ferret file manager"
+authors = ["Ferret"]
+edition = "2021"
+# A second binary (ferret-indexer) lives in src/bin; keep `cargo run` / `tauri dev` on the app.
+default-run = "ferret"
+
+[lib]
+name = "ferret_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = [] }
+tauri-plugin-opener = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+rusqlite = { version = "0.40", features = ["bundled"] }
+notify = "8"
+sysinfo = { version = "0.39", default-features = false, features = ["disk"] }
+dirs = "6"
+window-vibrancy = "0.8"
+trash = "5"
+mime_guess = "2"
+percent-encoding = "2"
+encoding_rs = "0.8"
+tauri-plugin-drag = "2"
+tauri-plugin-dialog = "2"
+# --- archive.rs (archive engine) ---
+zip = "9"
+sevenz-rust2 = "0.23"
+unrar = "0.5"
+tar = "0.4"
+flate2 = "1"
+liblzma = { version = "0.4", features = ["static"] }
+zstd = "0.14"
+bzip2 = "0.6"
+chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
+# --- end archive.rs ---
+# --- search (whole-disk index) ---
+rayon = "1.10"
+memchr = "2.7"
+nucleo-matcher = "0.3"
+parking_lot = "0.12"
+# --- end search ---
+
+[target.'cfg(windows)'.dependencies]
+winreg = "0.56"
+# --- search service (ferret-indexer) ---
+windows-service = "0.8"
+# --- shell.rs (Windows shell integration) ---
+windows = { version = "0.62", features = [
+    "Win32_Foundation",
+    "Win32_Graphics_Gdi",
+    "Win32_System_Com",
+    "Win32_System_DataExchange",
+    "Win32_System_LibraryLoader",
+    "Win32_System_Memory",
+    "Win32_System_Ole",
+    "Win32_System_Registry",
+    "Win32_System_SystemServices",
+    "Win32_UI_HiDpi",
+    "Win32_UI_Input_KeyboardAndMouse",
+    "Win32_UI_Shell",
+    "Win32_UI_Shell_Common",
+    "Win32_UI_WindowsAndMessaging",
+    # search (MFT/USN, named pipe, directory watchers)
+    "Win32_Security",
+    "Win32_Security_Authorization",
+    "Win32_Storage_FileSystem",
+    "Win32_System_IO",
+    "Win32_System_Ioctl",
+    "Win32_System_Pipes",
+    "Win32_System_Threading",
+    # shellops.rs (IFileOperation, Recycle Bin displaced properties)
+    "Win32_Storage_EnhancedStorage",
+    "Win32_System_Com_StructuredStorage",
+    "Win32_System_Variant",
+    "Win32_UI_Shell_PropertiesSystem",
+    # shellmenu.rs (packaged apps' Windows 11 context menu entries)
+    "ApplicationModel",
+    "Management_Deployment",
+] }
+# shellops.rs: the #[implement] macro expands to `::windows_core::…` paths.
+windows-core = "0.62"
+# shellmenu.rs: reads packaged apps' AppxManifest.xml
+quick-xml = "0.42"
+png = "0.18"
+base64 = "0.22"
+# --- end shell.rs ---
+
+[profile.release]
+codegen-units = 1
+lto = true
+opt-level = 3
+# No panic = "abort": jobs catch panics so a bug fails one operation, not the app.
+strip = true

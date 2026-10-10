@@ -1,0 +1,70 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "Ferret",
+  "version": "0.1.0",
+  "identifier": "com.ferret.app",
+  "build": {
+    "beforeDevCommand": "npm run dev",
+    "devUrl": "http://localhost:1420",
+    "beforeBuildCommand": "npm run build",
+    "frontendDist": "../dist"
+  },
+  "app": {
+    "windows": [
+      {
+        "label": "main",
+        "title": "Ferret",
+        "width": 1320,
+        "height": 820,
+        "minWidth": 760,
+        "minHeight": 480,
+        "center": true,
+        "decorations": false,
+        "transparent": true,
+        "shadow": true,
+        "visible": false
+      }
+    ],
+    "security": {
+      "csp": {
+        "default-src": "'self'",
+        "script-src": "'self' 'wasm-unsafe-eval'",
+        "style-src": "'self' 'unsafe-inline'",
+        "img-src": "'self' data: blob: http://fs.localhost fs: http://thumb.localhost thumb:",
+        "media-src": "'self' blob: http://fs.localhost fs:",
+        "font-src": "'self' data: blob: http://fs.localhost fs:",
+        "connect-src": "'self' ipc: http://ipc.localhost http://fs.localhost fs: data: blob:",
+        "worker-src": "'self' blob:",
+        "frame-src": "'none'",
+        "object-src": "'none'",
+        "base-uri": "'none'",
+        "form-action": "'none'"
+      },
+      "devCsp": {
+        "default-src": "'self'",
+        "script-src": "'self' 'wasm-unsafe-eval'",
+        "style-src": "'self' 'unsafe-inline'",
+        "img-src": "'self' data: blob: http://fs.localhost fs: http://thumb.localhost thumb:",
+        "media-src": "'self' blob: http://fs.localhost fs:",
+        "font-src": "'self' data: blob: http://fs.localhost fs:",
+        "connect-src": "'self' ipc: http://ipc.localhost http://fs.localhost fs: data: blob: ws://localhost:1420",
+        "worker-src": "'self' blob:",
+        "frame-src": "'none'",
+        "object-src": "'none'",
+        "base-uri": "'none'",
+        "form-action": "'none'"
+      }
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": "all",
+    "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png",
+      "icons/icon.icns",
+      "icons/icon.ico"
+    ]
+  }
+}

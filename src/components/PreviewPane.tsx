@@ -1,0 +1,181 @@
+import { ChevronLeft, ChevronRight, ExternalLink, Maximize2, X } from "lucide-solid";
+import { createEffect, createMemo, createSignal, For, on, onCleanup, onMount, Show } from "solid-js";
+import { Portal } from "solid-js/web";
+import { formatDate, formatSize, typeLabel } from "../lib/format";
+import { openFile } from "../lib/ops";
+import { basename, pathKey } from "../lib/path";
+import { activeTab, openEntry, persistSession, previewSpace, setUi, ui } from "../lib/state";
+import type { Entry } from "../lib/types";
+import { Thumb } from "./FileView";
+import Preview from "./preview/Preview";
+import type { Meta } from "./preview/renderers";
+
+/** The entry the user is looking at: the cursor if selected, or the single selection. */
+function useFocusedEntry(delay: number) {
+  const [entry, setEntry] = createSignal<Entry | null>(null);
+  const raw = createMemo(() => {
+    const t = activeTab();
+    if (!t) return null;
+    const sel = t.selection[0]();
+    const cur = t.cursor[0]();
+    const pick = cur && sel.some((p) => pathKey(p) === pathKey(cur)) ? cur : sel.length === 1 ? sel[0] : null;
+    return pick ? t.entries[0]().find((e) => pathKey(e.path) === pathKey(pick)) ?? null : null;
+  });
+  let timer: number | undefined;
+  createEffect(on(raw, (e) => {
+    clearTimeout(timer);
+    // Debounce so holding an arrow key doesn't load every file on the way.
+    timer = window.setTimeout(() => setEntry(e), entry() ? delay : 0);
+  }));
+  onCleanup(() => clearTimeout(timer));
+  return entry;
+}
+
+/** "66 lines", "1920 × 1080", "Duration 3:47" — readable on its own. */
+function metaText(m: Meta) {
+  if (m.label === "Dimensions" || m.label === "Duration") return m.value;
+  if (/^[\d,.+]+$/.test(m.value)) return `${m.value} ${m.value === "1" ? m.label.toLowerCase().replace(/s$/, "") : m.label.toLowerCase()}`;
+  return `${m.label}: ${m.value}`;
+}
+
+function folderEntry(path: string): Entry {
+  return { name: basename(path), path, isDir: true, isSymlink: false, hidden: false, size: 0, modified: null, created: null, ext: "", inArchive: false };
+}
+
+function MetaList(props: { entry: Entry; extra: Meta[] }) {
+  // Recycle Bin items: where they came from and when they were deleted.
+  const original = () => props.entry.origin && `${props.entry.origin.replace(/\\$/, "")}\\${props.entry.name}`;
+  const rows = () => props.entry.origin ? [
+    { label: "Type", value: typeLabel(props.entry) },
+    { label: "Size", value: `${formatSize(props.entry.size)}${props.entry.size >= 1024 ? ` (${props.entry.size.toLocaleString()} bytes)` : ""}` },
+    ...props.extra,
+    ...(props.entry.modified ? [{ label: "Deleted", value: formatDate(props.entry.modified) }] : []),
+    ...(props.entry.created ? [{ label: "Modified", value: formatDate(props.entry.created) }] : []),
+  ] : [
+    { label: "Type", value: typeLabel(props.entry) },
+    ...(props.entry.isDir ? [] : [{ label: "Size", value: `${formatSize(props.entry.size)}${props.entry.size >= 1024 ? ` (${props.entry.size.toLocaleString()} bytes)` : ""}` }]),
+    ...props.extra,
+    ...(props.entry.modified ? [{ label: "Modified", value: formatDate(props.entry.modified) }] : []),
+    ...(props.entry.created ? [{ label: "Created", value: formatDate(props.entry.created) }] : []),
+  ];
+  return (
+    <dl class="pv-meta">
+      <For each={rows()}>{(r) => <><dt>{r.label}</dt><dd>{r.value}</dd></>}</For>
+      <dt>{original() ? "From" : "Path"}</dt>
+      <dd class="pv-path" title="Click to copy" onClick={() => navigator.clipboard.writeText(original() || props.entry.path)}>
+        {(original() || props.entry.path).split("\\").map((seg, i) => <>{i > 0 && "\\"}{i > 0 && <wbr />}{seg}</>)}
+      </dd>
+    </dl>
+  );
+}
+
+export default function PreviewPane() {
+  const focused = useFocusedEntry(140);
+  const shown = () => focused() ?? (activeTab() ? folderEntry(activeTab().p) : null);
+  const [meta, setMeta] = createSignal<Meta[]>([]);
+
+  const startResize = (e: MouseEvent) => {
+    e.preventDefault();
+    const sx = e.clientX, sw = ui.previewWidth;
+    const move = (m: MouseEvent) => setUi("previewWidth", Math.max(260, Math.min(window.innerWidth * 0.6, sw - (m.clientX - sx))));
+    const up = () => { window.removeEventListener("mousemove", move); window.removeEventListener("mouseup", up); persistSession(); };
+    window.addEventListener("mousemove", move);
+    window.addEventListener("mouseup", up);
+  };
+
+  return (
+    <aside class="preview panel" style={{ width: `${previewSpace()}px` }}>
+      <div class="preview-resizer" onMouseDown={startResize} />
+      <Show when={shown()} keyed>
+        {(e) => (
+          <>
+            <header class="pv-head">
+              <div class="pv-head-icon"><Thumb entry={e} size={32} fallbackSize={28} /></div>
+              <div class="pv-head-text">
+                <div class="pv-name" title={e.name}>{e.name || e.path}</div>
+                <div class="pv-sub">{e.isDir && !focused() ? "Current folder" : typeLabel(e)}</div>
+              </div>
+              <Show when={!e.isDir}>
+                <button class="icon-btn" title="Open" onClick={() => openFile(e)}><ExternalLink size={15} /></button>
+                <button class="icon-btn" title="Quick Look (Space)" onClick={() => setUi("quickLook", true)}><Maximize2 size={15} /></button>
+              </Show>
+              <button class="icon-btn" title="Close preview (Alt+P)" onClick={() => { setUi("previewOpen", false); persistSession(); }}><X size={15} /></button>
+            </header>
+            <div class="pv-body"><Preview entry={e} onMeta={setMeta} /></div>
+            <MetaList entry={e} extra={meta()} />
+          </>
+        )}
+      </Show>
+    </aside>
+  );
+}
+
+export function QuickLook() {
+  const t = () => activeTab();
+  const focused = useFocusedEntry(0);
+  const [meta, setMeta] = createSignal<Meta[]>([]);
+  const list = () => t()?.ordered[0]() ?? [];
+  const index = () => {
+    const e = focused();
+    return e ? list().findIndex((x) => pathKey(x.path) === pathKey(e.path)) : -1;
+  };
+
+  const go = (delta: number) => {
+    const l = list();
+    if (!l.length) return;
+    const cur = t().cursor[0]();
+    const i = cur ? l.findIndex((x) => pathKey(x.path) === pathKey(cur)) : index();
+    const next = l[(i + delta + l.length) % l.length];
+    const tab = t();
+    tab.selection[1]([next.path]);
+    tab.cursor[1](next.path);
+    tab.anchor[1](next.path);
+    tab.reveal[1]((n) => n + 1);
+  };
+  const close = () => {
+    setUi("quickLook", false);
+    requestAnimationFrame(() => document.querySelector<HTMLElement>(".files")?.focus());
+  };
+
+  onMount(() => {
+    const onKey = (e: KeyboardEvent) => {
+      const media = (e.target as HTMLElement).closest("video, audio, input, textarea");
+      if (e.key === "Escape" || (e.key === " " && !media)) { e.preventDefault(); e.stopPropagation(); close(); }
+      else if (e.key === "ArrowRight" || e.key === "ArrowDown") { if (media && e.key === "ArrowRight") return; e.preventDefault(); e.stopPropagation(); go(1); }
+      else if (e.key === "ArrowLeft" || e.key === "ArrowUp") { if (media && e.key === "ArrowLeft") return; e.preventDefault(); e.stopPropagation(); go(-1); }
+      else if (e.key === "Enter") {
+        e.preventDefault(); e.stopPropagation();
+        const f = focused();
+        if (f) { close(); openEntry(t(), f); }
+      }
+    };
+    window.addEventListener("keydown", onKey, true);
+    onCleanup(() => window.removeEventListener("keydown", onKey, true));
+  });
+
+  return (
+    <Portal>
+      <div class="ql-backdrop" onMouseDown={(e) => e.target === e.currentTarget && close()}>
+        <Show when={focused()} keyed fallback={<div class="ql pv-note">Select a file to preview</div>}>
+          {(e) => (
+            <div class="ql">
+              <header class="ql-head">
+                <div class="pv-head-icon"><Thumb entry={e} size={24} fallbackSize={20} /></div>
+                <div class="pv-head-text">
+                  <div class="pv-name">{e.name}</div>
+                  <div class="pv-sub">{[typeLabel(e), e.isDir ? "" : formatSize(e.size), ...meta().slice(0, 3).map(metaText)].filter(Boolean).join(" · ")}</div>
+                </div>
+                <span class="ql-count">{index() + 1} / {list().length}</span>
+                <button class="icon-btn" title="Previous (←)" onClick={() => go(-1)}><ChevronLeft size={16} /></button>
+                <button class="icon-btn" title="Next (→)" onClick={() => go(1)}><ChevronRight size={16} /></button>
+                <button class="btn" onClick={() => { close(); openEntry(t(), e); }}><ExternalLink size={14} /> Open</button>
+                <button class="icon-btn" title="Close (Esc / Space)" onClick={close}><X size={16} /></button>
+              </header>
+              <div class="ql-body"><Preview entry={e} large onMeta={setMeta} /></div>
+            </div>
+          )}
+        </Show>
+      </div>
+    </Portal>
+  );
+}

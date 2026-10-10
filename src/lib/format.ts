@@ -1,0 +1,86 @@
+import type { Entry } from "./types";
+
+export type Kind =
+  | "folder" | "image" | "video" | "audio" | "code" | "text" | "doc" | "sheet"
+  | "pdf" | "archive" | "exe" | "font" | "data" | "other";
+
+const groups: [Kind, string][] = [
+  ["image", "jpg jpeg png gif webp avif heic heif bmp tif tiff ico svg raw cr2 nef arw dng psd"],
+  ["video", "mp4 mkv mov avi webm m4v wmv flv mpg mpeg ts 3gp"],
+  ["audio", "mp3 wav flac ogg m4a aac opus wma aiff mid"],
+  ["code", "js mjs cjs ts tsx jsx rs py go java kt c h cpp hpp cc cs rb php swift lua sh bash zsh ps1 bat cmd sql vue svelte html css scss less dart zig nim r scala ex exs hs ml clj"],
+  ["data", "json jsonc yaml yml toml xml ini cfg conf env lock"],
+  ["text", "txt md markdown rst log nfo"],
+  ["doc", "doc docx odt rtf pages ppt pptx key odp epub"],
+  ["sheet", "csv tsv xls xlsx ods numbers parquet"],
+  ["pdf", "pdf"],
+  ["archive", "zip rar 7z tar gz tgz bz2 xz zst iso cab"],
+  ["exe", "exe msi appx msix dll sys lnk url"],
+  ["font", "ttf otf woff woff2"],
+];
+
+const EXT = new Map<string, Kind>();
+for (const [kind, list] of groups) for (const e of list.split(" ")) EXT.set(e, kind);
+
+export function kindOf(e: Pick<Entry, "isDir" | "ext">): Kind {
+  if (e.isDir) return "folder";
+  return EXT.get(e.ext) ?? "other";
+}
+
+export const KIND_LABEL: Record<Kind, string> = {
+  folder: "Folder", image: "Image", video: "Video", audio: "Audio", code: "Source code",
+  text: "Text", doc: "Document", sheet: "Spreadsheet", pdf: "PDF", archive: "Archive",
+  exe: "Application", font: "Font", data: "Data", other: "File",
+};
+
+const EXT_LABEL: Record<string, string> = {
+  md: "Markdown", markdown: "Markdown", txt: "Text document", log: "Log file", pdf: "PDF document",
+  csv: "CSV file", tsv: "TSV file", zip: "ZIP archive", "7z": "7-Zip archive", rar: "RAR archive",
+  exe: "Application", msi: "Installer", lnk: "Shortcut", url: "Internet shortcut", dll: "Library",
+  svg: "SVG image", ico: "Icon", ttf: "TrueType font", otf: "OpenType font", woff2: "Web font",
+  docx: "Word document", doc: "Word document", xlsx: "Excel workbook", xls: "Excel workbook",
+  pptx: "PowerPoint deck", ppt: "PowerPoint deck", ini: "Settings file", iso: "Disc image",
+};
+
+export const plural = (n: number, word: string) => `${n.toLocaleString()} ${word}${n === 1 ? "" : "s"}`;
+
+export function typeLabel(e: Entry): string {
+  if (!e.isDir && EXT_LABEL[e.ext]) return EXT_LABEL[e.ext];
+  const k = kindOf(e);
+  if (k === "other") return e.ext ? `${e.ext.toUpperCase()} file` : "File";
+  if (k === "code" || k === "data") return `${e.ext.toUpperCase()} ${k === "code" ? "source" : "file"}`;
+  return KIND_LABEL[k];
+}
+
+export function formatSize(bytes: number): string {
+  if (bytes < 1024) return `${bytes} B`;
+  const units = ["KB", "MB", "GB", "TB"];
+  let v = bytes / 1024;
+  let i = 0;
+  while (v >= 1024 && i < units.length - 1) {
+    v /= 1024;
+    i++;
+  }
+  return `${v < 10 ? v.toFixed(1) : Math.round(v)} ${units[i]}`;
+}
+
+const pad = (n: number) => String(n).padStart(2, "0");
+
+export function formatDate(ms: number | null): string {
+  if (ms == null) return "";
+  const d = new Date(ms);
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`;
+}
+
+/** Readable text color (black/white) for a hex background. */
+export function onColor(hex: string): string {
+  const m = /^#?([0-9a-f]{6})$/i.exec(hex);
+  if (!m) return "#fff";
+  const n = parseInt(m[1], 16);
+  const lin = (c: number) => {
+    const s = c / 255;
+    return s <= 0.03928 ? s / 12.92 : ((s + 0.055) / 1.055) ** 2.4;
+  };
+  const L = 0.2126 * lin(n >> 16) + 0.7152 * lin((n >> 8) & 255) + 0.0722 * lin(n & 255);
+  return L > 0.4 ? "#111" : "#fff";
+}
