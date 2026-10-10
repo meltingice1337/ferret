@@ -1,14 +1,14 @@
 import { ChevronLeft, ChevronRight, ExternalLink, Maximize2, X } from "lucide-solid";
 import { createEffect, createMemo, createSignal, For, on, onCleanup, onMount, Show } from "solid-js";
 import { Portal } from "solid-js/web";
-import { formatDate, formatSize, typeLabel } from "../lib/format";
+import { formatDate, formatSize, kindOf, typeLabel } from "../lib/format";
 import { openFile } from "../lib/ops";
 import { basename, pathKey } from "../lib/path";
 import { activeTab, openEntry, persistSession, previewSpace, setUi, ui } from "../lib/state";
 import type { Entry } from "../lib/types";
 import { Thumb } from "./FileView";
 import Preview from "./preview/Preview";
-import type { Meta } from "./preview/renderers";
+import { imageUrl, type Meta } from "./preview/renderers";
 
 /** The entry the user is looking at: the cursor if selected, or the single selection. */
 function useFocusedEntry(delay: number) {
@@ -86,23 +86,23 @@ export default function PreviewPane() {
   return (
     <aside class="preview panel" style={{ width: `${previewSpace()}px` }}>
       <div class="preview-resizer" onMouseDown={startResize} />
-      <Show when={shown()} keyed>
+      <Show when={shown()}>
         {(e) => (
           <>
             <header class="pv-head">
-              <div class="pv-head-icon"><Thumb entry={e} size={32} fallbackSize={28} /></div>
+              <div class="pv-head-icon"><Thumb entry={e()} size={32} fallbackSize={28} /></div>
               <div class="pv-head-text">
-                <div class="pv-name" title={e.name}>{e.name || e.path}</div>
-                <div class="pv-sub">{e.isDir && !focused() ? "Current folder" : typeLabel(e)}</div>
+                <div class="pv-name" title={e().name}>{e().name || e().path}</div>
+                <div class="pv-sub">{e().isDir && !focused() ? "Current folder" : typeLabel(e())}</div>
               </div>
-              <Show when={!e.isDir}>
-                <button class="icon-btn" title="Open" onClick={() => openFile(e)}><ExternalLink size={15} /></button>
+              <Show when={!e().isDir}>
+                <button class="icon-btn" title="Open" onClick={() => openFile(e())}><ExternalLink size={15} /></button>
                 <button class="icon-btn" title="Quick Look (Space)" onClick={() => setUi("quickLook", true)}><Maximize2 size={15} /></button>
               </Show>
               <button class="icon-btn" title="Close preview (Alt+P)" onClick={() => { setUi("previewOpen", false); persistSession(); }}><X size={15} /></button>
             </header>
-            <div class="pv-body"><Preview entry={e} onMeta={setMeta} /></div>
-            <MetaList entry={e} extra={meta()} />
+            <div class="pv-body"><Preview entry={e()} onMeta={setMeta} /></div>
+            <MetaList entry={e()} extra={meta()} />
           </>
         )}
       </Show>
@@ -132,6 +132,23 @@ export function QuickLook() {
     tab.anchor[1](next.path);
     tab.reveal[1]((n) => n + 1);
   };
+  // Decode the neighbouring pictures ahead of time (and hold on to them) so stepping is instant.
+  const warm: HTMLImageElement[] = [];
+  createEffect(on(index, (i) => {
+    const l = list();
+    if (i < 0 || !l.length) return;
+    const next = [l[(i + 1) % l.length], l[(i - 1 + l.length) % l.length]]
+      .filter((n) => !n.isDir && !n.inArchive && kindOf(n) === "image")
+      .map((n) => {
+        const img = new Image();
+        img.src = imageUrl(n.path, n.ext);
+        img.decode().catch(() => {});
+        return img;
+      });
+    warm.splice(0, warm.length, ...next);
+  }));
+  onCleanup(() => warm.splice(0));
+
   const close = () => {
     setUi("quickLook", false);
     requestAnimationFrame(() => document.querySelector<HTMLElement>(".files")?.focus());
@@ -156,22 +173,22 @@ export function QuickLook() {
   return (
     <Portal>
       <div class="ql-backdrop" onMouseDown={(e) => e.target === e.currentTarget && close()}>
-        <Show when={focused()} keyed fallback={<div class="ql pv-note">Select a file to preview</div>}>
+        <Show when={focused()} fallback={<div class="ql pv-note">Select a file to preview</div>}>
           {(e) => (
             <div class="ql">
               <header class="ql-head">
-                <div class="pv-head-icon"><Thumb entry={e} size={24} fallbackSize={20} /></div>
+                <div class="pv-head-icon"><Thumb entry={e()} size={24} fallbackSize={20} /></div>
                 <div class="pv-head-text">
-                  <div class="pv-name">{e.name}</div>
-                  <div class="pv-sub">{[typeLabel(e), e.isDir ? "" : formatSize(e.size), ...meta().slice(0, 3).map(metaText)].filter(Boolean).join(" · ")}</div>
+                  <div class="pv-name">{e().name}</div>
+                  <div class="pv-sub">{[typeLabel(e()), e().isDir ? "" : formatSize(e().size), ...meta().slice(0, 3).map(metaText)].filter(Boolean).join(" · ")}</div>
                 </div>
                 <span class="ql-count">{index() + 1} / {list().length}</span>
                 <button class="icon-btn" title="Previous (←)" onClick={() => go(-1)}><ChevronLeft size={16} /></button>
                 <button class="icon-btn" title="Next (→)" onClick={() => go(1)}><ChevronRight size={16} /></button>
-                <button class="btn" onClick={() => { close(); openEntry(t(), e); }}><ExternalLink size={14} /> Open</button>
+                <button class="btn" onClick={() => { close(); openEntry(t(), e()); }}><ExternalLink size={14} /> Open</button>
                 <button class="icon-btn" title="Close (Esc / Space)" onClick={close}><X size={16} /></button>
               </header>
-              <div class="ql-body"><Preview entry={e} large onMeta={setMeta} /></div>
+              <div class="ql-body"><Preview entry={e()} large onMeta={setMeta} /></div>
             </div>
           )}
         </Show>

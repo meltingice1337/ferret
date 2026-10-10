@@ -15,6 +15,7 @@ import FileIcon from "./FileIcon";
 import { binPlaceMenu, placeMenu } from "./menus";
 import { beginDrag, beginReorder } from "../lib/drag";
 import { pathKey } from "../lib/path";
+import { showWhatsNew, updater } from "../lib/updater";
 
 const KNOWN_ICONS: Record<string, any> = {
   home: House, desktop: Monitor, documents: FileText, downloads: Download, pictures: Image, music: Music, videos: Video,
@@ -152,9 +153,30 @@ export default function Sidebar(props: { overlay?: boolean }) {
         <button class="side-item" onClick={() => setUi("settingsOpen", true)} title="Settings (Ctrl+,)">
           <SettingsIcon size={15} /><span>Settings</span>
         </button>
+        <AppVersion />
       </div>
       <div class="resizer" onMouseDown={startResize} onDblClick={() => { setUi("sidebarWidth", 248); persistSession(); }} />
     </aside>
+  );
+}
+
+/** "v0.3.0" in the corner (plus DEV in dev builds); a dot when an update is waiting. */
+function AppVersion() {
+  const fresh = () => updater.phase === "available" && !!updater.version;
+  const open = () => {
+    if (fresh()) return showWhatsNew();
+    setUi("settingsOpen", true);
+    requestAnimationFrame(() => document.querySelector(".card.about")?.scrollIntoView({ block: "end", behavior: "smooth" }));
+  };
+  return (
+    <Show when={updater.current}>
+      <button class="app-version" classList={{ fresh: fresh() }} onClick={open}
+        title={fresh() ? `Ferret ${updater.version} is available: see what's new` : `Ferret ${updater.current}${import.meta.env.DEV ? " (development build)" : ""}`}>
+        <Show when={import.meta.env.DEV}><span class="dev-pill">DEV</span></Show>
+        <span>v{updater.current}</span>
+        <Show when={fresh()}><span class="update-dot" /></Show>
+      </button>
+    </Show>
   );
 }
 

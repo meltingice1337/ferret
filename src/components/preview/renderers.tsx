@@ -210,39 +210,131 @@ export function MarkdownView(props: { path: string; name: string; ext: string; s
 
 const NATIVE_IMG = new Set(["jpg", "jpeg", "png", "gif", "webp", "avif", "svg", "bmp", "ico", "apng", "jfif"]);
 
+/** What the image viewer loads for a file: browser-native formats directly, others via the shell. */
+export const imageUrl = (path: string, ext: string) => (NATIVE_IMG.has(ext) ? fileUrl(path) : thumbUrl(path, 1024));
+
+const MAX_ZOOM = 16;
+const clamp01 = (n: number) => Math.min(1, Math.max(0, n));
+
+/**
+ * Click zooms in on the clicked spot, then the picture follows the mouse so moving across it
+ * explores the whole image. Click again, or pick another file, to zoom back out. The wheel
+ * changes the magnification (in the pane only once zoomed, so the pane still scrolls).
+ */
 export function ImageView(props: { path: string; ext: string; setMeta: SetMeta; large?: boolean }) {
   const [failed, setFailed] = createSignal(false);
-  const [zoom, setZoom] = createSignal(1);
-  const [pan, setPan] = createSignal({ x: 0, y: 0 });
-  const src = () => (NATIVE_IMG.has(props.ext) && !failed() ? fileUrl(props.path) : thumbUrl(props.path, 1024));
-  createEffect(on(() => props.path, () => { setZoom(1); setPan({ x: 0, y: 0 }); setFailed(false); }));
+  const want = () => (failed() ? thumbUrl(props.path, 1024) : imageUrl(props.path, props.ext));
+  // The next picture is decoded before it replaces the current one, so stepping through a
+  // folder never flashes an empty frame.
+  const [src, setSrc] = createSignal(want());
+  createEffect(on(want, (url) => {
+    const next = new Image();
+    next.src = url;
+    next.decode().catch(() => {}).then(() => { if (want() === url) setSrc(url); });
+  }, { defer: true }));
 
-  const onWheel = (e: WheelEvent) => {
-    if (!props.large) return;
-    e.preventDefault();
-    setZoom((z) => Math.max(0.1, Math.min(16, z * (e.deltaY < 0 ? 1.15 : 1 / 1.15))));
+  let box!: HTMLDivElement;
+  let pic!: HTMLImageElement;
+  const [zoomed, setZoomed] = createSignal(false);
+  const [factor, setFactor] = createSignal(1);
+  // `goal` follows the mouse and the clicks; `cur` eases toward it every frame. x/y are where
+  // the mouse is across the viewer (0–1), which picks the part of the picture shown.
+  const cur = { z: 1, x: 0.5, y: 0.5 };
+  const goal = { z: 1, x: 0.5, y: 0.5 };
+  let raf = 0;
+  let last = 0;
+
+  const apply = () => {
+    if (cur.z === 1) {
+      pic.style.transform = "";
+      return;
+    }
+    // A zoomed picture larger than the viewer always fills it: the mouse at the left edge
+    // shows the picture's left edge, and so on. A smaller one stays centered.
+    const bw = box.clientWidth, bh = box.clientHeight;
+    const w = pic.offsetWidth * cur.z, h = pic.offsetHeight * cur.z;
+    const left = w > bw ? (bw - w) * cur.x : (bw - w) / 2;
+    const top = h > bh ? (bh - h) * cur.y : (bh - h) / 2;
+    pic.style.transform = `translate(${left - pic.offsetLeft}px, ${top - pic.offsetTop}px) scale(${cur.z})`;
   };
-  const onDown = (e: MouseEvent) => {
-    if (!props.large || e.button !== 0) return;
-    const origin = pan();
-    const mv = (m: MouseEvent) => setPan({ x: origin.x + (m.clientX - e.clientX), y: origin.y + (m.clientY - e.clientY) });
-    const up = () => { window.removeEventListener("mousemove", mv); window.removeEventListener("mouseup", up); };
-    window.addEventListener("mousemove", mv);
-    window.addEventListener("mouseup", up);
+  const frame = (now: number) => {
+    const dt = Math.min(64, now - (last || now - 16));
+    last = now;
+    const ease = (from: number, to: number, ms: number) => {
+      const v = from + (to - from) * (1 - Math.exp(-dt / ms));
+      return Math.abs(to - v) < 0.0005 ? to : v;
+    };
+    cur.z = ease(cur.z, goal.z, 70);
+    cur.x = ease(cur.x, goal.x, 55);
+    cur.y = ease(cur.y, goal.y, 55);
+    apply();
+    const settled = cur.z === goal.z && cur.x === goal.x && cur.y === goal.y;
+    raf = settled ? 0 : requestAnimationFrame(frame);
+    if (settled) last = 0;
+  };
+  const animate = () => { if (!raf) raf = requestAnimationFrame(frame); };
+  onCleanup(() => cancelAnimationFrame(raf));
+
+  /** Where the mouse is across the viewer. The outer 8% counts as the edge, so the picture's
+   *  edges come into view before the mouse leaves the viewer. */
+  const pointAt = (e: MouseEvent) => {
+    const r = box.getBoundingClientRect();
+    return {
+      x: clamp01(((e.clientX - r.left) / r.width - 0.08) / 0.84),
+      y: clamp01(((e.clientY - r.top) / r.height - 0.08) / 0.84),
+    };
+  };
+  const setZoom = (z: number, e: MouseEvent) => {
+    if (goal.z === 1) {
+      // Zoom in toward the spot under the mouse.
+      const p = pointAt(e);
+      cur.x = goal.x = p.x;
+      cur.y = goal.y = p.y;
+    }
+    goal.z = z <= 1.02 ? 1 : Math.min(MAX_ZOOM, z);
+    setZoomed(goal.z > 1);
+    setFactor(Math.round(goal.z * 10) / 10);
+    animate();
+  };
+  const reset = () => {
+    cancelAnimationFrame(raf);
+    raf = 0;
+    Object.assign(cur, { z: 1, x: 0.5, y: 0.5 });
+    Object.assign(goal, cur);
+    setZoomed(false);
+    if (pic) apply();
+  };
+  createEffect(on(() => props.path, () => { setFailed(false); reset(); }, { defer: true }));
+
+  const onClick = (e: MouseEvent) => {
+    if (goal.z > 1) return setZoom(1, e);
+    // Big pictures open at about 1:1; small ones at least double.
+    const scale = (pic.naturalWidth || pic.offsetWidth) / pic.offsetWidth;
+    setZoom(Math.min(4, Math.max(2, scale)), e);
+  };
+  const onMove = (e: MouseEvent) => {
+    if (goal.z === 1) return;
+    Object.assign(goal, pointAt(e));
+    animate();
+  };
+  const onWheel = (e: WheelEvent) => {
+    if (!props.large && goal.z === 1) return;
+    e.preventDefault();
+    setZoom(goal.z * (e.deltaY < 0 ? 1.25 : 0.8), e);
   };
 
   return (
-    <div class="pv-image" classList={{ large: props.large, zoomed: zoom() !== 1 }} onWheel={onWheel} onMouseDown={onDown}
-      onDblClick={() => { setZoom(zoom() === 1 ? 2 : 1); setPan({ x: 0, y: 0 }); }}>
+    <div class="pv-image" classList={{ large: props.large, zoomed: zoomed() }} ref={box}
+      onClick={onClick} onMouseMove={onMove} onWheel={onWheel}>
       <img
+        ref={pic}
         src={src()}
         draggable={false}
-        style={{ transform: `translate(${pan().x}px, ${pan().y}px) scale(${zoom()})` }}
         onLoad={(e) => props.setMeta([{ label: "Dimensions", value: `${e.currentTarget.naturalWidth} × ${e.currentTarget.naturalHeight}` }])}
         onError={() => { if (!failed()) setFailed(true); }}
         alt=""
       />
-      <Show when={props.large && zoom() !== 1}><div class="pv-zoom">{Math.round(zoom() * 100)}%</div></Show>
+      <Show when={zoomed()}><div class="pv-zoom">{factor()}×</div></Show>
     </div>
   );
 }

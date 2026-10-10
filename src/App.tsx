@@ -3,8 +3,8 @@ import ContextMenu from "./components/ContextMenu";
 import { AskDialog, BatchRenameDialog, ConflictDialog, PropertiesDialog } from "./components/Dialogs";
 import FileView from "./components/FileView";
 import { DragGhost, JobsPanel } from "./components/Jobs";
-import UpdateCard from "./components/UpdateCard";
-import { checkForUpdate, startUpdater } from "./lib/updater";
+import UpdateCard, { WhatsNewDialog } from "./components/UpdateCard";
+import { checkForUpdate, setUpdater, startUpdater, updater } from "./lib/updater";
 import { addShellEntries, backgroundMenu, itemMenu } from "./components/menus";
 import PreviewPane, { QuickLook } from "./components/PreviewPane";
 import SettingsDialog from "./components/SettingsDialog";
@@ -92,10 +92,11 @@ function closeTopModal() {
   else if (ui.conflict) { const c = ui.conflict; setUi("conflict", null); c.resolve(null); }
   else if (ui.batchRename) setUi("batchRename", null);
   else if (ui.properties) setUi("properties", null);
+  else if (updater.notesOpen) setUpdater("notesOpen", false);
   else if (ui.settingsOpen) setUi("settingsOpen", false);
 }
 
-const modalOpen = () => !!(ui.dialog || ui.conflict || ui.properties || ui.batchRename || ui.settingsOpen || ui.quickLook || ui.palette);
+const modalOpen = () => !!(ui.dialog || ui.conflict || ui.properties || ui.batchRename || ui.settingsOpen || ui.quickLook || ui.palette || updater.notesOpen);
 
 /** Opens Ferret's context menu for the focused item (Shift+F10 / Menu key). */
 function keyboardMenu() {
@@ -278,6 +279,7 @@ export default function App() {
       </Show>
       <ContextMenu />
       <SettingsDialog />
+      <WhatsNewDialog />
       <AskDialog />
       <ConflictDialog />
       <PropertiesDialog />

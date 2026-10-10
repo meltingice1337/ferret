@@ -122,7 +122,8 @@ input, select { font: inherit; color: inherit; }
 /* ---------- sidebar ---------- */
 .sidebar { display: flex; flex-direction: column; position: relative; flex: none; min-width: 0; }
 .sidebar-scroll { flex: 1; overflow-y: auto; overflow-x: hidden; padding: 10px 8px 14px; mask-image: linear-gradient(to bottom, #000 calc(100% - 22px), transparent); }
-.sidebar-foot { padding: 6px 8px 8px; border-top: 1px solid var(--line); }
+.sidebar-foot { padding: 6px 8px 8px; border-top: 1px solid var(--line); display: flex; align-items: center; gap: 4px; }
+.sidebar-foot .side-item { flex: 1; min-width: 0; }
 .resizer { position: absolute; top: 0; right: -6px; width: 8px; height: 100%; cursor: col-resize; z-index: 5; }
 .resizer:hover { background: linear-gradient(90deg, transparent 3px, var(--accent-line) 3px, var(--accent-line) 5px, transparent 5px); }
 
@@ -320,15 +321,6 @@ input, select { font: inherit; color: inherit; }
 .sb-btn.icon { padding: 0 7px; }
 .sb-btn:hover { background: var(--hover); color: var(--fg); }
 .sb-btn.on { color: var(--accent); }
-.sb-sep { width: 1px; height: 16px; background: var(--line-2); margin: 0 4px; }
-.view-source { display: inline-flex; align-items: center; gap: 7px; height: 26px; padding: 0 10px; border-radius: 13px; color: var(--fg-3); white-space: nowrap; }
-.view-source:hover { background: var(--hover); color: var(--fg); }
-.view-source .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--fg-3); }
-.view-source.folder .dot { background: var(--accent); }
-.view-source.inherited .dot { background: color-mix(in oklab, var(--accent) 55%, var(--fg-3)); }
-.view-source.profile .dot { background: #4fc3f7; }
-.view-source.dirty { color: #f59e0b; }
-.view-source.dirty .dot { background: #f59e0b; }
 .save-view { position: absolute; right: 10px; bottom: 44px; padding: 7px 12px; border-radius: 8px; background: var(--accent); color: var(--on-accent); box-shadow: var(--shadow); font-weight: 600; }
 
 .seg { display: inline-flex; padding: 2px; border-radius: 8px; background: var(--hover); gap: 2px; }

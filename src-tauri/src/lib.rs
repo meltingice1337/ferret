@@ -79,8 +79,15 @@ pub fn run() {
             // The window starts hidden so a restarted window appears right where the old one was.
             if let Some(window) = app.get_webview_window("main") {
                 shell::set_big_icon(&window);
-                if admin {
-                    let _ = window.set_title("Ferret (Administrator)");
+                // Development builds say so in the taskbar, so they can't be mistaken for the installed app.
+                let title = match (admin, cfg!(debug_assertions)) {
+                    (true, true) => Some("Ferret (Dev, Administrator)"),
+                    (true, false) => Some("Ferret (Administrator)"),
+                    (false, true) => Some("Ferret (Dev)"),
+                    (false, false) => None,
+                };
+                if let Some(title) = title {
+                    let _ = window.set_title(title);
                 }
                 integration::apply_placement(&window);
                 let _ = window.show();

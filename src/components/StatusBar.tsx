@@ -1,14 +1,12 @@
 import { ArrowDownUp, Eye, EyeOff, Layers, LayoutGrid, List, LoaderCircle, PanelRight } from "lucide-solid";
 import { createMemo, Show } from "solid-js";
 import { formatSize, plural } from "../lib/format";
-import { basename, isRecycle, pathKey } from "../lib/path";
+import { isRecycle, pathKey } from "../lib/path";
 import {
-  activeTab, openMenu, persistSession, previewSpace, resetView, saveViewForFolder, setUi, settings, ui, updateView, type MenuItem,
+  activeTab, openMenu, persistSession, previewSpace, saveViewForFolder, setUi, settings, ui, updateView,
 } from "../lib/state";
 import type { GroupBy, SortBy } from "../lib/types";
 import { GROUP_LABELS, SORT_LABELS } from "./FileView";
-
-const PROFILE_LABEL = { media: "Media", code: "Code", downloads: "Downloads" } as const;
 
 export default function StatusBar() {
   const t = () => activeTab();
@@ -22,29 +20,6 @@ export default function StatusBar() {
     const bytes = selected.reduce((a, e) => a + (e.isDir ? 0 : e.size), 0);
     return { total: shown.length, hidden: entries.length - shown.length, selected: selected.length, bytes, anyDir: selected.some((e) => e.isDir), anyFile: selected.some((e) => !e.isDir) };
   });
-
-  const source = () => {
-    if (t().dirty[0]()) return { text: "Unsaved view", cls: "dirty" };
-    switch (t().source[0]()) {
-      case "folder": return { text: "Remembered for this folder", cls: "folder" };
-      case "inherited": return { text: `Inherited from ${basename(t().sourcePath[0]() ?? "")}`, cls: "inherited" };
-      case "profile": return { text: `${PROFILE_LABEL[t().profile[0]()!] ?? "Folder"} profile`, cls: "profile" };
-      default: return { text: "Default view", cls: "global" };
-    }
-  };
-
-  const sourceMenu = (e: MouseEvent) => {
-    const r = (e.currentTarget as HTMLElement).getBoundingClientRect();
-    const items: MenuItem[] = [
-      { heading: true, label: "Remembered view" },
-      { label: "Save for this folder", disabled: t().source[0]() === "folder" && !t().dirty[0](), action: () => saveViewForFolder(t()) },
-      { label: "Apply to this folder and all subfolders", action: () => saveViewForFolder(t(), true) },
-      { label: "Reset to default", disabled: t().source[0]() !== "folder", action: () => resetView(t()) },
-      { separator: true },
-      { label: "View settings…", action: () => setUi("settingsOpen", true) },
-    ];
-    openMenu(r.left, r.top - 8, items);
-  };
 
   const sortMenu = (e: MouseEvent) => {
     const r = (e.currentTarget as HTMLElement).getBoundingClientRect();
@@ -79,10 +54,6 @@ export default function StatusBar() {
         <Show when={t().filter[0]()}><span class="muted">· filtered</span></Show>
       </div>
       <div class="status-right">
-        <button class={`view-source ${source().cls}`} onClick={sourceMenu} title="Where this folder's view settings come from">
-          <span class="dot" />{source().text}
-        </button>
-        <span class="sb-sep" />
         <button class="sb-btn" onClick={sortMenu} title="Sort">
           <ArrowDownUp size={13} /><span>{isRecycle(t().p) && v().sortBy === "modified" ? "Date deleted" : SORT_LABELS[v().sortBy]}</span>
         </button>

@@ -8,7 +8,7 @@ import {
 import { SECTIONS, setPlaceShown, setSectionShown } from "./Sidebar";
 import type { GroupBy, ProfileName, Settings, SortBy, ViewSettings } from "../lib/types";
 import { GROUP_LABELS, SORT_LABELS } from "./FileView";
-import { checkForUpdate, installUpdate, updater } from "../lib/updater";
+import { checkForUpdate, showWhatsNew, updater } from "../lib/updater";
 
 export const ACCENTS = [
   { name: "Rose", value: "#e2457f" },
@@ -318,14 +318,14 @@ function About() {
     <section class="card about">
       <img src="/ferret-256.png" alt="" width={56} height={56} />
       <div class="about-text">
-        <h3>Ferret <span class="muted">{updater.current}</span></h3>
+        <h3>Ferret <span class="muted">{updater.current}</span><Show when={import.meta.env.DEV}><span class="dev-pill">DEV</span></Show></h3>
         <p class="card-desc">A fast, keyboard-first file manager for Windows. Search everything with Ctrl+K.</p>
         <Show when={status()}><p class="card-desc">{status()}</p></Show>
       </div>
       <Show when={updater.phase === "available"} fallback={
         <button class="btn" disabled={updater.phase !== "idle" && updater.phase !== "error"} onClick={() => checkForUpdate(true)}>Check for updates</button>
       }>
-        <button class="btn accent" onClick={installUpdate}>Update & restart</button>
+        <button class="btn accent" onClick={showWhatsNew}>What's new</button>
       </Show>
     </section>
   );

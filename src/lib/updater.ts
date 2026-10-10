@@ -18,6 +18,10 @@ export const [updater, setUpdater] = createStore({
   phase: "idle" as UpdatePhase,
   version: "",
   notes: "",
+  /** Release date of the offered version (YYYY-MM-DD). */
+  date: "",
+  /** The "What's new" dialog is open. */
+  notesOpen: false,
   done: 0,
   total: 0,
   error: "",
@@ -41,7 +45,7 @@ export async function checkForUpdate(manual = false) {
       return;
     }
     pending = u;
-    setUpdater({ phase: "available", version: u.version, notes: u.body ?? "" });
+    setUpdater({ phase: "available", version: u.version, notes: u.body ?? "", date: u.date?.match(/^\d{4}-\d{2}-\d{2}/)?.[0] ?? "" });
     if (manual) setUpdater("dismissed", "");
   } catch (e) {
     setUpdater({ phase: manual ? "error" : "idle", error: String(e) });
@@ -51,6 +55,7 @@ export async function checkForUpdate(manual = false) {
 
 /** Downloads, verifies and runs the installer, then restarts into the new version. */
 export async function installUpdate() {
+  setUpdater("notesOpen", false);
   if (!pending) return;
   setUpdater({ phase: "downloading", done: 0, total: 0, error: "" });
   try {
@@ -66,11 +71,41 @@ export async function installUpdate() {
   }
 }
 
-export const dismissUpdate = () => setUpdater({ dismissed: updater.version, phase: updater.phase === "error" ? "idle" : updater.phase });
+export const dismissUpdate = () => setUpdater({ dismissed: updater.version, notesOpen: false, phase: updater.phase === "error" ? "idle" : updater.phase });
+
+export const showWhatsNew = () => setUpdater("notesOpen", true);
+
+const SECTIONS: Record<string, string> = { feat: "New", fix: "Fixes", perf: "Improvements", refactor: "Improvements", style: "Improvements" };
+const ORDER = ["New", "Improvements", "Fixes", "Other changes"];
+
+/**
+ * Release notes are the commit subjects since the last release ("- feat: …", "- fix(x): …")
+ * plus a "Full changelog" link. Groups them for reading.
+ */
+export function parseNotes(md: string) {
+  const groups = new Map<string, string[]>();
+  let link = "";
+  for (const raw of md.split(/\r?\n/)) {
+    const line = raw.trim().replace(/^[-*]\s+/, "");
+    if (!line || /^no changes listed$/i.test(line)) continue;
+    const full = line.match(/^\*\*full changelog:?\*\*:?\s*(\S+)/i);
+    if (full) { link = full[1]; continue; }
+    const m = line.match(/^(\w+)(?:\([^)]*\))?!?:\s*(.+)$/);
+    if (m?.[1].toLowerCase() === "release") continue;
+    const title = m ? SECTIONS[m[1].toLowerCase()] ?? "Other changes" : "Other changes";
+    const text = m ? m[2] : line;
+    groups.set(title, [...(groups.get(title) ?? []), text[0].toUpperCase() + text.slice(1)]);
+  }
+  return {
+    sections: ORDER.filter((t) => groups.has(t)).map((title) => ({ title, items: groups.get(title)! })),
+    link,
+  };
+}
 
 /** Starts the periodic check; also nudges about an outdated search service once. */
 export function startUpdater() {
   getVersion().then((v) => setUpdater("current", v)).catch(() => {});
+  if (import.meta.env.DEV) (window as any).__ferretUpdater = { updater, setUpdater };
   // Dev builds would offer the latest release over themselves.
   if (import.meta.env.DEV) return;
   setTimeout(() => {
