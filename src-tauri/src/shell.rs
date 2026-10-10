@@ -1781,7 +1781,8 @@ mod tests {
         assert_eq!(escape_wt(r"C:\a;b"), r"C:\a\;b");
         assert_eq!(ps_quote(r"C:\it's"), r"'C:\it''s'");
         assert_eq!(expand_env("%NO_SUCH_VAR_X%\\a"), "%NO_SUCH_VAR_X%\\a");
-        std::env::set_var("FERRET_TEST_VAR", "X");
+        // SAFETY: test-only variable that no other test reads.
+        unsafe { std::env::set_var("FERRET_TEST_VAR", "X") };
         assert_eq!(expand_env("%FERRET_TEST_VAR%\\a%"), "X\\a%");
     }
 

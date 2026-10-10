@@ -153,7 +153,7 @@ VERSION="$version" NOTES="$notes" SIG="$setup.sig" URL="https://github.com/$repo
 step "Committing and tagging $tag"
 git add "${bumped[@]}"
 git commit -m "release: $tag"
-git tag "$tag"
+git tag -a "$tag" -m "Ferret $version"  # annotated: works with tag.gpgsign, no editor
 git push origin HEAD "$tag"
 
 step "Creating GitHub release $tag"

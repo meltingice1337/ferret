@@ -27,16 +27,17 @@ pub fn run() {
     // The dev build runs under its own identifier (tauri.dev.conf.json), so it keeps its own
     // settings and WebView2 profiles apart from the installed app.
     let id = context.config().identifier.clone();
+    // SAFETY (the `set_var` calls below): they run before Tauri or Ferret start any thread.
     // UI tests drive a dev build over the WebView2 DevTools protocol. Any local program
     // could use that port, so it only opens when explicitly asked for (FERRET_DEVTOOLS=1),
     // and never in release builds.
     #[cfg(debug_assertions)]
     if std::env::var_os("FERRET_DEVTOOLS").is_some() && std::env::var_os("WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS").is_none() {
-        std::env::set_var("WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS", "--remote-debugging-port=9333");
+        unsafe { std::env::set_var("WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS", "--remote-debugging-port=9333") };
         // A WebView2 profile runs with one set of options at a time; keep this one apart so it
         // can run next to normal Ferret windows.
         if let Some(dir) = dirs::data_local_dir() {
-            std::env::set_var("WEBVIEW2_USER_DATA_FOLDER", dir.join(&id).join("EBWebView-devtools"));
+            unsafe { std::env::set_var("WEBVIEW2_USER_DATA_FOLDER", dir.join(&id).join("EBWebView-devtools")) };
         }
     }
     integration::init_launch_targets();
@@ -48,7 +49,7 @@ pub fn run() {
     let admin = integration::admin_mode();
     if admin {
         if let Some(dir) = dirs::data_local_dir() {
-            std::env::set_var("WEBVIEW2_USER_DATA_FOLDER", dir.join(&id).join("EBWebView-admin"));
+            unsafe { std::env::set_var("WEBVIEW2_USER_DATA_FOLDER", dir.join(&id).join("EBWebView-admin")) };
         }
     }
     tauri::Builder::default()

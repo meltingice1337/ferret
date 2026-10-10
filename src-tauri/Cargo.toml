@@ -3,13 +3,15 @@ name = "ferret"
 version = "0.2.0"
 description = "Ferret file manager"
 authors = ["Ferret"]
-edition = "2021"
+edition = "2024"
 # A second binary (ferret-indexer) lives in src/bin; keep `cargo run` / `tauri dev` on the app.
 default-run = "ferret"
 
 [lib]
 name = "ferret_lib"
-crate-type = ["staticlib", "cdylib", "rlib"]
+# Desktop only: the template's staticlib/cdylib are for mobile and cost a full extra
+# optimized link (plus a ~190 MB .lib) on every release build.
+crate-type = ["rlib"]
 
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
@@ -97,8 +99,8 @@ base64 = "0.22"
 # --- end shell.rs ---
 
 [profile.release]
-codegen-units = 1
-lto = true
+# Thin LTO with parallel codegen: most of fat LTO's gain at a fraction of the build time.
+lto = "thin"
 opt-level = 3
 # No panic = "abort": jobs catch panics so a bug fails one operation, not the app.
 strip = true

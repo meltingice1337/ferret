@@ -682,9 +682,9 @@ impl Index {
     }
 
     pub fn compact(&mut self) {
-        let gen = self.generation;
+        let generation = self.generation;
         *self = self.compacted();
-        self.generation = gen + 2;
+        self.generation = generation + 2;
     }
 
     // ------------------------------------------------------------ snapshot
