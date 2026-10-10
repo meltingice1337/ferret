@@ -3,6 +3,8 @@ import ContextMenu from "./components/ContextMenu";
 import { AskDialog, BatchRenameDialog, ConflictDialog, PropertiesDialog } from "./components/Dialogs";
 import FileView from "./components/FileView";
 import { DragGhost, JobsPanel } from "./components/Jobs";
+import UpdateCard from "./components/UpdateCard";
+import { checkForUpdate, startUpdater } from "./lib/updater";
 import { addShellEntries, backgroundMenu, itemMenu } from "./components/menus";
 import PreviewPane, { QuickLook } from "./components/PreviewPane";
 import SettingsDialog from "./components/SettingsDialog";
@@ -63,6 +65,7 @@ function paletteCommands(): PaletteCommand[] {
     cmd("Open in Terminal", () => openTerminal(t.p), "Ctrl+`"),
     cmd("Open in VS Code", () => openInVscode(t.p)),
     cmd("New window", () => openNewWindow(), "Ctrl+N"),
+    cmd("Check for updates", () => checkForUpdate(true)),
     ...(adminWindow() ? [] : [cmd("Run this window as administrator", () => elevateWindow(), undefined, "Same tabs, after a UAC prompt")]),
     cmd("Copy folder path", () => copyPaths([t.p], false)),
     cmd(isFavorite(t.p) ? "Remove folder from favorites" : "Add folder to favorites", () => toggleFavorite(t.p, true), "Ctrl+D"),
@@ -122,6 +125,7 @@ export default function App() {
 
   onMount(() => {
     boot().catch((e) => toast(`Startup failed: ${e}`, "error"));
+    startUpdater();
 
     const onKey = (e: KeyboardEvent) => {
       if (!ready() || ui.menu) return;
@@ -264,6 +268,7 @@ export default function App() {
           </Show>
           <StatusBar />
           <JobsPanel />
+          <UpdateCard />
         </main>
         <Show when={ui.previewOpen && previewSpace() > 0}><PreviewPane /></Show>
         <Show when={ui.quickLook}><QuickLook /></Show>

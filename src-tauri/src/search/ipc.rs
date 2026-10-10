@@ -13,6 +13,10 @@ use super::engine::{SearchRequest, SearchResults, VolumeStatus};
 use serde::{Deserialize, Serialize};
 
 pub const PIPE_NAME: &str = r"\\.\pipe\ferret-index";
+/// Bump when the service binary must be replaced: a change to the indexer, the snapshot
+/// format or this protocol. The app offers to update an installed service that reports a
+/// lower number (one UAC prompt); app releases that leave it alone need no prompt.
+pub const INDEXER_VERSION: u32 = 1;
 const MAX_MSG: usize = 64 << 20;
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -27,6 +31,9 @@ pub enum Request {
 #[serde(rename_all = "camelCase")]
 pub struct ServiceStatus {
     pub version: String,
+    /// [`INDEXER_VERSION`] of the running service; 0 for services that predate the field.
+    #[serde(default)]
+    pub indexer: u32,
     pub volumes: Vec<VolumeStatus>,
     pub building: bool,
     pub errors: Vec<String>,
@@ -220,6 +227,7 @@ mod win {
                 },
                 Ok(Request::Status) => Response::Status(ServiceStatus {
                     version: env!("CARGO_PKG_VERSION").into(),
+                    indexer: INDEXER_VERSION,
                     volumes: engine.status(),
                     building: engine.building(),
                     errors: errors.lock().clone(),

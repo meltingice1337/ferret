@@ -58,13 +58,27 @@
   },
   "bundle": {
     "active": true,
-    "targets": "all",
+    "targets": ["nsis"],
+    "createUpdaterArtifacts": true,
     "icon": [
       "icons/32x32.png",
       "icons/128x128.png",
       "icons/128x128@2x.png",
       "icons/icon.icns",
       "icons/icon.ico"
-    ]
+    ],
+    "windows": {
+      "nsis": {
+        "installMode": "currentUser",
+        "installerHooks": "./windows/hooks.nsh"
+      }
+    }
+  },
+  "plugins": {
+    "updater": {
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDE1RTY5M0EyMzk2RTZENTcKUldSWGJXNDVvcFBtRlc3UTJNbC93UWNVbUpwdmdiSkw0S0tORXVtbkovWllaN0x3YXFWUmhTM0UK",
+      "endpoints": ["https://github.com/meltingice1337/ferret/releases/latest/download/latest.json"],
+      "windows": { "installMode": "passive" }
+    }
   }
 }

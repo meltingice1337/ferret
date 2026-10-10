@@ -8,6 +8,7 @@ import {
 import { SECTIONS, setPlaceShown, setSectionShown } from "./Sidebar";
 import type { GroupBy, ProfileName, Settings, SortBy, ViewSettings } from "../lib/types";
 import { GROUP_LABELS, SORT_LABELS } from "./FileView";
+import { checkForUpdate, installUpdate, updater } from "../lib/updater";
 
 export const ACCENTS = [
   { name: "Rose", value: "#e2457f" },
@@ -306,13 +307,26 @@ function Shortcuts() {
 }
 
 function About() {
+  const status = () => {
+    if (updater.phase === "checking") return "Checking…";
+    if (updater.phase === "available") return `Version ${updater.version} is available`;
+    if (updater.phase === "downloading" || updater.phase === "installing") return `Updating to ${updater.version}…`;
+    if (updater.lastChecked) return `Up to date · checked ${formatDate(updater.lastChecked)}`;
+    return "";
+  };
   return (
     <section class="card about">
       <img src="/ferret-256.png" alt="" width={56} height={56} />
-      <div>
-        <h3>Ferret <span class="muted">0.1.0</span></h3>
+      <div class="about-text">
+        <h3>Ferret <span class="muted">{updater.current}</span></h3>
         <p class="card-desc">A fast, keyboard-first file manager for Windows. Search everything with Ctrl+K.</p>
+        <Show when={status()}><p class="card-desc">{status()}</p></Show>
       </div>
+      <Show when={updater.phase === "available"} fallback={
+        <button class="btn" disabled={updater.phase !== "idle" && updater.phase !== "error"} onClick={() => checkForUpdate(true)}>Check for updates</button>
+      }>
+        <button class="btn accent" onClick={installUpdate}>Update & restart</button>
+      </Show>
     </section>
   );
 }

@@ -47,6 +47,9 @@ memchr = "2.7"
 nucleo-matcher = "0.3"
 parking_lot = "0.12"
 # --- end search ---
+# --- self-update (GitHub Releases) ---
+tauri-plugin-updater = "2"
+tauri-plugin-process = "2"
 
 [target.'cfg(windows)'.dependencies]
 winreg = "0.56"

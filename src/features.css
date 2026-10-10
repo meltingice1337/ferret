@@ -66,6 +66,10 @@ body.reordering, body.reordering * { cursor: grabbing !important; }
 .job-sub { display: flex; justify-content: space-between; gap: 10px; font-size: 11.5px; color: var(--fg-3); }
 .job-cur { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
 
+/* ---------- update card ---------- */
+.update-card { position: absolute; right: 12px; bottom: 46px; z-index: 41; width: 340px; }
+.update-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 10px; }
+
 /* ---------- dialogs ---------- */
 .modal-actions { display: flex; justify-content: flex-end; align-items: center; gap: 8px; margin-top: 14px; }
 .btn { display: inline-flex; align-items: center; gap: 6px; }
@@ -380,6 +384,7 @@ body.reordering, body.reordering * { cursor: grabbing !important; }
 .splash-logo { width: 96px; height: 96px; filter: drop-shadow(0 10px 30px color-mix(in oklab, var(--accent) 45%, transparent)); animation: pulse 1.2s ease-in-out infinite alternate; }
 .card.about { display: flex; align-items: center; gap: 14px; }
 .card.about h3 { margin: 0; }
+.card.about .about-text { flex: 1; min-width: 0; }
 
 /* ---------- Recycle Bin ---------- */
 .bin-bar {

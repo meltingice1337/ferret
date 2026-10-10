@@ -34,6 +34,7 @@ interface SearchStatus {
   source: string;
   serviceInstalled: boolean;
   serviceRunning: boolean;
+  serviceOutdated: boolean;
   volumes: { root: string; entries: number; ready: boolean; progress: number }[];
   building: boolean;
 }
@@ -299,7 +300,13 @@ export default function SearchPalette(props: { mode: "files" | "commands"; comma
                     <ShieldCheck size={12} /> Enable instant drive index
                   </button>
                 </Show>
-                <Show when={status()?.serviceRunning}><ShieldCheck size={12} /> Drive index</Show>
+                <Show when={status()?.serviceRunning}>
+                  <Show when={status()!.serviceOutdated} fallback={<><ShieldCheck size={12} /> Drive index</>}>
+                    <button class="palette-install" onClick={installService} title="This version of Ferret ships a newer drive index service. Needs one admin approval.">
+                      <ShieldCheck size={12} /> Update drive index
+                    </button>
+                  </Show>
+                </Show>
               </span>
             </Show>
           </div>

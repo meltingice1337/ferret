@@ -23,6 +23,10 @@ use commands::AppState;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    let context = tauri::generate_context!();
+    // The dev build runs under its own identifier (tauri.dev.conf.json), so it keeps its own
+    // settings and WebView2 profiles apart from the installed app.
+    let id = context.config().identifier.clone();
     // UI tests drive a dev build over the WebView2 DevTools protocol. Any local program
     // could use that port, so it only opens when explicitly asked for (FERRET_DEVTOOLS=1),
     // and never in release builds.
@@ -32,7 +36,7 @@ pub fn run() {
         // A WebView2 profile runs with one set of options at a time; keep this one apart so it
         // can run next to normal Ferret windows.
         if let Some(dir) = dirs::data_local_dir() {
-            std::env::set_var("WEBVIEW2_USER_DATA_FOLDER", dir.join("com.ferret.app").join("EBWebView-devtools"));
+            std::env::set_var("WEBVIEW2_USER_DATA_FOLDER", dir.join(&id).join("EBWebView-devtools"));
         }
     }
     integration::init_launch_targets();
@@ -44,13 +48,15 @@ pub fn run() {
     let admin = integration::admin_mode();
     if admin {
         if let Some(dir) = dirs::data_local_dir() {
-            std::env::set_var("WEBVIEW2_USER_DATA_FOLDER", dir.join("com.ferret.app").join("EBWebView-admin"));
+            std::env::set_var("WEBVIEW2_USER_DATA_FOLDER", dir.join(&id).join("EBWebView-admin"));
         }
     }
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_drag::init())
         .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_updater::Builder::new().build())
+        .plugin(tauri_plugin_process::init())
         .register_asynchronous_uri_scheme_protocol("fs", |_ctx, req, responder| {
             tauri::async_runtime::spawn_blocking(move || responder.respond(protocol::serve_file(req)));
         })
@@ -151,6 +157,7 @@ pub fn run() {
             search::search_query,
             search::search_status,
             search::search_install_service,
+            search::search_service_outdated,
             // Recycle Bin and Windows integration
             recycle::recycle_info,
             recycle::empty_recycle_bin,
@@ -162,6 +169,6 @@ pub fn run() {
             integration::new_window,
             integration::restart_elevated,
         ])
-        .run(tauri::generate_context!())
+        .run(context)
         .expect("error while running Ferret");
 }

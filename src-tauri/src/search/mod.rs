@@ -43,6 +43,8 @@ pub struct SearchStatus {
     pub source: String,
     pub service_installed: bool,
     pub service_running: bool,
+    /// The running service is older than this app's [`ipc::INDEXER_VERSION`].
+    pub service_outdated: bool,
     pub volumes: Vec<VolumeStatus>,
     pub building: bool,
 }
@@ -181,6 +183,7 @@ fn status() -> SearchStatus {
                 source: "service".into(),
                 service_installed: installed,
                 service_running: running,
+                service_outdated: st.indexer < ipc::INDEXER_VERSION,
                 volumes: st.volumes,
                 building: st.building,
             };
@@ -192,6 +195,7 @@ fn status() -> SearchStatus {
         source: if volumes.is_empty() { "none".into() } else { "walk".into() },
         service_installed: installed,
         service_running: running,
+        service_outdated: false,
         building: w.building() || volumes.iter().any(|v| !v.ready),
         volumes,
     }
@@ -212,6 +216,23 @@ pub async fn search_query(
 #[tauri::command]
 pub async fn search_status() -> Result<SearchStatus, String> {
     tauri::async_runtime::spawn_blocking(status).await.map_err(|e| e.to_string())
+}
+
+/// Is the installed service older than this app expects? Unlike `search_status`, this
+/// never starts the in-process walk, so it is cheap to call at startup.
+#[tauri::command]
+pub async fn search_service_outdated() -> Result<bool, String> {
+    tauri::async_runtime::spawn_blocking(|| {
+        #[cfg(windows)]
+        if service::service_state().1 {
+            if let Some(ipc::Response::Status(st)) = service_request(app(), &ipc::Request::Status, Duration::from_secs(2)) {
+                return st.indexer < ipc::INDEXER_VERSION;
+            }
+        }
+        false
+    })
+    .await
+    .map_err(|e| e.to_string())
 }
 
 /// Launches `ferret-indexer.exe --install` elevated (UAC prompt); returns once
