@@ -40,7 +40,7 @@ pub fn run() {
         }
     }
     integration::init_launch_targets();
-    integration::init_window_registry();
+    integration::init_window_registry(&id);
 
     // Every launch is its own window. An elevated window (restarted as administrator, or
     // started from one) uses its own WebView2 profile: a profile can't be shared across

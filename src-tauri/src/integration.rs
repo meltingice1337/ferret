@@ -356,17 +356,19 @@ pub fn admin_mode() -> bool {
 }
 
 /// Whether no other Ferret window was open when this one started (only the first
-/// window restores the last session). The mutex lives as long as the process.
+/// window restores the last session). The mutex lives as long as the process and is
+/// named per app identifier, so a dev build and the installed app don't count each other.
 static FIRST_WINDOW: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
 
-pub fn init_window_registry() {
+pub fn init_window_registry(identifier: &str) {
     FIRST_WINDOW.get_or_init(|| {
         #[cfg(windows)]
         unsafe {
-            use windows::core::w;
+            use windows::core::PCWSTR;
             use windows::Win32::Foundation::{GetLastError, ERROR_ALREADY_EXISTS};
             use windows::Win32::System::Threading::CreateMutexW;
-            match CreateMutexW(None, false, w!("Local\\FerretWindows")) {
+            let name: Vec<u16> = format!("Local\\FerretWindows-{identifier}").encode_utf16().chain(Some(0)).collect();
+            match CreateMutexW(None, false, PCWSTR(name.as_ptr())) {
                 // Kept open on purpose: the name must exist until this process exits.
                 Ok(_handle) => GetLastError() != ERROR_ALREADY_EXISTS,
                 // Created by an elevated window and not openable from here: one exists.
