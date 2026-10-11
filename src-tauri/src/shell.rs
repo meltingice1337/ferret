@@ -1512,15 +1512,7 @@ pub fn thumbnail_png(path: &str, size: u32, icon_only: bool) -> Result<Vec<u8>, 
 
 /// `\\wsl.localhost\Distro\home\me` → `("Distro", "/home/me")`.
 fn wsl_linux_path(p: &str) -> Option<(String, String)> {
-    let n = paths::normalize(p);
-    let distro = paths::wsl_distro(&n)?;
-    let rest = &n[paths::wsl_root(&distro).len()..];
-    let linux = if rest.trim_matches('\\').is_empty() {
-        "/".to_string()
-    } else {
-        rest.replace('\\', "/")
-    };
-    Some((distro, linux))
+    crate::wsl::linux_path(p)
 }
 
 /// `wt.exe` splits its command line on `;` — escape it.

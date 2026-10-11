@@ -6,6 +6,7 @@ import { createStore, produce } from "solid-js/store";
 import { listen } from "@tauri-apps/api/event";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import { api } from "./api";
+import { entryFilter } from "./filter";
 import { invalidateFolderSizes } from "./foldersizes";
 import { plural } from "./format";
 import { basename, inRecycleBin, isRecycle, isWithin, parent, pathKey, samePath } from "./path";
@@ -273,9 +274,9 @@ export function targetsOf(t: Tab): Entry[] {
 
 /** Entries currently shown (respects the filter box and hidden-items setting). */
 export function visibleEntries(t: Tab): Entry[] {
-  const f = t.filter[0]().trim().toLowerCase();
+  const match = entryFilter(t.filter[0]());
   const showHidden = t.view[0]().showHidden;
-  return t.entries[0]().filter((e) => (showHidden || !e.hidden) && (!f || e.name.toLowerCase().includes(f)));
+  return t.entries[0]().filter((e) => (showHidden || !e.hidden) && (!match || match(e)));
 }
 
 /** Keeps Dropzone entries pointing at files after they move (old → new path). */

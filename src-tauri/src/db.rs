@@ -20,9 +20,77 @@ pub fn open(path: &Path) -> rusqlite::Result<Connection> {
          DROP TABLE IF EXISTS quick_slots;
          CREATE TABLE IF NOT EXISTS recents (
              path_key TEXT PRIMARY KEY, path TEXT NOT NULL,
-             last_opened INTEGER NOT NULL, count INTEGER NOT NULL);",
+             last_opened INTEGER NOT NULL, count INTEGER NOT NULL);
+         CREATE TABLE IF NOT EXISTS folder_sizes (
+             path_key TEXT PRIMARY KEY, path TEXT NOT NULL, bytes INTEGER NOT NULL, files INTEGER,
+             partial INTEGER NOT NULL, counted_at INTEGER NOT NULL, stale INTEGER NOT NULL DEFAULT 0);",
     )?;
+    // Sizes of folders not looked at for two months aren't worth keeping.
+    conn.execute("DELETE FROM folder_sizes WHERE counted_at < ?1", [now() - 60 * 24 * 3_600_000])?;
     Ok(conn)
+}
+
+/// A folder size saved by an earlier count (in any window).
+pub struct SavedSize {
+    pub path: String,
+    pub bytes: u64,
+    pub files: Option<u64>,
+    pub partial: bool,
+    /// Unix milliseconds.
+    pub counted_at: i64,
+    /// Something inside changed since.
+    pub stale: bool,
+}
+
+pub fn folder_sizes(conn: &Connection, keys: &[String]) -> rusqlite::Result<Vec<(String, SavedSize)>> {
+    let mut out = Vec::new();
+    for chunk in keys.chunks(500) {
+        let marks = vec!["?"; chunk.len()].join(",");
+        let mut st = conn.prepare(&format!(
+            "SELECT path_key, path, bytes, files, partial, counted_at, stale FROM folder_sizes WHERE path_key IN ({marks})"
+        ))?;
+        let rows = st.query_map(rusqlite::params_from_iter(chunk), |r| {
+            Ok((r.get::<_, String>(0)?, SavedSize {
+                path: r.get(1)?,
+                bytes: r.get::<_, i64>(2)? as u64,
+                files: r.get::<_, Option<i64>>(3)?.map(|f| f as u64),
+                partial: r.get::<_, i64>(4)? != 0,
+                counted_at: r.get(5)?,
+                stale: r.get::<_, i64>(6)? != 0,
+            }))
+        })?;
+        for row in rows {
+            out.push(row?);
+        }
+    }
+    Ok(out)
+}
+
+pub fn put_folder_size(conn: &Connection, key: &str, s: &SavedSize) -> rusqlite::Result<()> {
+    conn.execute(
+        "INSERT INTO folder_sizes (path_key, path, bytes, files, partial, counted_at, stale)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, 0)
+         ON CONFLICT(path_key) DO UPDATE SET path = excluded.path, bytes = excluded.bytes, files = excluded.files,
+             partial = excluded.partial, counted_at = excluded.counted_at, stale = 0",
+        params![key, s.path, s.bytes as i64, s.files.map(|f| f as i64), s.partial as i64, s.counted_at],
+    )?;
+    Ok(())
+}
+
+/// Marks saved sizes out of date: these exact folders, and everything below `below`.
+pub fn stale_folder_sizes(conn: &Connection, exact: &[String], below: &[String]) -> rusqlite::Result<()> {
+    for k in exact {
+        conn.execute("UPDATE folder_sizes SET stale = 1 WHERE path_key = ?1", [k])?;
+    }
+    for k in below {
+        // Keys inside `k` sort between "k\" and "k]" ("]" follows "\" in ASCII).
+        let base = k.trim_end_matches('\\');
+        conn.execute(
+            "UPDATE folder_sizes SET stale = 1 WHERE path_key > ?1 AND path_key < ?2",
+            params![format!("{base}\\"), format!("{base}]")],
+        )?;
+    }
+    Ok(())
 }
 
 pub fn now() -> i64 {
@@ -322,6 +390,40 @@ mod tests {
         let order: Vec<String> = recents(&conn, 10).unwrap().into_iter().map(|r| r.path).collect();
         assert_eq!(order, [r"c:\work", r"c:\yesterday", r"c:\passed-through-just-now", r"c:\old-project"]);
         assert_eq!(recents(&conn, 2).unwrap().len(), 2);
+        drop(conn);
+        for ext in ["", "-wal", "-shm"] {
+            let _ = std::fs::remove_file(format!("{}{ext}", file.display()));
+        }
+    }
+
+    #[test]
+    fn folder_sizes_are_saved_and_go_stale() {
+        let file = std::env::temp_dir().join(format!("ferret-sizes-{}.db", std::process::id()));
+        let conn = open(&file).unwrap();
+        let put = |key: &str, bytes: u64| {
+            let s = SavedSize { path: key.into(), bytes, files: Some(1), partial: false, counted_at: now(), stale: false };
+            put_folder_size(&conn, key, &s).unwrap();
+        };
+        for (k, b) in [(r"c:\", 1), (r"c:\a", 2), (r"c:\a\b", 3), (r"c:\a\b\c", 4), (r"c:\ab", 5), (r"d:\x", 6)] {
+            put(k, b);
+        }
+        put(r"c:\a", 20); // counted again
+        let stale = |keys: &[&str]| -> Vec<(String, u64, bool)> {
+            let keys: Vec<String> = keys.iter().map(|k| k.to_string()).collect();
+            let mut v: Vec<_> = folder_sizes(&conn, &keys).unwrap().into_iter().map(|(k, s)| (k, s.bytes, s.stale)).collect();
+            v.sort();
+            v
+        };
+        let all = [r"c:\", r"c:\a", r"c:\a\b", r"c:\a\b\c", r"c:\ab", r"d:\x", r"e:\never"];
+        assert_eq!(stale(&all).len(), 6);
+        assert_eq!(stale(&[r"c:\a"]), [(r"c:\a".to_string(), 20, false)]);
+
+        // A change in c:\a\b: it and the folders containing it; with `deep`, everything inside too.
+        stale_folder_sizes(&conn, &[r"c:\a\b".into(), r"c:\a".into(), r"c:\".into()], &[r"c:\a\b".into()]).unwrap();
+        let marked: Vec<String> = stale(&all).into_iter().filter(|s| s.2).map(|s| s.0).collect();
+        assert_eq!(marked, [r"c:\", r"c:\a", r"c:\a\b", r"c:\a\b\c"]);
+        put(r"c:\a", 21);
+        assert!(!stale(&[r"c:\a"])[0].2);
         drop(conn);
         for ext in ["", "-wal", "-shm"] {
             let _ = std::fs::remove_file(format!("{}{ext}", file.display()));

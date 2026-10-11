@@ -1,4 +1,4 @@
-import { ArchiveRestore, ArrowDown, ArrowUp, ChevronDown, ChevronRight, Play, Trash2 } from "lucide-solid";
+import { ArchiveRestore, ArrowDown, ArrowUp, ChevronDown, ChevronRight, LoaderCircle, Play, Trash2 } from "lucide-solid";
 import { batch, createEffect, createMemo, createResource, createSignal, For, Match, on, onCleanup, onMount, Show, Switch, untrack } from "solid-js";
 import { Portal } from "solid-js/web";
 import FileIcon from "./FileIcon";
@@ -6,11 +6,12 @@ import { PdfThumb } from "./preview/PdfPages";
 import { addShellEntries, backgroundMenu, fromKeyboard, itemMenu, openKeyboardMenu } from "./menus";
 import { api, fileUrl, thumbUrl } from "../lib/api";
 import { beginDrag } from "../lib/drag";
-import { formatDate, formatSize, kindOf, plural, typeLabel } from "../lib/format";
+import { formatDate, formatSize, kindOf, plural, timeAgo, typeLabel } from "../lib/format";
 import { emptyBin, isCut, newFolder, renamePath, restoreFromBin, targetsOf, visibleEntries } from "../lib/ops";
 import { groupEntries, sortEntries, type Group } from "../lib/sortgroup";
+import { entryFilter } from "../lib/filter";
 import { isRecycle, pathKey } from "../lib/path";
-import { folderSizes, requestFolderSizes, sizesApply, sizesEpoch } from "../lib/foldersizes";
+import { folderSizes, requestFolderSizes, sizesApply, sizesEpoch, uncounted } from "../lib/foldersizes";
 import { goUp, holdKeys, openEntry, openMenu, persistSettings, releaseKeys, reload, setSettings, setUi, settings, sortBy, takeTypeAhead, toast, ui, updateView, type Tab } from "../lib/state";
 import type { Entry, ListColumn, SortBy } from "../lib/types";
 
@@ -115,8 +116,8 @@ export default function FileView(props: { tab: Tab }) {
     const v = view();
     let list = t.entries[0]();
     if (!v.showHidden) list = list.filter((e) => !e.hidden);
-    const f = t.filter[0]().trim().toLowerCase();
-    if (f) list = list.filter((e) => e.name.toLowerCase().includes(f));
+    const match = entryFilter(t.filter[0]());
+    if (match) list = list.filter(match);
     // Sorting by size puts folders in order once their sizes are counted (finished counts
     // only, so rows don't keep moving while totals grow).
     const sizeOf = v.sortBy === "size" && showFolderSizes()
@@ -131,7 +132,7 @@ export default function FileView(props: { tab: Tab }) {
   const sizeTargets = createMemo(() => {
     if (!showFolderSizes()) return "";
     const hidden = view().showHidden;
-    return t.entries[0]().filter((e) => e.isDir && !e.inArchive && (hidden || !e.hidden)).map((e) => e.path).join("\n");
+    return t.entries[0]().filter((e) => e.isDir && !e.inArchive && (hidden || !e.hidden) && !uncounted(e.path)).map((e) => e.path).join("\n");
   });
   createEffect(on([sizeTargets, sizesEpoch], ([s]) => requestFolderSizes(t.id, s ? s.split("\n") : [])));
   onCleanup(() => requestFolderSizes(t.id, []));
@@ -570,16 +571,22 @@ export default function FileView(props: { tab: Tab }) {
     ]);
   };
   const dropAttr = (e: Entry) => (e.isDir && !e.inArchive && !bin() ? e.path : undefined);
-  /** Size column: a file's size, or a folder's counted size (dimmed while counting). */
-  const sizeCell = (e: Entry): { text: string; counting?: boolean; title?: string } => {
+  /** Size column: a file's size, or a folder's counted size (dimmed while counting; an
+   *  earlier count with a spinner while it's counted again). */
+  const sizeCell = (e: Entry): { text: string; counting?: boolean; refreshing?: boolean; title?: string } => {
     if (!e.isDir || bin()) return { text: formatSize(e.size) };
     if (!showFolderSizes() || e.inArchive) return { text: "" };
+    const why = uncounted(e.path);
+    if (why) return { text: "", title: why };
     const s = folderSizes[pathKey(e.path)];
     if (!s) return { text: "…", counting: true, title: "Counting…" };
+    if (!s.done) return { text: formatSize(s.bytes), counting: true, title: "Counting…" };
+    const details = [s.files !== null && plural(s.files, "file"), s.partial && "some folders inside couldn't be read"];
+    const counted = `counted ${timeAgo(s.countedAt)}`;
     return {
       text: formatSize(s.bytes),
-      counting: !s.done,
-      title: !s.done ? "Counting…" : `${plural(s.files, "file")}${s.partial ? " · some folders inside couldn't be read" : ""}`,
+      refreshing: s.refreshing,
+      title: [s.refreshing && "Updating…", ...details, counted].filter(Boolean).join(" · "),
     };
   };
 
@@ -655,7 +662,10 @@ export default function FileView(props: { tab: Tab }) {
                       <Show when={showDate()}><span class="c-date">{formatDate(e().modified)}</span></Show>
                       <Show when={showType()}><span class="c-type">{typeLabel(e())}</span></Show>
                       <Show when={showSize()}>
-                        <span class="c-size" classList={{ counting: !!sizeCell(e()).counting }} title={sizeCell(e()).title}>{sizeCell(e()).text}</span>
+                        <span class="c-size" classList={{ counting: !!sizeCell(e()).counting }} title={sizeCell(e()).title}>
+                          <Show when={sizeCell(e()).refreshing}><LoaderCircle size={10} class="spin size-refresh" /></Show>
+                          {sizeCell(e()).text}
+                        </span>
                       </Show>
                     </div>
                   )}

@@ -1,4 +1,4 @@
-import { ArrowLeft, ArrowRight, ArrowUp, ChevronRight, Folder, FolderOpen, ListFilter, PanelLeft, RotateCw, Search, Star, X } from "lucide-solid";
+import { ArrowLeft, ArrowRight, ArrowUp, ChevronRight, Folder, FolderOpen, ListFilter, PanelLeft, RotateCw, Search, Shapes, Star, X } from "lucide-solid";
 import { createEffect, createMemo, createSignal, For, on, Show } from "solid-js";
 import { api } from "../lib/api";
 import { isRecycle, isWsl, parent, segments } from "../lib/path";
@@ -7,6 +7,8 @@ import {
   toggleFavorite, ui, winWidth,
 } from "../lib/state";
 import FileIcon from "./FileIcon";
+import { typeIcon } from "./typeIcons";
+import { FILE_TYPES, findType, FOLDERS, typeTokens, withoutTypes, type FileType } from "../lib/filetypes";
 
 export default function Toolbar() {
   const tab = () => activeTab();
@@ -256,6 +258,36 @@ function FilterBox() {
   createEffect(() => { if (ui.filterOpen) queueMicrotask(() => input?.focus()); });
   const close = () => { tab().filter[1](""); setUi("filterOpen", false); };
 
+  /** The types of file in this folder, with how many of each: pick one to show only those. */
+  const typesMenu = (e: MouseEvent) => {
+    const r = (e.currentTarget as HTMLElement).getBoundingClientRect();
+    const t = tab();
+    const showHidden = t.view[0]().showHidden;
+    const entries = t.entries[0]().filter((x) => showHidden || !x.hidden);
+    const current = typeTokens(t.filter[0]()).flatMap((x) => x.values.map((v) => findType(v)?.id));
+    const set = (id: string | null) => {
+      const rest = withoutTypes(t.filter[0]());
+      t.filter[1](id ? `${rest} type:${id}`.trim() : rest);
+      setUi("filterOpen", true);
+      queueMicrotask(() => input?.focus());
+    };
+    const count = (ft: FileType) => {
+      if (ft.id === "folder") return entries.filter((x) => x.isDir).length;
+      const exts = new Set(ft.exts);
+      return entries.filter((x) => !x.isDir && exts.has(x.ext.toLowerCase())).length;
+    };
+    const rows = [FOLDERS, ...FILE_TYPES].map((ft) => ({ ft, n: count(ft) })).filter((x) => x.n > 0);
+    openMenu(r.left, r.bottom + 4, [
+      { heading: true, label: "Show only" },
+      { label: "All types", checked: !current.some(Boolean), action: () => set(null) },
+      { separator: true },
+      ...rows.map(({ ft, n }) => ({
+        label: ft.label, icon: typeIcon(ft.id), shortcut: n.toLocaleString(), checked: current.includes(ft.id) || undefined, action: () => set(ft.id),
+      })),
+      ...(rows.length ? [] : [{ label: "No files here", disabled: true }]),
+    ]);
+  };
+
   return (
     <Show when={ui.filterOpen || tab().filter[0]()} fallback={
       <button class="icon-btn" title="Filter this folder (Ctrl+F)" onClick={() => setUi("filterOpen", true)}><ListFilter size={15} /></button>
@@ -263,6 +295,7 @@ function FilterBox() {
       <div class="filter">
         <ListFilter size={14} />
         <input ref={input} placeholder="Filter folder…" value={tab().filter[0]()} spellcheck={false}
+          title={"Shows names with these words. Also understands type:image, ext:pdf,docx and !word (leave out)"}
           onInput={(e) => tab().filter[1](e.currentTarget.value)}
           onBlur={() => !tab().filter[0]() && setUi("filterOpen", false)}
           onKeyDown={(e) => {
@@ -270,6 +303,8 @@ function FilterBox() {
             if (e.key === "Enter" || e.key === "ArrowDown") { e.preventDefault(); document.querySelector<HTMLElement>(".files")?.focus(); }
             e.stopPropagation();
           }} />
+        <button class="icon-btn tiny" classList={{ on: typeTokens(tab().filter[0]()).length > 0 }} title="Show only a type of file"
+          onMouseDown={(e) => e.preventDefault()} onClick={typesMenu}><Shapes size={13} /></button>
         <button class="icon-btn tiny" title="Clear filter" onClick={close}><X size={13} /></button>
       </div>
     </Show>

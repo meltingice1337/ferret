@@ -7,6 +7,7 @@ import {
 } from "../lib/state";
 import type { Entry, GroupBy, SortBy } from "../lib/types";
 import { folderSizes } from "../lib/foldersizes";
+import { entryFilter } from "../lib/filter";
 import { GROUP_LABELS, SORT_LABELS } from "./FileView";
 
 export default function StatusBar() {
@@ -21,8 +22,8 @@ export default function StatusBar() {
     // Selected folders count with their counted sizes; "+" while some aren't known yet.
     const known = (e: Entry) => (e.isDir ? folderSizes[pathKey(e.path)]?.done ? folderSizes[pathKey(e.path)].bytes : null : e.size);
     const bytes = selected.reduce((a, e) => a + (known(e) ?? 0), 0);
-    const f = t().filter[0]().trim().toLowerCase();
-    const matching = f ? shown.filter((e) => e.name.toLowerCase().includes(f)).length : shown.length;
+    const match = entryFilter(t().filter[0]());
+    const matching = match ? shown.filter(match).length : shown.length;
     return {
       total: shown.length, matching, hidden: entries.length - shown.length, selected: selected.length, bytes,
       anyDir: selected.some((e) => known(e) === null), anyFile: selected.some((e) => known(e) !== null),

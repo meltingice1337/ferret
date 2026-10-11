@@ -9,11 +9,16 @@ export type ListColumn = "modified" | "type" | "size";
 export interface FolderSize {
   path: string;
   bytes: number;
-  files: number;
+  /** Not known for WSL folders. */
+  files: number | null;
   /** Some folders inside couldn't be read. */
   partial: boolean;
   /** False while still counting: `bytes` is the total so far. */
   done: boolean;
+  /** An earlier count (possibly from an earlier session), being counted again right now. */
+  refreshing: boolean;
+  /** When it was counted (Unix ms); 0 while counting. */
+  countedAt: number;
 }
 
 export interface ViewSettings {

@@ -1,0 +1,68 @@
+{
+  "kinds": {
+    "image": "jpg png gif webp jpeg heic heif avif bmp tif tiff ico svg jxl raw cr2 cr3 nef arw dng orf rw2 psd",
+    "video": "mp4 mkv mov avi webm m4v wmv flv mpg mpeg m2ts 3gp",
+    "audio": "mp3 wav flac ogg m4a aac opus wma aiff mid",
+    "code": "js mjs cjs ts mts cts tsx jsx rs py go java kt c h cpp hpp cc cs rb php swift lua sh bash zsh ps1 bat cmd sql vue svelte html htm css scss less dart zig nim r scala ex exs hs ml clj pl",
+    "data": "json jsonc yaml yml toml xml ini cfg conf env lock",
+    "text": "txt md markdown rst log nfo",
+    "doc": "docx doc pptx ppt odt rtf pages key odp epub",
+    "sheet": "xlsx xls csv tsv ods numbers parquet",
+    "pdf": "pdf",
+    "archive": "zip rar 7z tar gz tgz bz2 xz zst iso cab",
+    "exe": "exe msi appx msix dll sys lnk url",
+    "font": "ttf otf woff woff2"
+  },
+  "types": [
+    {
+      "id": "image", "label": "Images", "kinds": ["image"],
+      "words": ["image", "images", "img", "imgs", "picture", "pictures", "pic", "pics", "photo", "photos"],
+      "suggest": ["images", "pictures", "photos", "pics"]
+    },
+    {
+      "id": "video", "label": "Videos", "kinds": ["video"],
+      "words": ["video", "videos", "vid", "vids", "movie", "movies", "clip", "clips"],
+      "suggest": ["videos", "movies", "clips"]
+    },
+    {
+      "id": "audio", "label": "Audio", "kinds": ["audio"],
+      "words": ["audio", "music", "sound", "sounds", "song", "songs"],
+      "suggest": ["music", "songs"]
+    },
+    {
+      "id": "doc", "label": "Documents", "kinds": ["pdf", "doc", "sheet"],
+      "words": ["doc", "docs", "document", "documents", "office"],
+      "suggest": ["documents", "docs"]
+    },
+    {
+      "id": "text", "label": "Text", "kinds": ["text"], "also": "csv tsv",
+      "words": ["text", "texts", "txt", "notes", "plain"],
+      "suggest": []
+    },
+    {
+      "id": "code", "label": "Code", "kinds": ["code"],
+      "words": ["code", "source", "src", "script", "scripts"],
+      "suggest": []
+    },
+    {
+      "id": "archive", "label": "Archives", "kinds": ["archive"],
+      "words": ["archive", "archives", "zip", "zips", "compressed"],
+      "suggest": ["archives"]
+    },
+    {
+      "id": "app", "label": "Apps", "kinds": [], "also": "exe msi appx msix appxbundle msixbundle",
+      "words": ["app", "apps", "program", "programs", "application", "applications", "installer", "installers", "exe"],
+      "suggest": ["apps", "programs", "applications", "installers"]
+    },
+    {
+      "id": "data", "label": "Data and config", "kinds": ["data"],
+      "words": ["data", "config", "configs", "settings"],
+      "suggest": []
+    },
+    {
+      "id": "font", "label": "Fonts", "kinds": ["font"],
+      "words": ["font", "fonts"],
+      "suggest": ["fonts"]
+    }
+  ]
+}

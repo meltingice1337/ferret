@@ -8,7 +8,7 @@
   background: var(--panel-solid); border: 1px solid var(--line-2); border-radius: 14px; box-shadow: var(--shadow);
   overflow: hidden; animation: pop 0.12s ease-out;
 }
-.palette-input { display: flex; align-items: center; gap: 10px; padding: 12px 12px 12px 16px; border-bottom: 1px solid var(--line); color: var(--fg-3); }
+.palette-input { flex: none; display: flex; align-items: center; gap: 10px; padding: 12px 12px 12px 16px; border-bottom: 1px solid var(--line); color: var(--fg-3); }
 .palette-input input { flex: 1; min-width: 0; border: 0; outline: none; background: none; color: var(--fg); font-size: 16px; user-select: text; }
 .palette-input input::placeholder { color: var(--fg-3); }
 .palette-scope {
@@ -32,12 +32,21 @@
   font-size: 12px; color: var(--fg-3);
 }
 .palette-meta { font-size: 11.5px; color: var(--fg-3); white-space: nowrap; font-variant-numeric: tabular-nums; }
+/* File results: where it lives (WSL distro or drive letter), then the rest of the path. */
+.palette-item.file .palette-path { display: flex; align-items: center; gap: 6px; direction: ltr; }
+.palette-path-text { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: pre; direction: rtl; text-align: left; }
+.palette-path .drive-letter { flex: none; }
+.loc-wsl {
+  flex: none; display: inline-flex; align-items: center; gap: 4px; height: 18px; padding: 0 6px; border-radius: 5px;
+  font-size: 10.5px; font-weight: 700; color: #7ee0a5; background: rgba(126, 224, 165, 0.12); border: 1px solid rgba(126, 224, 165, 0.35);
+}
+:root[data-theme="light"] .loc-wsl { color: #15803d; background: rgba(21, 128, 61, 0.08); border-color: rgba(21, 128, 61, 0.3); }
 .palette-item kbd { min-width: 0; }
 .palette-empty { padding: 22px 16px; color: var(--fg-3); font-size: 13px; line-height: 1.7; }
 .palette-empty code { font-family: var(--mono); font-size: 11.5px; padding: 1px 6px; border-radius: 5px; background: var(--hover); color: var(--fg-2); }
 
 .palette-foot {
-  display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 8px 14px;
+  flex: none; display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 8px 14px;
   border-top: 1px solid var(--line); font-size: 11.5px; color: var(--fg-3); font-variant-numeric: tabular-nums;
 }
 .palette-status { display: inline-flex; align-items: center; gap: 6px; }
@@ -52,3 +61,48 @@
 .palette-item:hover .palette-reveal, .palette-item.active .palette-reveal { opacity: 1; }
 .palette-reveal:hover { color: var(--on-accent); background: var(--accent); border-color: var(--accent); }
 .palette-foot b { color: var(--fg-2); font-weight: 600; }
+
+/* File types: chips under the search box, the chosen type as a pill in the box. */
+.palette-types { flex: none; display: flex; gap: 3px; padding: 6px 12px; border-bottom: 1px solid var(--line); overflow-x: auto; scrollbar-width: none; }
+.palette-types button {
+  flex: none; display: inline-flex; align-items: center; gap: 5px; height: 24px; padding: 0 9px; border-radius: 12px;
+  font-size: 12px; color: var(--fg-2); border: 1px solid transparent; white-space: nowrap;
+}
+.palette-types button:hover { background: var(--hover); color: var(--fg); }
+.palette-types button.on { color: var(--accent); background: var(--accent-softer); border-color: var(--accent-line); }
+.palette-type-pill {
+  flex: none; display: inline-flex; align-items: center; gap: 5px; height: 24px; padding: 0 6px 0 8px; border-radius: 12px;
+  font-size: 12.5px; color: var(--accent); background: var(--accent-softer); border: 1px solid var(--accent-line); white-space: nowrap;
+}
+.palette-type-pill:hover { background: var(--accent-soft); }
+.palette-help-btn.on { color: var(--accent); background: var(--accent-softer); }
+
+/* "vacation videos" → only videos (Tab); a type search doesn't know. */
+.palette-suggest, .palette-hint {
+  width: 100%; display: flex; align-items: center; gap: 10px; height: 36px; padding: 0 10px; margin-bottom: 2px;
+  border-radius: 8px; text-align: left; font-size: 13px; color: var(--fg);
+}
+.palette-suggest:hover, .palette-hint:hover { background: var(--hover); }
+.palette-suggest > svg, .palette-hint > svg { flex: none; color: var(--accent); }
+.palette-suggest b, .palette-hint b { font-weight: 600; color: var(--accent); }
+.palette-suggest-exts { flex: 1; min-width: 0; font-size: 12px; color: var(--fg-3); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.palette-suggest kbd { min-width: 0; }
+
+/* "?": every type and filter. */
+.palette-help { display: grid; grid-template-columns: minmax(0, 1.2fr) minmax(0, 1fr); gap: 0 16px; padding: 2px 4px 8px; }
+.palette-help-title { font-size: 11px; font-weight: 700; letter-spacing: 0.06em; text-transform: uppercase; color: var(--fg-3); padding: 8px 8px 4px; }
+.palette-help-row {
+  width: 100%; display: grid; grid-template-columns: 16px 100px 96px minmax(0, 1fr); align-items: center; gap: 8px;
+  min-height: 30px; padding: 4px 8px; border-radius: 7px; text-align: left; font-size: 13px; color: var(--fg-2);
+}
+.palette-help-filter.palette-help-row { grid-template-columns: auto minmax(0, 1fr); align-items: baseline; padding: 6px 8px; }
+.palette-help-row:hover { background: var(--accent-soft); color: var(--fg); }
+.palette-help-row > svg { color: var(--fg-3); }
+.palette-help-label { color: var(--fg); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.palette-help-row > code { justify-self: start; }
+.palette-help-note { min-width: 0; font-size: 11.5px; color: var(--fg-3); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.palette-help-filter .palette-help-note { white-space: normal; line-height: 1.4; }
+.palette-help code, .palette-help-keys code {
+  font-family: var(--mono); font-size: 11.5px; padding: 1px 6px; border-radius: 5px; background: var(--hover); color: var(--fg-2); white-space: nowrap;
+}
+.palette-help-keys { padding: 10px 8px 0; font-size: 11.5px; color: var(--fg-3); line-height: 2; }

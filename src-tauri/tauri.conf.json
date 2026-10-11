@@ -58,6 +58,8 @@
   },
   "bundle": {
     "active": true,
+    "publisher": "meltingice1337",
+    "copyright": "© 2026 meltingice1337",
     "targets": ["nsis"],
     "createUpdaterArtifacts": true,
     "icon": [

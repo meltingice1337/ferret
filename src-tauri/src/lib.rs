@@ -16,6 +16,7 @@ mod shell;
 mod shellmenu;
 mod shellops;
 mod watch;
+mod wsl;
 
 use std::sync::Mutex;
 use tauri::Manager;

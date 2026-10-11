@@ -24,7 +24,7 @@ pub struct Drive {
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct WslDistro {
-    name: String,
+    pub name: String,
     path: String,
     is_default: bool,
 }

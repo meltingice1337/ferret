@@ -255,8 +255,10 @@ input::selection, textarea::selection { background: color-mix(in oklab, var(--ac
 .suggest-item:hover, .suggest-item.active { background: var(--accent-soft); }
 .suggest-hint { padding: 6px 9px 2px; font-size: 11px; color: var(--fg-3); }
 
-.filter { display: flex; align-items: center; gap: 6px; height: 32px; padding: 0 4px 0 10px; width: 220px; border-radius: 8px; background: var(--raised); border: 1px solid var(--accent-line); color: var(--fg-3); }
+.filter { display: flex; align-items: center; gap: 4px; height: 32px; padding: 0 4px 0 10px; width: 250px; border-radius: 8px; background: var(--raised); border: 1px solid var(--accent-line); color: var(--fg-3); }
 .filter input { flex: 1; min-width: 0; border: 0; outline: none; background: none; color: var(--fg); user-select: text; }
+/* The type button, lit while a type: filter is on. */
+.filter .icon-btn.on { color: var(--accent); background: var(--accent-softer); }
 
 /* ---------- file view ---------- */
 .fileview { flex: 1; min-height: 0; display: flex; flex-direction: column; position: relative; }
@@ -296,6 +298,8 @@ body.col-resizing, body.col-resizing * { cursor: col-resize !important; user-sel
 .c-size { text-align: right; color: var(--fg-3); font-variant-numeric: tabular-nums; }
 /* A folder still being counted. */
 .c-size.counting { opacity: 0.5; }
+/* An earlier size, being counted again: shown with a small spinner before it. */
+.c-size .size-refresh { vertical-align: -1px; margin-right: 5px; opacity: 0.6; }
 :root[data-density="compact"] .row { font-size: 12.5px; }
 
 .grid-row { position: absolute; left: 0; right: 0; display: flex; gap: 6px; padding: 4px 6px 0; }

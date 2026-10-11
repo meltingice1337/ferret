@@ -14,12 +14,14 @@
 //! the in-process walk provider, which starts lazily in the background.
 
 pub mod engine;
+pub mod filetypes;
 pub mod index;
 pub mod ipc;
 pub mod mft;
 pub mod query;
 pub mod service;
 pub mod walk;
+pub mod wsl;
 
 #[cfg(test)]
 mod bench;
@@ -134,6 +136,10 @@ fn service_request(a: &'static AppSearch, req: &ipc::Request, timeout: Duration)
 /// Size + modified (ms) straight from the file system for the final hits.
 fn fill_meta(hits: &mut [Hit]) {
     hits.par_iter_mut().for_each(|h| {
+        // WSL indexes carry size and date already (and reading them via \\wsl.localhost is slow).
+        if crate::paths::is_wsl(&h.path) {
+            return;
+        }
         if let Ok(m) = std::fs::symlink_metadata(crate::paths::for_io(&h.path)) {
             h.size = if h.is_dir { None } else { Some(m.len()) };
             h.modified = m
@@ -168,12 +174,33 @@ fn run_query(req: SearchRequest) -> SearchResults {
             r
         }
     };
+    merge_wsl(&mut res, &req);
     fill_meta(&mut res.results);
     res.took_us = t0.elapsed().as_micros() as u64;
     res
 }
 
+/// WSL distros are indexed by the app (the service only reads NTFS drives): their matches
+/// join the drives' by score.
+fn merge_wsl(res: &mut SearchResults, req: &SearchRequest) {
+    wsl::refresh();
+    let w = wsl::engine().search(req);
+    res.partial |= w.partial;
+    if w.results.is_empty() {
+        return;
+    }
+    let limit = if req.limit == 0 { engine::DEFAULT_LIMIT } else { req.limit.min(engine::MAX_LIMIT) } as usize;
+    res.total += w.total;
+    res.results.extend(w.results);
+    res.results.sort_by(|a, b| b.score.total_cmp(&a.score));
+    res.results.truncate(limit);
+}
+
 fn status() -> SearchStatus {
+    // Opening search is a good moment to (re)list WSL distros.
+    wsl::refresh();
+    let wsl_volumes = wsl::engine().status();
+    let wsl_building = wsl_volumes.iter().any(|v| !v.ready);
     let a = app();
     let (installed, running) = service::service_state();
     #[cfg(windows)]
@@ -184,8 +211,8 @@ fn status() -> SearchStatus {
                 service_installed: installed,
                 service_running: running,
                 service_outdated: st.indexer < ipc::INDEXER_VERSION,
-                volumes: st.volumes,
-                building: st.building,
+                volumes: st.volumes.into_iter().chain(wsl_volumes).collect(),
+                building: st.building || wsl_building,
             };
         }
     }
@@ -196,12 +223,13 @@ fn status() -> SearchStatus {
         service_installed: installed,
         service_running: running,
         service_outdated: false,
-        building: w.building() || volumes.iter().any(|v| !v.ready),
-        volumes,
+        building: w.building() || volumes.iter().any(|v| !v.ready) || wsl_building,
+        volumes: volumes.into_iter().chain(wsl_volumes).collect(),
     }
 }
 
-/// Searches file and folder names on all fixed drives.
+/// Searches file and folder names on all fixed drives (and WSL). `type:image` and the like
+/// are turned into extension lists here, so every engine understands them.
 #[tauri::command]
 pub async fn search_query(
     query: String,
@@ -209,6 +237,7 @@ pub async fn search_query(
     scope: Option<String>,
     frecency: Option<HashMap<String, f32>>,
 ) -> Result<SearchResults, String> {
+    let query = filetypes::expand(&query);
     let req = SearchRequest { query, limit: limit.unwrap_or(engine::DEFAULT_LIMIT), scope, frecency };
     tauri::async_runtime::spawn_blocking(move || run_query(req)).await.map_err(|e| e.to_string())
 }

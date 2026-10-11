@@ -223,7 +223,7 @@ function Behavior() {
           options={[{ value: "double", label: "Double-click" }, { value: "single", label: "Single click" }]} />
       </Field>
       <Field label="Restore tabs on launch"><Toggle checked={settings.restoreSession} onChange={(v) => set("restoreSession", v)} /></Field>
-      <Field label="Folder sizes" hint="Counted in the background at low priority and shown in the Size column (not on network or Linux folders)">
+      <Field label="Folder sizes" hint="Counted in the background at low priority and shown in the Size column (not on network shares)">
         <Toggle checked={settings.folderSizes} onChange={(v) => set("folderSizes", v)} />
       </Field>
     </Card>

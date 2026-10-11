@@ -1,26 +1,12 @@
+import { KIND_EXTS } from "./filetypes";
 import type { Entry } from "./types";
 
 export type Kind =
   | "folder" | "image" | "video" | "audio" | "code" | "text" | "doc" | "sheet"
   | "pdf" | "archive" | "exe" | "font" | "data" | "other";
 
-const groups: [Kind, string][] = [
-  ["image", "jpg jpeg png gif webp avif heic heif bmp tif tiff ico svg raw cr2 nef arw dng psd"],
-  ["video", "mp4 mkv mov avi webm m4v wmv flv mpg mpeg ts 3gp"],
-  ["audio", "mp3 wav flac ogg m4a aac opus wma aiff mid"],
-  ["code", "js mjs cjs ts tsx jsx rs py go java kt c h cpp hpp cc cs rb php swift lua sh bash zsh ps1 bat cmd sql vue svelte html css scss less dart zig nim r scala ex exs hs ml clj"],
-  ["data", "json jsonc yaml yml toml xml ini cfg conf env lock"],
-  ["text", "txt md markdown rst log nfo"],
-  ["doc", "doc docx odt rtf pages ppt pptx key odp epub"],
-  ["sheet", "csv tsv xls xlsx ods numbers parquet"],
-  ["pdf", "pdf"],
-  ["archive", "zip rar 7z tar gz tgz bz2 xz zst iso cab"],
-  ["exe", "exe msi appx msix dll sys lnk url"],
-  ["font", "ttf otf woff woff2"],
-];
-
 const EXT = new Map<string, Kind>();
-for (const [kind, list] of groups) for (const e of list.split(" ")) EXT.set(e, kind);
+for (const [kind, exts] of Object.entries(KIND_EXTS)) for (const e of exts) EXT.set(e, kind as Kind);
 
 export function kindOf(e: Pick<Entry, "isDir" | "ext">): Kind {
   if (e.isDir) return "folder";
@@ -83,6 +69,19 @@ export function formatDate(ms: number | null): string {
   if (ms == null) return "";
   const d = new Date(ms);
   return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`;
+}
+
+/** "just now", "5 min ago", "3 hours ago", "yesterday", "4 days ago", then the date. */
+export function timeAgo(ms: number, now = Date.now()): string {
+  const min = Math.floor((now - ms) / 60_000);
+  if (min < 1) return "just now";
+  if (min < 60) return `${min} min ago`;
+  const hours = Math.floor(min / 60);
+  if (hours < 24) return `${plural(hours, "hour")} ago`;
+  const days = Math.floor(hours / 24);
+  if (days === 1) return "yesterday";
+  if (days < 30) return `${days} days ago`;
+  return formatDate(ms).slice(0, 10);
 }
 
 /** Readable text color (black/white) for a hex background. */
