@@ -397,8 +397,11 @@ body.reordering, body.reordering * { cursor: grabbing !important; }
 /* names keep repeated spaces everywhere they're shown */
 .pv-name, .tab-label, .crumb, .side-label, .conflict-name, .br-row span, .props-name, .shelf-name, .job-label, .pv-folder-name, .menu-label { white-space: pre; }
 .pv-path, .props-grid dd { white-space: pre-wrap; }
-/* Pictures show whole; only extreme aspect ratios (beyond ~10:1) are trimmed to a visible sliver. */
+/* Pictures show whole; only extreme aspect ratios (beyond ~10:1) are trimmed to a visible sliver,
+   starting where the picture starts (a toolbar screenshot shows its left end, not empty middle). */
 .cell-icon .thumb:not(.icon) { min-width: 12px; min-height: 12px; object-fit: cover; }
+.cell-icon .thumb.wide { object-position: 0 50%; }
+.cell-icon .thumb.tall { object-position: 50% 0; }
 
 .pv-audio-icon { padding: 34px; border-radius: 24px; background: linear-gradient(135deg, var(--accent-soft), var(--hover)); }
 

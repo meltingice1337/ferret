@@ -51,10 +51,24 @@ export function Thumb(props: { entry: Entry; size: number; fallbackSize?: number
   const native = () => NATIVE_IMG.test(props.entry.ext);
   const path = useThumbPath(() => props.entry);
   const usable = () => !!path() && !failed() && (THUMB_KINDS.has(kind()) || ICON_KINDS.has(kind()));
+  // Very wide or tall pictures (a screenshot of a toolbar, a panorama) show as a cropped strip
+  // in grid tiles: fetch enough pixels for that strip to be sharp, and show where it starts.
+  const [shape, setShape] = createSignal<"" | "wide" | "tall">("");
+  const [sharpSize, setSharpSize] = createSignal(0);
+  const baseSize = () => bucket(props.size * (window.devicePixelRatio || 1));
   const src = () => (direct() || props.entry.ext === "svg"
     ? fileUrl(path()!)
-    : thumbUrl(path()!, bucket(props.size * (window.devicePixelRatio || 1)), ICON_KINDS.has(kind())));
-  createEffect(on(() => props.entry.path, () => { setFailed(false); setDirect(false); }, { defer: true }));
+    : thumbUrl(path()!, Math.max(baseSize(), sharpSize()), ICON_KINDS.has(kind())));
+  createEffect(on(() => props.entry.path, () => { setFailed(false); setDirect(false); setShape(""); setSharpSize(0); }, { defer: true }));
+  const checkShape = (img: HTMLImageElement) => {
+    const ratio = img.naturalWidth / img.naturalHeight;
+    if (ICON_KINDS.has(kind()) || (ratio <= 5 && ratio >= 1 / 5)) return;
+    setShape(ratio > 1 ? "wide" : "tall");
+    // The strip's short side is at least 12px on screen: ~30 thumbnail pixels keep it crisp.
+    const long = 30 * Math.max(ratio, 1 / ratio);
+    const want = [512, 768, 1024].find((b) => b >= long) ?? 1024;
+    if (props.size >= 48 && !direct() && want > Math.max(baseSize(), sharpSize())) setSharpSize(want);
+  };
   return (
     <Show when={usable()} fallback={
       <Show when={failed() && kind() === "pdf" && props.size >= 48 && !props.entry.inArchive} fallback={<FileIcon entry={props.entry} size={props.fallbackSize ?? Math.round(props.size * 0.62)} />}>
@@ -63,14 +77,17 @@ export function Thumb(props: { entry: Entry; size: number; fallbackSize?: number
     }>
       <img
         class="thumb"
-        classList={{ icon: ICON_KINDS.has(kind()) }}
+        classList={{ icon: ICON_KINDS.has(kind()), wide: shape() === "wide", tall: shape() === "tall" }}
         src={src()}
         loading="lazy"
         decoding="async"
         draggable={false}
         style={{ "max-width": `${props.size}px`, "max-height": `${props.size}px` }}
         onError={() => (native() && !direct() ? setDirect(true) : setFailed(true))}
-        onLoad={(e) => { if (e.currentTarget.naturalWidth <= 1) (native() && !direct() ? setDirect(true) : setFailed(true)); }}
+        onLoad={(e) => {
+          if (e.currentTarget.naturalWidth <= 1) return native() && !direct() ? setDirect(true) : setFailed(true);
+          checkShape(e.currentTarget);
+        }}
         alt=""
       />
     </Show>
