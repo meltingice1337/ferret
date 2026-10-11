@@ -1,14 +1,14 @@
 // Ctrl+K: instant whole-disk search. Ctrl+Shift+P (or ">" prefix): command palette.
 
 import { invoke } from "@tauri-apps/api/core";
-import { AppWindow, CircleHelp, Command, Copy, ExternalLink, FolderOpen, FolderSearch, HardDrive, Hash, Info, LoaderCircle, Search, ShieldCheck, SquareTerminal, X } from "lucide-solid";
+import { AppWindow, CalendarClock, CircleHelp, Command, Copy, ExternalLink, FolderOpen, FolderSearch, HardDrive, Hash, Info, LoaderCircle, Ruler, Search, Shapes, ShieldCheck, SquareTerminal, X } from "lucide-solid";
 import { createEffect, createMemo, createSignal, For, on, onCleanup, onMount, Show, type JSX } from "solid-js";
 import { Dynamic, Portal } from "solid-js/web";
 import FileIcon from "./FileIcon";
 import { typeIcon } from "./typeIcons";
-import { didYouMean, extPreview, FILE_TYPES, findType, FOLDERS, knownType, typeTokens, withoutTypes } from "../lib/filetypes";
+import { didYouMean, extPreview, FILE_TYPES, findType, FOLDERS, KIND_EXTS, knownType, typeTokens, withoutTypes } from "../lib/filetypes";
 import "../palette.css";
-import { formatDate, formatSize } from "../lib/format";
+import { formatDate, formatSize, KIND_LABEL, kindOf } from "../lib/format";
 import { basename, parent } from "../lib/path";
 import { activeTab, navigate, newTab, openMenu, recents, setUi, toast, ui } from "../lib/state";
 import { api } from "../lib/api";
@@ -110,6 +110,83 @@ const FILTERS: { token: string; value: string; text: string }[] = [
   { token: "type:file", value: "file", text: "Files only (type:folder for folders)" },
 ];
 
+/** A row above the results: a filter to finish, or a type to switch to. */
+interface Suggestion {
+  icon: typeof Search;
+  main: JSX.Element;
+  detail?: string;
+  apply: () => void;
+}
+
+/** Filters offered while their name is typed ("ty" → type:). */
+const FILTER_KEYS = [
+  { key: "type", icon: Shapes, text: "Images, videos, documents…" },
+  { key: "ext", icon: Hash, text: "An extension, like pdf" },
+  { key: "size", icon: Ruler, text: "Bigger or smaller than" },
+  { key: "modified", icon: CalendarClock, text: "When it last changed" },
+  { key: "in", icon: FolderSearch, text: "Only inside a folder" },
+];
+const SIZES: [string, string][] = [
+  [">100mb", "Bigger than 100 MB"], [">1gb", "Bigger than 1 GB"], ["<1mb", "Smaller than 1 MB"],
+  ["1mb..100mb", "Between 1 and 100 MB"], ["empty", "Empty files"],
+];
+const DATES: [string, string][] = [
+  ["today", "Today"], ["yesterday", "Yesterday"], ["<7d", "In the last 7 days"], ["<30d", "In the last 30 days"],
+  ["<1y", "In the last year"], [">1y", "More than a year ago"],
+];
+/** Extensions people look for most, first when several match. */
+const COMMON_EXTS = [
+  "pdf", "docx", "xlsx", "pptx", "jpg", "png", "gif", "mp4", "mp3", "zip", "txt", "md", "exe", "msi", "csv", "json",
+  "py", "js", "ts", "html", "mov", "mkv", "wav", "doc", "xls", "rar", "7z", "iso", "svg", "webp", "heic", "log",
+];
+
+/** Values for a filter being typed (`type:im` → Images; `ext:p` → pdf, png…), each finishing it. */
+function filterValues(key: string, value: string, complete: (token: string) => void): Suggestion[] {
+  const k = key.toLowerCase();
+  // Lists (`type:image,vi`) complete their last item.
+  const parts = value.split(",");
+  const cur = parts.pop()!.toLowerCase();
+  const before = parts.length ? `${parts.join(",")},` : "";
+  const finish = (v: string) => () => complete(`${key}:${before}${v}`);
+  if (k === "type" || k === "kind") {
+    const types = [...FILE_TYPES, findType("pdf")!, findType("sheet")!, FOLDERS, { id: "file", label: "Files", words: [], suggest: [], exts: [] }];
+    return types
+      .filter((t) => !cur || t.id.startsWith(cur) || t.words.some((w) => w.startsWith(cur)))
+      .map((t) => ({
+        icon: typeIcon(t.id),
+        main: <><span class="palette-suggest-label">{t.id === "file" ? "Files only" : t.label}</span> <code>type:{t.id}</code></>,
+        detail: extPreview(t),
+        apply: finish(t.id),
+      }));
+  }
+  if (k === "ext") {
+    const all = [...new Set([...COMMON_EXTS, ...Object.values(KIND_EXTS).flat()])];
+    const rank = (e: string) => (COMMON_EXTS.includes(e) ? COMMON_EXTS.indexOf(e) : 100 + e.length);
+    const exts = all.filter((e) => e.startsWith(cur)).sort((a, b) => rank(a) - rank(b));
+    return exts.slice(0, 8).map((e) => ({
+      icon: typeIcon(kindOf({ isDir: false, ext: e })),
+      main: <code>.{e}</code>,
+      detail: KIND_LABEL[kindOf({ isDir: false, ext: e })],
+      apply: finish(e),
+    }));
+  }
+  const options = (list: [string, string][], icon: typeof Search) =>
+    list.filter(([v]) => v.startsWith(cur)).map(([v, text]) => ({ icon, main: <><code>{key}:{v}</code> {text}</>, apply: finish(v) }));
+  if (k === "size") return options(SIZES, Ruler);
+  if (k === "modified" || k === "mod" || k === "date") return options(DATES, CalendarClock);
+  // in: this folder, then recent ones.
+  const folders = [...new Set([activeTab().p, ...recents().map((r) => r.path)])];
+  return folders
+    .filter((p) => !value || p.toLowerCase().includes(value.toLowerCase()))
+    .slice(0, 6)
+    .map((p) => ({
+      icon: FolderSearch,
+      main: <>{basename(p) || p}</>,
+      detail: p,
+      apply: () => complete(`in:${/\s/.test(p) ? `"${p}"` : p}`),
+    }));
+}
+
 /** Typing "?" (or the ? button): every file type and filter, each one click away. */
 function SearchHelp(props: { onType: (id: string) => void; onInsert: (token: string, value: string) => void }): JSX.Element {
   return (
@@ -183,25 +260,18 @@ export default function SearchPalette(props: { mode: "files" | "commands"; comma
     setHelpOpen(false);
     input.focus();
   };
-  /** "vacation videos" or "text files": offers to turn the type word into a filter. */
-  const suggestion = createMemo(() => {
+  /** "vacation videos", "image" or "text files": the type word, to offer it as a filter. */
+  const wordType = createMemo(() => {
     if (commandMode() || typeChip() || typed().length || text().includes('"')) return null;
     const words = query().split(/\s+/).filter(Boolean);
     for (let i = 0; i < words.length; i++) {
       const w = words[i].toLowerCase();
       const pair = i + 1 < words.length && /^files?$/i.test(words[i + 1]) ? findType(w) : undefined;
-      const type = pair ?? FILE_TYPES.find((t) => t.suggest.includes(w));
-      if (type && type.id !== "folder") return { type, rest: words.filter((_, j) => j !== i && !(pair && j === i + 1)).join(" ") };
+      const type = pair ?? (FOLDERS.words.includes(w) ? FOLDERS : FILE_TYPES.find((t) => t.suggest.includes(w)));
+      if (type) return { type, rest: words.filter((_, j) => j !== i && !(pair && j === i + 1)).join(" ") };
     }
     return null;
   });
-  const acceptSuggestion = () => {
-    const s = suggestion();
-    if (!s) return;
-    setText(s.rest);
-    setTypeChip(s.type.id);
-    input.focus();
-  };
   /** A `type:` word search doesn't know, and the closest one it does. */
   const typeHint = createMemo(() => {
     for (const t of typed()) for (const v of t.values) if (!knownType(v)) return { raw: t.raw, bad: v, fix: didYouMean(v) };
@@ -214,6 +284,48 @@ export default function SearchPalette(props: { mode: "files" | "commands"; comma
     else setHelpOpen(true);
     input.focus();
   };
+
+  // ---- suggestions above the results: filter keys and values as they're typed ----
+  /** The word being typed (the last one, unless the box ends with a space). */
+  const typing = () => (/\s$/.test(text()) ? null : /(\S+)$/.exec(text())?.[1] ?? null);
+  /** Puts `token` in place of the word being typed. */
+  const complete = (token: string, space = true) => {
+    const t = text();
+    const m = /(\S+)$/.exec(t);
+    const next = (m ? t.slice(0, m.index) : t) + token + (space ? " " : "");
+    setText(next);
+    setHelpOpen(false);
+    queueMicrotask(() => { input.focus(); input.setSelectionRange(next.length, next.length); });
+  };
+  const suggestions = createMemo((): { rows: Suggestion[]; first: boolean } => {
+    if (commandMode() || showHelp()) return { rows: [], first: false };
+    const word = typing();
+    const filter = word && !word.includes('"') ? /^(type|kind|ext|size|modified|mod|date|in):(.*)$/i.exec(word) : null;
+    if (filter) {
+      // Values for the filter being typed; they come first (Enter or Tab takes one).
+      const rows = filterValues(filter[1], filter[2], complete);
+      if (rows.length) return { rows, first: true };
+    }
+    const h = typeHint();
+    if (h) return { rows: [{ icon: Info, main: <>Unknown type “{h.bad}”. {h.fix ? <>Did you mean <b>{h.fix}</b>?</> : "See the types"}</>, apply: fixType }], first: true };
+    const rows: Suggestion[] = [];
+    const w = word?.toLowerCase() ?? "";
+    if (w.length >= 2 && !filter && !/[:!"\\]/.test(w)) {
+      for (const k of FILTER_KEYS) if (k.key.startsWith(w)) rows.push({ icon: k.icon, main: <><code>{k.key}:</code> {k.text}</>, apply: () => complete(`${k.key}:`, false) });
+    }
+    const s = wordType();
+    if (s) {
+      rows.push({
+        icon: typeIcon(s.type.id),
+        main: s.rest ? <>Only <b>{files(s.type.label)}</b> named “{s.rest}”</> : <>All <b>{files(s.type.label)}</b></>,
+        detail: extPreview(s.type),
+        apply: () => { setText(s.rest); setTypeChip(s.type.id); input.focus(); },
+      });
+    }
+    return { rows, first: false };
+  });
+  /** Results are numbered after the suggestions. */
+  const offset = () => suggestions().rows.length;
   /** Adds a filter from the help to the box, its value selected to type over. */
   const insertFilter = (token: string, value: string) => {
     const base = text().trim() === "?" ? "" : text().trimEnd();
@@ -242,7 +354,7 @@ export default function SearchPalette(props: { mode: "files" | "commands"; comma
     setBusy(true);
     try {
       const r = await invoke<SearchResults>("search_query", { query: q, limit: 60, scope: scoped() ? activeTab().p : null, frecency: frecency() });
-      if (q === fullQuery() && !commandMode()) { setRes(r); setPick(0); }
+      if (q === fullQuery() && !commandMode()) setRes(r);
     } catch (e) {
       toast(`Search failed: ${e}`, "error");
     } finally {
@@ -282,7 +394,9 @@ export default function SearchPalette(props: { mode: "files" | "commands"; comma
       .slice(0, 40);
   });
 
-  const count = () => (commandMode() ? commandHits().length : res()?.results.length ?? 0);
+  const count = () => (commandMode() ? commandHits().length : offset() + (res()?.results.length ?? 0));
+  // The first result is picked, unless a filter is being finished (or there's nothing else).
+  createEffect(on([suggestions, res], ([s, r]) => setPick(s.first || !r?.results.length ? 0 : s.rows.length)));
 
   const reveal = (h: Hit) => {
     const dir = h.isDir ? h.path : parent(h.path);
@@ -294,7 +408,8 @@ export default function SearchPalette(props: { mode: "files" | "commands"; comma
       if (c) { close(); c.run(); }
       return;
     }
-    const h = res()?.results[i];
+    if (i < offset()) return suggestions().rows[i]?.apply();
+    const h = res()?.results[i - offset()];
     if (!h) return;
     close();
     if (how === "tab") newTab(h.isDir ? h.path : parent(h.path) ?? h.path);
@@ -312,7 +427,7 @@ export default function SearchPalette(props: { mode: "files" | "commands"; comma
     if (e.altKey && /^[0-9]$/.test(e.key) && !commandMode()) { e.preventDefault(); pickType(CHIPS[+e.key]); }
     else if (e.key === "Escape") { e.preventDefault(); if (helpOpen()) setHelpOpen(false); else if (!ui.menu) close(); }
     else if (e.key === "Backspace" && typeChip() && input.selectionStart === 0 && input.selectionEnd === 0) { e.preventDefault(); setTypeChip(null); }
-    else if (e.key === "Tab" && suggestion()) { e.preventDefault(); acceptSuggestion(); }
+    else if (e.key === "Tab" && offset()) { e.preventDefault(); suggestions().rows[pick() < offset() ? pick() : 0].apply(); }
     else if (e.key === "ArrowDown") { e.preventDefault(); if (n) setPick((p) => (p + 1) % n); }
     else if (e.key === "ArrowUp") { e.preventDefault(); if (n) setPick((p) => (p - 1 + n) % n); }
     else if (e.key === "PageDown") { e.preventDefault(); setPick((p) => Math.min(n - 1, p + 8)); }
@@ -408,24 +523,17 @@ export default function SearchPalette(props: { mode: "files" | "commands"; comma
           <div class="palette-list" ref={list}>
             <Show when={commandMode()} fallback={
               <Show when={!showHelp()} fallback={<SearchHelp onType={pickType} onInsert={insertFilter} />}>
-              <Show when={typeHint()}>
-                {(h) => (
-                  <button class="palette-hint" onClick={fixType}>
-                    <Info size={14} />
-                    <span>Unknown type “{h().bad}”. <Show when={h().fix} fallback="See the types">{(fix) => <>Did you mean <b>{fix()}</b>?</>}</Show></span>
+              <For each={suggestions().rows}>
+                {(s, i) => (
+                  <button class="palette-suggest" classList={{ active: i() === pick() }} data-i={i()}
+                    onMouseMove={() => setPick(i())} onClick={() => s.apply()}>
+                    <Dynamic component={s.icon} size={15} />
+                    <span class="palette-suggest-main">{s.main}</span>
+                    <span class="palette-suggest-exts">{s.detail}</span>
+                    <Show when={i() === pick()}><kbd>Tab</kbd></Show>
                   </button>
                 )}
-              </Show>
-              <Show when={suggestion()}>
-                {(s) => (
-                  <button class="palette-suggest" onClick={acceptSuggestion}>
-                    <Dynamic component={typeIcon(s().type.id)} size={15} />
-                    <span>{s().rest ? <>Only <b>{files(s().type.label)}</b> named “{s().rest}”</> : <>All <b>{files(s().type.label)}</b></>}</span>
-                    <span class="palette-suggest-exts">{extPreview(s().type)}</span>
-                    <kbd>Tab</kbd>
-                  </button>
-                )}
-              </Show>
+              </For>
               <Show when={res()?.results.length} fallback={
                 <div class="palette-empty">
                   <Show when={fullQuery()} fallback={<span>Type to search {indexed() ? `${indexed().toLocaleString()} indexed items` : "your drives"}, or pick a type above. <code>?</code> shows every filter · <code>&gt;</code> for commands</span>}>
@@ -436,12 +544,12 @@ export default function SearchPalette(props: { mode: "files" | "commands"; comma
                 </div>
               }>
                 <For each={res()!.results}>
-                  {(h, i) => (
-                    <div class="palette-item file" role="option" aria-selected={i() === pick()} classList={{ active: i() === pick() }} data-i={i()}
-                      onMouseMove={() => setPick(i())}
-                      onClick={(e) => activate(i(), e.ctrlKey ? "tab" : e.altKey ? "reveal" : "open")}
-                      onAuxClick={(e) => e.button === 1 && activate(i(), "tab")}
-                      onContextMenu={(e) => resultMenu(e, i(), h)}
+                  {(h, i) => { const n = () => i() + offset(); return (
+                    <div class="palette-item file" role="option" aria-selected={n() === pick()} classList={{ active: n() === pick() }} data-i={n()}
+                      onMouseMove={() => setPick(n())}
+                      onClick={(e) => activate(n(), e.ctrlKey ? "tab" : e.altKey ? "reveal" : "open")}
+                      onAuxClick={(e) => e.button === 1 && activate(n(), "tab")}
+                      onContextMenu={(e) => resultMenu(e, n(), h)}
                       title={h.path}>
                       <FileIcon entry={{ isDir: h.isDir, ext: h.isDir ? "" : (h.name.split(".").pop() ?? "").toLowerCase(), isSymlink: false }} size={16} />
                       <span class="palette-name"><Highlight text={h.name} matches={h.matches} /></span>
@@ -464,11 +572,11 @@ export default function SearchPalette(props: { mode: "files" | "commands"; comma
                       </span>
                       <span class="palette-meta">{h.isDir ? "" : h.size != null ? formatSize(h.size) : ""}{h.modified ? ` · ${formatDate(h.modified).slice(0, 10)}` : ""}</span>
                       <button class="palette-reveal" title={h.isDir ? "Open folder" : "Show in folder (Alt+Enter)"}
-                        onClick={(e) => { e.stopPropagation(); activate(i(), "reveal"); }}>
+                        onClick={(e) => { e.stopPropagation(); activate(n(), "reveal"); }}>
                         <FolderOpen size={14} /><span>{h.isDir ? "Open" : "Show in folder"}</span>
                       </button>
                     </div>
-                  )}
+                  ); }}
                 </For>
               </Show>
               </Show>

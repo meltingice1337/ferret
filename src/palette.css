@@ -77,14 +77,17 @@
 .palette-type-pill:hover { background: var(--accent-soft); }
 .palette-help-btn.on { color: var(--accent); background: var(--accent-softer); }
 
-/* "vacation videos" → only videos (Tab); a type search doesn't know. */
-.palette-suggest, .palette-hint {
+/* Above the results: values for a filter being typed, "vacation videos" → only videos, typos. */
+.palette-suggest {
   width: 100%; display: flex; align-items: center; gap: 10px; height: 36px; padding: 0 10px; margin-bottom: 2px;
   border-radius: 8px; text-align: left; font-size: 13px; color: var(--fg);
 }
-.palette-suggest:hover, .palette-hint:hover { background: var(--hover); }
-.palette-suggest > svg, .palette-hint > svg { flex: none; color: var(--accent); }
-.palette-suggest b, .palette-hint b { font-weight: 600; color: var(--accent); }
+.palette-suggest.active { background: var(--accent-soft); }
+.palette-suggest > svg { flex: none; color: var(--accent); }
+.palette-suggest b { font-weight: 600; color: var(--accent); }
+.palette-suggest-main { flex: none; max-width: 62%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.palette-suggest-main code { font-family: var(--mono); font-size: 12px; padding: 1px 6px; border-radius: 5px; background: var(--hover); color: var(--fg-2); }
+.palette-suggest-label { color: var(--fg); }
 .palette-suggest-exts { flex: 1; min-width: 0; font-size: 12px; color: var(--fg-3); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .palette-suggest kbd { min-width: 0; }
 

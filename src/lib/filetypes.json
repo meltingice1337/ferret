@@ -17,26 +17,26 @@
     {
       "id": "image", "label": "Images", "kinds": ["image"],
       "words": ["image", "images", "img", "imgs", "picture", "pictures", "pic", "pics", "photo", "photos"],
-      "suggest": ["images", "pictures", "photos", "pics"]
+      "suggest": ["image", "images", "picture", "pictures", "photo", "photos", "pics"]
     },
     {
       "id": "video", "label": "Videos", "kinds": ["video"],
       "words": ["video", "videos", "vid", "vids", "movie", "movies", "clip", "clips"],
-      "suggest": ["videos", "movies", "clips"]
+      "suggest": ["video", "videos", "movie", "movies", "clips"]
     },
     {
       "id": "audio", "label": "Audio", "kinds": ["audio"],
       "words": ["audio", "music", "sound", "sounds", "song", "songs"],
-      "suggest": ["music", "songs"]
+      "suggest": ["audio", "music", "songs"]
     },
     {
       "id": "doc", "label": "Documents", "kinds": ["pdf", "doc", "sheet"],
       "words": ["doc", "docs", "document", "documents", "office"],
-      "suggest": ["documents", "docs"]
+      "suggest": ["document", "documents", "docs"]
     },
     {
       "id": "text", "label": "Text", "kinds": ["text"], "also": "csv tsv",
-      "words": ["text", "texts", "txt", "notes", "plain"],
+      "words": ["text", "texts", "txt"],
       "suggest": []
     },
     {
@@ -47,7 +47,7 @@
     {
       "id": "archive", "label": "Archives", "kinds": ["archive"],
       "words": ["archive", "archives", "zip", "zips", "compressed"],
-      "suggest": ["archives"]
+      "suggest": ["archive", "archives"]
     },
     {
       "id": "app", "label": "Apps", "kinds": [], "also": "exe msi appx msix appxbundle msixbundle",
@@ -56,13 +56,13 @@
     },
     {
       "id": "data", "label": "Data and config", "kinds": ["data"],
-      "words": ["data", "config", "configs", "settings"],
+      "words": ["data", "config", "configs"],
       "suggest": []
     },
     {
       "id": "font", "label": "Fonts", "kinds": ["font"],
       "words": ["font", "fonts"],
-      "suggest": ["fonts"]
+      "suggest": ["font", "fonts"]
     }
   ]
 }
