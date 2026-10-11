@@ -16,6 +16,8 @@ import PdfPages from "./PdfPages";
 export interface Meta {
   label: string;
   value: string;
+  /** Kept from the previous item while the next one loads (shown blank). */
+  pending?: boolean;
 }
 
 /** Renderers report extra metadata (dimensions, duration, lines…) through this. */

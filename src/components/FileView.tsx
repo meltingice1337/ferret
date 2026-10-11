@@ -10,6 +10,7 @@ import { formatDate, formatSize, kindOf, plural, typeLabel } from "../lib/format
 import { emptyBin, isCut, newFolder, renamePath, restoreFromBin, targetsOf, visibleEntries } from "../lib/ops";
 import { groupEntries, sortEntries, type Group } from "../lib/sortgroup";
 import { isRecycle, pathKey } from "../lib/path";
+import { folderSizes, requestFolderSizes, sizesApply, sizesEpoch } from "../lib/foldersizes";
 import { goUp, holdKeys, openEntry, openMenu, persistSettings, releaseKeys, reload, setSettings, setUi, settings, sortBy, takeTypeAhead, toast, ui, updateView, type Tab } from "../lib/state";
 import type { Entry, ListColumn, SortBy } from "../lib/types";
 
@@ -109,15 +110,31 @@ export default function FileView(props: { tab: Tab }) {
 
   // ---------- data pipeline: filter → sort → group → rows ----------
 
+  const showFolderSizes = () => settings.folderSizes && sizesApply(t.p);
   const groups = createMemo(() => {
     const v = view();
     let list = t.entries[0]();
     if (!v.showHidden) list = list.filter((e) => !e.hidden);
     const f = t.filter[0]().trim().toLowerCase();
     if (f) list = list.filter((e) => e.name.toLowerCase().includes(f));
+    // Sorting by size puts folders in order once their sizes are counted (finished counts
+    // only, so rows don't keep moving while totals grow).
+    const sizeOf = v.sortBy === "size" && showFolderSizes()
+      ? (e: Entry) => (e.isDir ? (folderSizes[pathKey(e.path)]?.done ? folderSizes[pathKey(e.path)].bytes : 0) : e.size)
+      : undefined;
     // In the Recycle Bin the newest deletions come first, folders or not.
-    return groupEntries(sortEntries(list, bin() ? { ...v, foldersFirst: false } : v), v);
+    return groupEntries(sortEntries(list, bin() ? { ...v, foldersFirst: false } : v, sizeOf), v);
   });
+
+  // Folder sizes: this tab's folders are counted in the background. Asked again when the
+  // folders change or something was marked out of date (not on every re-sort).
+  const sizeTargets = createMemo(() => {
+    if (!showFolderSizes()) return "";
+    const hidden = view().showHidden;
+    return t.entries[0]().filter((e) => e.isDir && !e.inArchive && (hidden || !e.hidden)).map((e) => e.path).join("\n");
+  });
+  createEffect(on([sizeTargets, sizesEpoch], ([s]) => requestFolderSizes(t.id, s ? s.split("\n") : [])));
+  onCleanup(() => requestFolderSizes(t.id, []));
 
   const itemH = () => (settings.density === "compact" ? 24 : 30);
   const cellW = () => view().iconSize + 34;
@@ -553,7 +570,18 @@ export default function FileView(props: { tab: Tab }) {
     ]);
   };
   const dropAttr = (e: Entry) => (e.isDir && !e.inArchive && !bin() ? e.path : undefined);
-  const sizeText = (e: Entry) => (e.isDir && !bin() ? "" : formatSize(e.size));
+  /** Size column: a file's size, or a folder's counted size (dimmed while counting). */
+  const sizeCell = (e: Entry): { text: string; counting?: boolean; title?: string } => {
+    if (!e.isDir || bin()) return { text: formatSize(e.size) };
+    if (!showFolderSizes() || e.inArchive) return { text: "" };
+    const s = folderSizes[pathKey(e.path)];
+    if (!s) return { text: "…", counting: true, title: "Counting…" };
+    return {
+      text: formatSize(s.bytes),
+      counting: !s.done,
+      title: !s.done ? "Counting…" : `${plural(s.files, "file")}${s.partial ? " · some folders inside couldn't be read" : ""}`,
+    };
+  };
 
   return (
     <div class="fileview" classList={{ grid: view().mode === "grid", bin: bin() }}>
@@ -626,7 +654,9 @@ export default function FileView(props: { tab: Tab }) {
                       <Show when={showOrigin()}><span class="c-type c-origin" title={e().origin}>{e().origin}</span></Show>
                       <Show when={showDate()}><span class="c-date">{formatDate(e().modified)}</span></Show>
                       <Show when={showType()}><span class="c-type">{typeLabel(e())}</span></Show>
-                      <Show when={showSize()}><span class="c-size">{sizeText(e())}</span></Show>
+                      <Show when={showSize()}>
+                        <span class="c-size" classList={{ counting: !!sizeCell(e()).counting }} title={sizeCell(e()).title}>{sizeCell(e()).text}</span>
+                      </Show>
                     </div>
                   )}
                 </Match>
@@ -643,7 +673,7 @@ export default function FileView(props: { tab: Tab }) {
                           onClick={(ev) => onItemClick(ev, e)}
                           onDblClick={() => settings.doubleClickOpen && t.renaming[0]() !== e.path && openEntry(t, e)}
                           onContextMenu={(ev) => onItemMenu(ev, e)}
-                          title={bin() ? `${e.name}\nFrom ${e.origin}\nDeleted ${formatDate(e.modified)} · ${formatSize(e.size)}` : `${e.name}\n${typeLabel(e)}${e.isDir ? "" : ` · ${formatSize(e.size)}`}\n${formatDate(e.modified)}`}
+                          title={bin() ? `${e.name}\nFrom ${e.origin}\nDeleted ${formatDate(e.modified)} · ${formatSize(e.size)}` : `${e.name}\n${typeLabel(e)}${e.isDir ? (folderSizes[pathKey(e.path)]?.done ? ` · ${formatSize(folderSizes[pathKey(e.path)].bytes)}` : "") : ` · ${formatSize(e.size)}`}\n${formatDate(e.modified)}`}
                         >
                           <div class="cell-icon" style={{ height: `${view().iconSize}px` }}>
                             <Thumb entry={e} size={view().iconSize} />

@@ -2,6 +2,7 @@ import { batch, createSignal } from "solid-js";
 import { createStore, unwrap } from "solid-js/store";
 import { listen } from "@tauri-apps/api/event";
 import { api } from "./api";
+import { invalidateFolderSizes } from "./foldersizes";
 import { onColor } from "./format";
 import { basename, isArchiveName, isRecycle, parent, pathKey, samePath } from "./path";
 import type {
@@ -19,7 +20,7 @@ export const [settings, setSettings] = createStore<Settings>({
   theme: "dark", accent: "#e2457f", backdrop: "mica", density: "comfortable",
   doubleClickOpen: true, rememberPerFolder: true, inheritToSubfolders: false, restoreSession: true,
   hiddenPlaces: [], hiddenSections: [],
-  columnWidths: { modified: 150, type: 140, size: 90 }, hiddenColumns: [],
+  columnWidths: { modified: 150, type: 140, size: 90 }, hiddenColumns: [], folderSizes: true,
   globalView: { ...DEFAULT_VIEW },
   profiles: {
     media: { enabled: true, view: {} },
@@ -389,6 +390,12 @@ export async function navigate(
 
 /** Re-lists the folder in place, keeping selection and (unless asked) the current view. */
 const vanishing = new Set<number>();
+
+/** F5 / the refresh button: list the folder again and count its folders' sizes again. */
+export function refresh(tab: Tab) {
+  invalidateFolderSizes([tab.p], true);
+  return reload(tab);
+}
 
 export async function reload(tab: Tab, reresolve = false) {
   const tok = ++tab.token;

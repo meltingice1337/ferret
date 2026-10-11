@@ -5,7 +5,8 @@ import { isRecycle, pathKey } from "../lib/path";
 import {
   activeTab, openMenu, persistSession, previewSpace, saveViewForFolder, setUi, settings, ui, updateView,
 } from "../lib/state";
-import type { GroupBy, SortBy } from "../lib/types";
+import type { Entry, GroupBy, SortBy } from "../lib/types";
+import { folderSizes } from "../lib/foldersizes";
 import { GROUP_LABELS, SORT_LABELS } from "./FileView";
 
 export default function StatusBar() {
@@ -17,10 +18,15 @@ export default function StatusBar() {
     const shown = v().showHidden ? entries : entries.filter((e) => !e.hidden);
     const sel = new Set(t().selection[0]().map(pathKey));
     const selected = entries.filter((e) => sel.has(pathKey(e.path)));
-    const bytes = selected.reduce((a, e) => a + (e.isDir ? 0 : e.size), 0);
+    // Selected folders count with their counted sizes; "+" while some aren't known yet.
+    const known = (e: Entry) => (e.isDir ? folderSizes[pathKey(e.path)]?.done ? folderSizes[pathKey(e.path)].bytes : null : e.size);
+    const bytes = selected.reduce((a, e) => a + (known(e) ?? 0), 0);
     const f = t().filter[0]().trim().toLowerCase();
     const matching = f ? shown.filter((e) => e.name.toLowerCase().includes(f)).length : shown.length;
-    return { total: shown.length, matching, hidden: entries.length - shown.length, selected: selected.length, bytes, anyDir: selected.some((e) => e.isDir), anyFile: selected.some((e) => !e.isDir) };
+    return {
+      total: shown.length, matching, hidden: entries.length - shown.length, selected: selected.length, bytes,
+      anyDir: selected.some((e) => known(e) === null), anyFile: selected.some((e) => known(e) !== null),
+    };
   });
 
   const sortMenu = (e: MouseEvent) => {

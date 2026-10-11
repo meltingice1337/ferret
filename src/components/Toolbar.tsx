@@ -3,7 +3,7 @@ import { createEffect, createMemo, createSignal, For, on, Show } from "solid-js"
 import { api } from "../lib/api";
 import { isRecycle, isWsl, parent, segments } from "../lib/path";
 import {
-  activeTab, goBack, goForward, goUp, isFavorite, navigate, openMenu, reload, setUi, sidebarDocked, toast,
+  activeTab, goBack, goForward, goUp, isFavorite, navigate, openMenu, refresh, setUi, sidebarDocked, toast,
   toggleFavorite, ui, winWidth,
 } from "../lib/state";
 import FileIcon from "./FileIcon";
@@ -25,7 +25,7 @@ export default function Toolbar() {
         <button class="icon-btn" disabled={!canBack()} title="Back (Alt+←)" onClick={() => goBack(tab())}><ArrowLeft size={16} /></button>
         <button class="icon-btn" disabled={!canFwd()} title="Forward (Alt+→)" onClick={() => goForward(tab())}><ArrowRight size={16} /></button>
         <button class="icon-btn" disabled={!parent(tab().p)} title="Up (Alt+↑)" onClick={() => goUp(tab())}><ArrowUp size={16} /></button>
-        <button class="icon-btn" title="Refresh (F5)" onClick={() => reload(tab())}>
+        <button class="icon-btn" title="Refresh (F5)" onClick={() => refresh(tab())}>
           <RotateCw size={15} classList={{ spin: tab().loading[0]() }} />
         </button>
         <button class="icon-btn star" classList={{ on: isFavorite(tab().p) }}

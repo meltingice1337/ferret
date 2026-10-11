@@ -22,7 +22,7 @@ import { adminWindow, applyAppearance, elevateWindow, isFavorite, navigate, open
 import { RECYCLE } from "./lib/path";
 import {
   activeTab, boot, closeTab, cycleTab, dismissToast, goBack, goForward, goUp, newTab,
-  persistSession, previewSpace, ready, sidebarDocked, reload, reopenClosedTab, setUi, toast, toggleFavorite, ui, updateView,
+  persistSession, previewSpace, ready, sidebarDocked, refresh, reopenClosedTab, setUi, toast, toggleFavorite, ui, updateView,
 } from "./lib/state";
 import type { GroupBy } from "./lib/types";
 import { feedTypeAhead, keysHeld, queueKey, winWidth } from "./lib/state";
@@ -45,7 +45,7 @@ function paletteCommands(): PaletteCommand[] {
     cmd("Paste", () => paste(t.p), "Ctrl+V"),
     cmd("Undo", () => undo(), "Ctrl+Z", undoLabel() ?? undefined),
     cmd("Redo", () => redo(), "Ctrl+Y", redoLabel() ?? undefined),
-    cmd("Refresh", () => reload(t), "F5"),
+    cmd("Refresh", () => refresh(t), "F5"),
     cmd("Go up", () => goUp(t), "Alt+↑"),
     cmd("Edit path", () => setUi("editingPath", true), "Ctrl+L"),
     cmd("Filter this folder", () => setUi("filterOpen", true), "Ctrl+F"),
@@ -153,7 +153,7 @@ export default function App() {
         }
         if (e.key === "Enter" && !inField) { e.preventDefault(); const tg = targetsOf(t); return setUi("properties", tg.length ? tg.map((x) => x.path) : [t.p]); }
       }
-      if (e.key === "F5") { e.preventDefault(); return reload(t); }
+      if (e.key === "F5") { e.preventDefault(); return refresh(t); }
 
       // ---- file actions (not while typing) ----
       if (!inField) {

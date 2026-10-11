@@ -1,6 +1,6 @@
 import { convertFileSrc, invoke } from "@tauri-apps/api/core";
 import type {
-  ArchiveInfo, Bootstrap, ClipboardFiles, Conflict, DefaultManagerStatus, DirListing, Favorite, FolderView, ItemInfo,
+  ArchiveInfo, Bootstrap, ClipboardFiles, Conflict, DefaultManagerStatus, DirListing, Favorite, FolderSize, FolderView, ItemInfo,
   LaunchTarget, OpenWithApp, Places, Policy, Recent, RecycleInfo, Session, ShellMenuItem, ShellOp, Settings, Stats, TextPreview, ViewSettings,
 } from "./types";
 
@@ -48,6 +48,9 @@ export const api = {
   findInTrash: (items: string[]) => invoke<string[]>("find_in_trash", { items }),
   itemInfo: (path: string) => invoke<ItemInfo>("item_info", { path }),
   folderStats: (items: string[]) => invoke<Stats>("folder_stats", { items }),
+  folderSizes: (requester: number, paths: string[], refresh = false) =>
+    invoke<FolderSize[]>("folder_sizes", { requester, paths, refresh }),
+  folderSizesInvalidate: (paths: string[], deep = false) => invoke<void>("folder_sizes_invalidate", { paths, deep }),
   setAttributes: (path: string, readonly: boolean, hidden: boolean) =>
     invoke<void>("set_attributes", { path, readonly, hidden }),
   readText: (path: string, maxBytes?: number) => invoke<TextPreview>("read_text", { path, maxBytes }),

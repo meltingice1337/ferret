@@ -3,7 +3,8 @@ import type { Entry, ViewSettings } from "./types";
 
 const collator = new Intl.Collator(undefined, { numeric: true, sensitivity: "base" });
 
-export function sortEntries(list: Entry[], v: ViewSettings): Entry[] {
+/** `sizeOf` gives folders a size when sorting by size (counted folder sizes). */
+export function sortEntries(list: Entry[], v: ViewSettings, sizeOf: (e: Entry) => number = (e) => e.size): Entry[] {
   const dir = v.sortDir === "asc" ? 1 : -1;
   const by = v.sortBy;
   const cmp = (a: Entry, b: Entry): number => {
@@ -11,7 +12,7 @@ export function sortEntries(list: Entry[], v: ViewSettings): Entry[] {
     switch (by) {
       case "modified": r = (a.modified ?? 0) - (b.modified ?? 0); break;
       case "created": r = (a.created ?? 0) - (b.created ?? 0); break;
-      case "size": r = a.size - b.size; break;
+      case "size": r = sizeOf(a) - sizeOf(b); break;
       case "type": r = collator.compare(typeLabel(a), typeLabel(b)); break;
     }
     if (r === 0) r = collator.compare(a.name, b.name);

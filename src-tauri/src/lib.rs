@@ -3,6 +3,7 @@ mod commands;
 mod db;
 mod details;
 mod fileops;
+mod foldersize;
 mod integration;
 mod jobs;
 mod listing;
@@ -134,6 +135,8 @@ pub fn run() {
             fileops::find_in_trash,
             fileops::item_info,
             fileops::folder_stats,
+            foldersize::folder_sizes,
+            foldersize::folder_sizes_invalidate,
             fileops::set_attributes,
             fileops::read_text,
             fileops::read_bytes,

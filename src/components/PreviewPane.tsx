@@ -60,7 +60,7 @@ function MetaList(props: { entry: Entry; extra: Meta[] }) {
   ];
   return (
     <dl class="pv-meta">
-      <For each={rows()}>{(r) => <><dt>{r.label}</dt><dd>{r.value}</dd></>}</For>
+      <For each={rows()}>{(r) => <><dt>{r.label}</dt><dd>{r.value || " "}</dd></>}</For>
       {/* The Recycle Bin itself has no real path worth showing. */}
       <Show when={!isRecycle(props.entry.path)}>
         <dt>{original() ? "From" : "Path"}</dt>
@@ -182,7 +182,7 @@ export function QuickLook() {
                 <div class="pv-head-icon"><Thumb entry={e()} size={24} fallbackSize={20} /></div>
                 <div class="pv-head-text">
                   <div class="pv-name">{e().name}</div>
-                  <div class="pv-sub">{[typeLabel(e()), e().isDir ? "" : formatSize(e().size), ...meta().slice(0, 3).map(metaText)].filter(Boolean).join(" · ")}</div>
+                  <div class="pv-sub">{[typeLabel(e()), e().isDir ? "" : formatSize(e().size), ...meta().filter((m) => !m.pending).slice(0, 3).map(metaText)].filter(Boolean).join(" · ")}</div>
                 </div>
                 <span class="ql-count">{index() + 1} / {list().length}</span>
                 <button class="icon-btn" title="Previous (←)" onClick={() => go(-1)}><ChevronLeft size={16} /></button>

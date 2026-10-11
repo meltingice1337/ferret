@@ -1,4 +1,4 @@
-import { createEffect, createResource, createSignal, ErrorBoundary, Match, on, Show, Switch } from "solid-js";
+import { createEffect, createResource, createSignal, ErrorBoundary, Match, on, onCleanup, Show, Switch } from "solid-js";
 import { kindOf, typeLabel } from "../../lib/format";
 import { extractSmart, realPath } from "../../lib/ops";
 import { activeTab, friendly, navigate } from "../../lib/state";
@@ -16,7 +16,15 @@ const IMAGE_SHELL_ONLY = new Set(["heic", "heif", "tif", "tiff", "raw", "cr2", "
 /** Picks the right renderer for an entry. `large` = Quick Look. */
 export default function Preview(props: { entry: Entry; large?: boolean; onMeta?: (m: Meta[]) => void }) {
   const [meta, setMeta] = createSignal<Meta[]>([]);
-  createEffect(on(() => props.entry.path, () => setMeta([])));
+  // While the next item loads, its details keep the previous rows (blank) so the list below
+  // doesn't jump; rows the new item doesn't report are dropped after a moment.
+  let dropTimer: number | undefined;
+  createEffect(on(() => props.entry.path, () => {
+    setMeta((m) => m.map((x) => ({ ...x, value: "", pending: true })));
+    clearTimeout(dropTimer);
+    dropTimer = window.setTimeout(() => setMeta((m) => m.filter((x) => !x.pending)), 700);
+  }, { defer: true }));
+  onCleanup(() => clearTimeout(dropTimer));
   createEffect(() => props.onMeta?.(meta()));
 
   // Archive entries are extracted to a cache before previewing. Until the next item is ready

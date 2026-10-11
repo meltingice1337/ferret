@@ -5,6 +5,17 @@ export type GroupBy = "none" | "date" | "type" | "size" | "letter";
 /** List view columns besides Name. */
 export type ListColumn = "modified" | "type" | "size";
 
+/** Total size of everything inside a folder (counted in the background). */
+export interface FolderSize {
+  path: string;
+  bytes: number;
+  files: number;
+  /** Some folders inside couldn't be read. */
+  partial: boolean;
+  /** False while still counting: `bytes` is the total so far. */
+  done: boolean;
+}
+
 export interface ViewSettings {
   mode: ViewMode;
   sortBy: SortBy;
@@ -150,6 +161,8 @@ export interface Settings {
   columnWidths: Record<ListColumn, number>;
   /** List view columns the user hid (Name always shows). */
   hiddenColumns: ListColumn[];
+  /** Count folder sizes in the background and show them in the Size column. */
+  folderSizes: boolean;
   globalView: ViewSettings;
   profiles: Record<ProfileName, { enabled: boolean; view: Partial<ViewSettings> }>;
 }

@@ -6,6 +6,7 @@ import { createStore, produce } from "solid-js/store";
 import { listen } from "@tauri-apps/api/event";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import { api } from "./api";
+import { invalidateFolderSizes } from "./foldersizes";
 import { plural } from "./format";
 import { basename, inRecycleBin, isRecycle, isWithin, parent, pathKey, samePath } from "./path";
 import {
@@ -63,10 +64,24 @@ function track(id: number, done?: JobDone) {
   return id;
 }
 
-/** Re-lists every open tab (watchers catch most changes; this covers WSL/network). */
-function refreshAffected() {
+/** Paths operations touched since the last refresh: sizes of the folders holding them are out of date. */
+const touched = new Set<string>();
+let touchTimer: number | undefined;
+function touch(...paths: (string | null | undefined)[]) {
+  paths.forEach((p) => p && touched.add(p));
+  // Operations that don't end in refreshAffected (rename, new folder…) still get counted again.
+  clearTimeout(touchTimer);
+  touchTimer = window.setTimeout(() => { invalidateFolderSizes([...touched]); touched.clear(); }, 1500);
+}
+
+/** Re-lists every open tab (watchers catch most changes; this covers WSL/network) and marks
+ *  changed folder sizes out of date. `everywhere`: the change's place isn't known (undo/redo). */
+function refreshAffected(everywhere = false) {
   for (const t of tabs()) reload(t);
   refreshRecycleInfo();
+  if (everywhere) invalidateFolderSizes(tabs().map((t) => t.p), true);
+  else invalidateFolderSizes([...touched]);
+  touched.clear();
 }
 
 // ---------- undo journal ----------
@@ -139,7 +154,7 @@ export async function undo() {
   } finally {
     quietJobs--;
   }
-  refreshAffected();
+  refreshAffected(true);
 }
 
 export async function redo() {
@@ -158,7 +173,7 @@ export async function redo() {
   } finally {
     quietJobs--;
   }
-  refreshAffected();
+  refreshAffected(true);
 }
 
 /** Runs a job to completion and resolves with its final update. */
@@ -330,6 +345,7 @@ function askConflict(conflicts: import("./types").Conflict[], op: "copy" | "move
 export async function transferTo(op: "copy" | "move", sources: string[], dest: string): Promise<void> {
   // Dropping onto the Recycle Bin deletes.
   if (isRecycle(dest)) return deleteItems(sources, false);
+  touch(dest, ...(op === "move" ? sources : []));
   if (binGuard(sources, op === "move" ? "moved" : "copied")) return;
   sources = sources.filter((s) => !(op === "move" && samePath(parent(s), dest)));
   if (!sources.length) return;
@@ -419,6 +435,7 @@ export async function transferWithPicker(op: "copy" | "move", paths: string[]) {
 export async function deleteItems(paths: string[], permanent: boolean) {
   paths = paths.filter((p) => !busy.has(pathKey(p)));
   if (!paths.length) return;
+  touch(...paths);
   // Deleting inside the Recycle Bin is for good.
   if (paths.some(inRecycleBin)) return purgeFromBin(paths.filter(inRecycleBin));
   if (inArchive(paths)) return toast("Deleting inside archives isn't supported yet", "error");
@@ -466,6 +483,7 @@ export async function deleteItems(paths: string[], permanent: boolean) {
 /** Renames and records undo. Throws the error message (inline rename shows it in place). */
 export async function renamePath(path: string, newName: string): Promise<string> {
   if (newName === basename(path)) return path;
+  touch(path);
   const to = await tracked(renameTo(path, newName));
   const oldName = basename(path);
   record({
@@ -477,6 +495,7 @@ export async function renamePath(path: string, newName: string): Promise<string>
 }
 
 export async function batchRename(pairs: { from: string; to: string }[]) {
+  touch(...pairs.map((p) => p.from));
   const done: { from: string; to: string }[] = [];
   for (const p of pairs) {
     if (basename(p.from) === p.to) continue;
@@ -534,6 +553,7 @@ export const NEW_FILE_TYPES = [
 
 export async function newFile(t: Tab, name: string, content?: string) {
   if (isRecycle(t.p)) return toast("Can't create items in the Recycle Bin", "error");
+  touch(t.p);
   beginTypeAhead();
   try {
     const p = await tracked(withAdmin(
@@ -558,6 +578,7 @@ export async function restoreFromBin(items: string[]) {
       () => shellJob({ kind: "restore", items }),
     ));
     const back = u.created;
+    touch(...back);
     record({
       label: `Restore ${plural(back.length, "item")}`,
       undo: () => recycle(back),
@@ -626,6 +647,7 @@ async function withPassword<T>(fn: (pw?: string) => Promise<T>): Promise<T | und
 }
 
 export async function extractSmart(archive: string) {
+  touch(parent(archive));
   try {
     const u = await withPassword((pw) => runJob(api.archiveExtractSmart(archive, pw)));
     if (!u) return;
@@ -644,6 +666,7 @@ export async function extractTo(archive: string, dest?: string, entries?: string
     dest = picked;
   }
   const target = dest;
+  touch(target);
   try {
     const u = await withPassword((pw) => runJob(api.archiveExtract(archive, target, entries, pw)));
     if (!u) return;
@@ -668,6 +691,7 @@ export function zipNameFor(paths: string[]): string {
 export async function compress(paths: string[]) {
   if (!paths.length) return;
   const dir = parent(paths[0])!;
+  touch(dir);
   const name = zipNameFor(paths);
   const dest = `${dir.replace(/\\$/, "")}\\${name}`;
   try {

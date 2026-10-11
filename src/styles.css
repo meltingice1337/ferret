@@ -291,6 +291,8 @@ body.col-resizing, body.col-resizing * { cursor: col-resize !important; user-sel
 .c-name .name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .c-date, .c-type { color: var(--fg-3); font-variant-numeric: tabular-nums; }
 .c-size { text-align: right; color: var(--fg-3); font-variant-numeric: tabular-nums; }
+/* A folder still being counted. */
+.c-size.counting { opacity: 0.5; }
 :root[data-density="compact"] .row { font-size: 12.5px; }
 
 .grid-row { position: absolute; left: 0; right: 0; display: flex; gap: 6px; padding: 4px 6px 0; }
