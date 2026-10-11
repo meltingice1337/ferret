@@ -1,4 +1,4 @@
-import { ArrowLeft, ArrowRight, ArrowUp, ChevronRight, FileSearch, Folder, FolderOpen, PanelLeft, RotateCw, Search, Star, X } from "lucide-solid";
+import { ArrowLeft, ArrowRight, ArrowUp, ChevronRight, Folder, FolderOpen, ListFilter, PanelLeft, RotateCw, Search, Star, X } from "lucide-solid";
 import { createEffect, createMemo, createSignal, For, on, Show } from "solid-js";
 import { api } from "../lib/api";
 import { isRecycle, isWsl, parent, segments } from "../lib/path";
@@ -38,7 +38,7 @@ export default function Toolbar() {
         <PathEditor />
       </Show>
       <FilterBox />
-      <button class="icon-btn" title="Search everywhere (Ctrl+K)" onClick={() => setUi("palette", "files")}><FileSearch size={16} /></button>
+      <button class="icon-btn" title="Search everywhere (Ctrl+K)" onClick={() => setUi("palette", "files")}><Search size={16} /></button>
     </div>
   );
 }
@@ -135,7 +135,10 @@ function Breadcrumbs() {
               title={seg.path}
               data-drop={seg.path}
               onClick={(e) => { e.stopPropagation(); navigate(tab(), seg.path); }}>
-              {seg.label}
+              {/* A drive shows as its letter badge (as in the sidebar), not "C:". */}
+              <Show when={i() === 0 && /^[a-z]:$/i.test(seg.label)} fallback={seg.label}>
+                <span class="drive-letter" aria-label={seg.label}>{seg.label[0].toUpperCase()}</span>
+              </Show>
             </button>
           </span>
         )}
@@ -216,6 +219,8 @@ function PathEditor() {
         onKeyDown={(e) => {
           const list = suggestions();
           if (e.key === "Escape") { e.preventDefault(); close(); }
+          // Ctrl+L again selects the whole path, so the next one replaces it.
+          else if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "l") { e.preventDefault(); e.currentTarget.select(); }
           else if (e.key === "ArrowDown" && list.length) { e.preventDefault(); setPick((p) => (p + 1) % list.length); }
           else if (e.key === "ArrowUp" && list.length) { e.preventDefault(); setPick((p) => (p <= 0 ? list.length - 1 : p - 1)); }
           else if (e.key === "Tab" && list.length) { e.preventDefault(); accept(list[Math.max(0, pick())]); }
@@ -253,10 +258,10 @@ function FilterBox() {
 
   return (
     <Show when={ui.filterOpen || tab().filter[0]()} fallback={
-      <button class="icon-btn" title="Filter this folder (Ctrl+F)" onClick={() => setUi("filterOpen", true)}><Search size={15} /></button>
+      <button class="icon-btn" title="Filter this folder (Ctrl+F)" onClick={() => setUi("filterOpen", true)}><ListFilter size={15} /></button>
     }>
       <div class="filter">
-        <Search size={14} />
+        <ListFilter size={14} />
         <input ref={input} placeholder="Filter folder…" value={tab().filter[0]()} spellcheck={false}
           onInput={(e) => tab().filter[1](e.currentTarget.value)}
           onBlur={() => !tab().filter[0]() && setUi("filterOpen", false)}

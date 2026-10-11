@@ -1,6 +1,6 @@
 import { getCurrentWindow } from "@tauri-apps/api/window";
-import { ChevronDown, Minus, Plus, ShieldAlert, Square, Trash2, X } from "lucide-solid";
-import { createEffect, createSignal, For, on, Show } from "solid-js";
+import { ChevronDown, Copy, Minus, Plus, ShieldAlert, Square, Trash2, X } from "lucide-solid";
+import { createEffect, createSignal, For, on, onCleanup, onMount, Show } from "solid-js";
 import FileIcon from "./FileIcon";
 import { placeMenu } from "./menus";
 import { beginReorder } from "../lib/drag";
@@ -14,6 +14,18 @@ export default function TitleBar() {
   const win = getCurrentWindow();
   let strip!: HTMLDivElement;
   const [overflowing, setOverflowing] = createSignal(false);
+
+  // Maximized windows drop the outer margin (see features.css) and show "Restore down".
+  const [maximized, setMaximized] = createSignal(false);
+  onMount(() => {
+    const sync = () => win.isMaximized().then((m) => {
+      setMaximized(m);
+      document.documentElement.toggleAttribute("data-maximized", m);
+    }).catch(() => {});
+    sync();
+    window.addEventListener("resize", sync);
+    onCleanup(() => window.removeEventListener("resize", sync));
+  });
 
   // Keep the active tab visible when it changes or the strip overflows.
   createEffect(on(() => [activeId(), tabs().length], () => {
@@ -89,7 +101,8 @@ export default function TitleBar() {
           }}><ChevronDown size={15} /><span class="tab-count">{tabs().length}</span></button>
         </Show>
       </div>
-      <div class="drag-fill" data-tauri-drag-region onDblClick={() => win.toggleMaximize()} />
+      {/* Tauri's drag region already maximizes on double-click. */}
+      <div class="drag-fill" data-tauri-drag-region />
       <Show when={adminWindow()}>
         <span class="admin-badge" title="This window runs as administrator. Close it when you're done.">
           <ShieldAlert size={13} />Administrator
@@ -97,7 +110,9 @@ export default function TitleBar() {
       </Show>
       <div class="winctl">
         <button title="Minimize" onClick={() => win.minimize()}><Minus size={15} /></button>
-        <button title="Maximize" onClick={() => win.toggleMaximize()}><Square size={12} /></button>
+        <button title={maximized() ? "Restore down" : "Maximize"} onClick={() => win.toggleMaximize()}>
+          <Show when={maximized()} fallback={<Square size={12} />}><Copy size={12} class="flip-x" /></Show>
+        </button>
         <button class="close" title="Close" onClick={() => win.close()}><X size={16} /></button>
       </div>
     </div>

@@ -288,12 +288,20 @@ function Integration() {
 }
 
 const KEYS: [string, string][] = [
+  // Finding and moving around
   ["Ctrl+K or /", "Search everywhere"], ["Ctrl+Shift+P", "Command palette"],
-  ["Ctrl+L", "Edit path"], ["Ctrl+F", "Filter folder"], ["Ctrl+T / Ctrl+W", "New / close tab"],
-  ["Ctrl+Tab", "Next tab"], ["Alt+← → ↑", "Back / forward / up"], ["Backspace", "Up"],
-  ["Ctrl+D", "Toggle favorite"], ["Ctrl+1 / Ctrl+2", "List / grid"], ["Ctrl+G", "Cycle grouping"],
-  ["Ctrl+H", "Show hidden"], ["Ctrl+wheel", "Grid icon size"], ["F5", "Refresh"],
-  ["Ctrl+Shift+C", "Copy path"], ["Type letters", "Jump to file"], ["Ctrl+,", "Settings"],
+  ["Ctrl+L", "Edit path"], ["Ctrl+F", "Filter folder"], ["Type letters", "Jump to file"],
+  ["Alt+← → ↑", "Back / forward / up"], ["Backspace", "Up"], ["F5", "Refresh"],
+  // Tabs and windows
+  ["Ctrl+T / Ctrl+W", "New / close tab"], ["Ctrl+Shift+T", "Reopen closed tab"], ["Ctrl+Tab", "Next tab"],
+  ["Ctrl+N", "New window"],
+  // Files
+  ["Space", "Quick Look"], ["Alt+P", "Preview pane"], ["F2", "Rename"], ["Ctrl+Shift+N", "New folder"],
+  ["Del / Shift+Del", "Recycle / delete permanently"], ["Ctrl+Z / Ctrl+Y", "Undo / redo"],
+  ["Alt+Enter", "Properties"], ["Ctrl+Shift+C", "Copy path"], ["Ctrl+D", "Toggle favorite"],
+  // View
+  ["Ctrl+1 / Ctrl+2", "List / grid"], ["Ctrl+G", "Cycle grouping"], ["Ctrl+H", "Show hidden"],
+  ["Ctrl+wheel", "Grid icon size"], ["Ctrl+,", "Settings"],
 ];
 
 function Shortcuts() {

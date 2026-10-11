@@ -3,15 +3,15 @@ import { batch, createEffect, createMemo, createResource, createSignal, For, Mat
 import { Portal } from "solid-js/web";
 import FileIcon from "./FileIcon";
 import { PdfThumb } from "./preview/PdfPages";
-import { addShellEntries, backgroundMenu, itemMenu } from "./menus";
+import { addShellEntries, backgroundMenu, fromKeyboard, itemMenu, openKeyboardMenu } from "./menus";
 import { api, fileUrl, thumbUrl } from "../lib/api";
 import { beginDrag } from "../lib/drag";
 import { formatDate, formatSize, kindOf, plural, typeLabel } from "../lib/format";
 import { emptyBin, isCut, newFolder, renamePath, restoreFromBin, targetsOf, visibleEntries } from "../lib/ops";
 import { groupEntries, sortEntries, type Group } from "../lib/sortgroup";
 import { isRecycle, pathKey } from "../lib/path";
-import { goUp, holdKeys, openEntry, openMenu, releaseKeys, reload, setUi, settings, sortBy, takeTypeAhead, toast, ui, updateView, type Tab } from "../lib/state";
-import type { Entry, SortBy } from "../lib/types";
+import { goUp, holdKeys, openEntry, openMenu, persistSettings, releaseKeys, reload, setSettings, setUi, settings, sortBy, takeTypeAhead, toast, ui, updateView, type Tab } from "../lib/state";
+import type { Entry, ListColumn, SortBy } from "../lib/types";
 
 export { GROUP_LABELS, SORT_LABELS } from "./menus";
 
@@ -84,6 +84,8 @@ export default function FileView(props: { tab: Tab }) {
   const bin = () => isRecycle(t.p);
   const [width, setWidth] = createSignal(800);
   const [height, setHeight] = createSignal(600);
+  /** Scrollbar width (0 when the list doesn't scroll): column headings leave the same room. */
+  const [gutter, setGutter] = createSignal(0);
   const [scrollTop, setScrollTop] = createSignal(0);
   const [band, setBand] = createSignal<null | { x0: number; y0: number; x1: number; y1: number }>(null);
   let scroller!: HTMLDivElement;
@@ -96,12 +98,15 @@ export default function FileView(props: { tab: Tab }) {
     if (!v.showHidden) list = list.filter((e) => !e.hidden);
     const f = t.filter[0]().trim().toLowerCase();
     if (f) list = list.filter((e) => e.name.toLowerCase().includes(f));
-    return groupEntries(sortEntries(list, v), v);
+    // In the Recycle Bin the newest deletions come first, folders or not.
+    return groupEntries(sortEntries(list, bin() ? { ...v, foldersFirst: false } : v), v);
   });
 
   const itemH = () => (settings.density === "compact" ? 24 : 30);
   const cellW = () => view().iconSize + 34;
   const cols = () => (view().mode === "grid" ? Math.max(1, Math.floor((width() - 24) / cellW())) : 1);
+  /** Grid cells share the row's leftover width, so there's no ragged gap on the right. */
+  const slotW = () => (view().mode === "grid" ? (width() - 18) / cols() : cellW());
   const gridRowH = () => view().iconSize + 58;
 
   // Row objects are reused across recomputes when their content is unchanged, so <For>
@@ -261,7 +266,7 @@ export default function FileView(props: { tab: Tab }) {
         return;
       }
       r.items.forEach((e, c) => {
-        const cl = 12 + c * cellW(), cr = cl + cellW() - 6;
+        const cl = 12 + c * slotW(), cr = cl + slotW() - 6;
         if (cr >= left && cl <= right && rt + 4 <= bottom && rb >= top) out.push(e.path);
       });
     });
@@ -316,13 +321,27 @@ export default function FileView(props: { tab: Tab }) {
     else if (top + h > scroller.scrollTop + scroller.clientHeight) scroller.scrollTop = top + h - scroller.clientHeight + 8;
   };
 
+  // Switching list ⇄ grid (or icon size) changes every row's position: keep the current item in view.
+  createEffect(on(() => [view().mode, view().iconSize], () => {
+    requestAnimationFrame(() => {
+      const p = t.cursor[0]();
+      const i = p ? rowOf().get(p) : undefined;
+      // Center it, rather than leaving it pinned to an edge.
+      if (i !== undefined) scroller.scrollTop = Math.max(0, layout().offs[i] - scroller.clientHeight / 2 + rows()[i].h / 2);
+    });
+  }, { defer: true }));
+
   createEffect(on(() => t.reveal[0](), (_, prev) => {
     if (prev !== undefined && !t.cursor[0]()) scroller.scrollTop = 0;
     requestAnimationFrame(() => { revealCursor(); if (!t.renaming[0]()) scroller.focus({ preventScroll: true }); });
   }, { defer: true }));
 
   onMount(() => {
-    const ro = new ResizeObserver(() => requestAnimationFrame(() => { setWidth(scroller.clientWidth); setHeight(scroller.clientHeight); }));
+    const ro = new ResizeObserver(() => requestAnimationFrame(() => {
+      setWidth(scroller.clientWidth);
+      setHeight(scroller.clientHeight);
+      setGutter(scroller.offsetWidth - scroller.clientWidth);
+    }));
     ro.observe(scroller);
     onCleanup(() => ro.disconnect());
     scroller.scrollTop = scrollMemory.get(t.id) ?? 0;
@@ -432,14 +451,25 @@ export default function FileView(props: { tab: Tab }) {
   const onItemMenu = (ev: MouseEvent, e: Entry) => {
     ev.preventDefault();
     ev.stopPropagation();
+    if (fromKeyboard(ev)) return keyMenu();
     if (!isSel(e.path)) selectOnly(e);
     const targets = targetsOf(t);
     openMenu(ev.clientX, ev.clientY, itemMenu(t, e, targets, ev.clientX, ev.clientY));
     if (!targets.some((x) => x.inArchive)) addShellEntries(t, targets.map((x) => x.path), false);
   };
 
+  // The Menu key sends a contextmenu event to the focused list (not to the selected item):
+  // it gets the same menu as Shift+F10, unless the key press already opened one.
+  let keyMenuAt = 0;
+  const keyMenu = () => {
+    if (ui.menu || performance.now() - keyMenuAt < 300) return;
+    keyMenuAt = performance.now();
+    openKeyboardMenu(t);
+  };
+
   const onBackgroundMenu = (ev: MouseEvent) => {
     ev.preventDefault();
+    if (fromKeyboard(ev)) return keyMenu();
     t.selection[1]([]);
     openMenu(ev.clientX, ev.clientY, backgroundMenu(t, ev.clientX, ev.clientY));
     addShellEntries(t, [], true);
@@ -447,10 +477,64 @@ export default function FileView(props: { tab: Tab }) {
 
   // ---------- render ----------
 
-  // Columns drop out as the list narrows: Type first, then Modified.
-  const showType = () => width() >= 600;
-  const showDate = () => width() >= 430;
-  const columns = () => ["minmax(160px, 1fr)", bin() && showType() && "minmax(120px, 0.9fr)", showDate() && "150px", !bin() && showType() && "140px", "90px"].filter(Boolean).join(" ");
+  // Columns drop out as the list narrows (Type first, then Modified), or when the user hides
+  // them (right-click the headings). Widths come from dragging the lines between headings.
+  const hiddenCol = (k: ListColumn) => settings.hiddenColumns.includes(k);
+  const showOrigin = () => bin() && width() >= 600;
+  const showType = () => !bin() && width() >= 600 && !hiddenCol("type");
+  const showDate = () => width() >= 430 && !hiddenCol("modified");
+  const showSize = () => !hiddenCol("size");
+  const colW = (k: ListColumn) => settings.columnWidths[k] ?? COLUMN_WIDTHS[k];
+  const fixedCols = () => ([showDate() && "modified", showType() && "type", showSize() && "size"].filter(Boolean)) as ListColumn[];
+  const columns = () => ["minmax(160px, 1fr)", showOrigin() && "minmax(120px, 0.9fr)", ...fixedCols().map((k) => `${colW(k)}px`)].filter(Boolean).join(" ");
+
+  /** Dragging the line at a column's left edge moves that line: the column on its left grows
+   *  as this one shrinks (or Name, which takes the rest). */
+  const resizeColumn = (e: MouseEvent, k: ListColumn) => {
+    e.preventDefault();
+    e.stopPropagation();
+    const order = fixedCols();
+    const left = order[order.indexOf(k) - 1];
+    const start = { ...settings.columnWidths };
+    const room = width() - 20 - (showOrigin() ? 280 : 160) - order.reduce((a, c) => a + colW(c), 0);
+    const x0 = e.clientX;
+    document.body.classList.add("col-resizing");
+    const move = (m: MouseEvent) => {
+      const dx = m.clientX - x0;
+      const next = { ...start };
+      if (left) {
+        const d = Math.max(MIN_COL - colW(left), Math.min(colW(k) - MIN_COL, dx));
+        next[left] = start[left] + d;
+        next[k] = start[k] - d;
+      } else next[k] = Math.max(MIN_COL, Math.min(start[k] + Math.max(0, room), start[k] - dx));
+      setSettings("columnWidths", next);
+    };
+    const up = () => {
+      window.removeEventListener("mousemove", move);
+      window.removeEventListener("mouseup", up);
+      document.body.classList.remove("col-resizing");
+      persistSettings();
+    };
+    window.addEventListener("mousemove", move);
+    window.addEventListener("mouseup", up);
+  };
+  const resetColumns = () => { setSettings("columnWidths", { ...COLUMN_WIDTHS }); persistSettings(); };
+  const headingsMenu = (e: MouseEvent) => {
+    e.preventDefault();
+    const toggle = (k: ListColumn) => {
+      setSettings("hiddenColumns", (h) => (h.includes(k) ? h.filter((x) => x !== k) : [...h, k]));
+      persistSettings();
+    };
+    openMenu(e.clientX, e.clientY, [
+      { heading: true, label: "Columns" },
+      { label: "Name", checked: true, disabled: true },
+      { label: bin() ? "Date deleted" : "Modified", checked: !hiddenCol("modified"), action: () => toggle("modified") },
+      ...(bin() ? [] : [{ label: "Type", checked: !hiddenCol("type"), action: () => toggle("type") }]),
+      { label: "Size", checked: !hiddenCol("size"), action: () => toggle("size") },
+      { separator: true },
+      { label: "Reset column widths", action: resetColumns },
+    ]);
+  };
   const dropAttr = (e: Entry) => (e.isDir && !e.inArchive && !bin() ? e.path : undefined);
   const sizeText = (e: Entry) => (e.isDir && !bin() ? "" : formatSize(e.size));
 
@@ -458,12 +542,15 @@ export default function FileView(props: { tab: Tab }) {
     <div class="fileview" classList={{ grid: view().mode === "grid", bin: bin() }}>
       <Show when={bin()}><BinBar tab={t} /></Show>
       <Show when={view().mode === "list"}>
-        <div class="colheads" style={{ "grid-template-columns": columns() }}>
+        <div class="colheads" style={{ "grid-template-columns": columns(), "padding-right": `${10 + gutter()}px` }}
+          onContextMenu={headingsMenu}>
           <ColHead tab={t} k="name" label="Name" />
-          <Show when={bin() && showType()}><span class="colhead static">Original location</span></Show>
-          <Show when={showDate()}><ColHead tab={t} k="modified" label={bin() ? "Date deleted" : "Modified"} /></Show>
-          <Show when={!bin() && showType()}><ColHead tab={t} k="type" label="Type" /></Show>
-          <ColHead tab={t} k="size" label="Size" right />
+          <Show when={showOrigin()}><span class="colhead static">Original location</span></Show>
+          <Show when={showDate()}>
+            <ColHead tab={t} k="modified" label={bin() ? "Date deleted" : "Modified"} grip={(e) => resizeColumn(e, "modified")} onReset={resetColumns} />
+          </Show>
+          <Show when={showType()}><ColHead tab={t} k="type" label="Type" grip={(e) => resizeColumn(e, "type")} onReset={resetColumns} /></Show>
+          <Show when={showSize()}><ColHead tab={t} k="size" label="Size" right grip={(e) => resizeColumn(e, "size")} onReset={resetColumns} /></Show>
         </div>
       </Show>
       <div
@@ -519,10 +606,10 @@ export default function FileView(props: { tab: Tab }) {
                           <RenameInput tab={t} entry={e()} />
                         </Show>
                       </span>
-                      <Show when={bin() && showType()}><span class="c-type c-origin" title={e().origin}>{e().origin}</span></Show>
+                      <Show when={showOrigin()}><span class="c-type c-origin" title={e().origin}>{e().origin}</span></Show>
                       <Show when={showDate()}><span class="c-date">{formatDate(e().modified)}</span></Show>
-                      <Show when={!bin() && showType()}><span class="c-type">{typeLabel(e())}</span></Show>
-                      <span class="c-size">{sizeText(e())}</span>
+                      <Show when={showType()}><span class="c-type">{typeLabel(e())}</span></Show>
+                      <Show when={showSize()}><span class="c-size">{sizeText(e())}</span></Show>
                     </div>
                   )}
                 </Match>
@@ -533,7 +620,7 @@ export default function FileView(props: { tab: Tab }) {
                         <div
                           class="cell"
                           classList={{ selected: isSel(e.path), cursor: t.cursor[0]() === e.path, dim: e.hidden, cut: isCut(e.path) }}
-                          style={{ width: `${cellW() - 6}px` }}
+                          style={{ width: `${slotW() - 6}px` }}
                           data-drop={dropAttr(e)}
                           onMouseDown={(ev) => onItemDown(ev, e)}
                           onClick={(ev) => onItemClick(ev, e)}
@@ -705,7 +792,7 @@ function BinBar(props: { tab: Tab }) {
     <div class="bin-bar">
       <Trash2 size={15} />
       <span class="bin-count">{all().length ? `${plural(all().length, "item")} · ${formatSize(total())}` : "Empty"}</span>
-      <span class="bin-hint">Deleted items stay here until you empty the Recycle Bin</span>
+      <span class="bin-hint">Kept until you empty the bin</span>
       <button class="btn" disabled={!all().length}
         onClick={() => restoreFromBin(selected().length ? [...selected()] : visibleEntries(t).map((e) => e.path))}>
         <ArchiveRestore size={14} />{selected().length ? `Restore ${plural(selected().length, "item")}` : "Restore all"}
@@ -715,11 +802,19 @@ function BinBar(props: { tab: Tab }) {
   );
 }
 
-function ColHead(props: { tab: Tab; k: SortBy; label: string; right?: boolean }) {
+const COLUMN_WIDTHS: Record<ListColumn, number> = { modified: 150, type: 140, size: 90 };
+const MIN_COL = 64;
+
+function ColHead(props: { tab: Tab; k: SortBy; label: string; right?: boolean; grip?: (e: MouseEvent) => void; onReset?: () => void }) {
   const v = () => props.tab.view[0]();
   return (
     <button class="colhead" classList={{ active: v().sortBy === props.k, right: props.right }}
       onClick={() => sortBy(props.tab, props.k)}>
+      <Show when={props.grip}>
+        <span class="col-grip" title="Drag to resize · double-click to reset"
+          onMouseDown={(e) => props.grip!(e)} onClick={(e) => e.stopPropagation()}
+          onDblClick={(e) => { e.stopPropagation(); props.onReset?.(); }} />
+      </Show>
       <span>{props.label}</span>
       <Show when={v().sortBy === props.k}>
         {v().sortDir === "asc" ? <ArrowUp size={12} /> : <ArrowDown size={12} />}

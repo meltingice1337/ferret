@@ -125,7 +125,8 @@ export default function Sidebar(props: { overlay?: boolean }) {
                   title={`${d.label || "Local Disk"} (${d.path}) · ${d.fs}\n${formatSize(d.free)} free of ${formatSize(d.total)}`}>
                   <div class="drive-top">
                     <Dynamic component={d.removable ? Usb : HardDrive} size={15} />
-                    <span class="drive-name">{d.label || "Local Disk"} <span class="muted">{d.path.replace(/\\$/, "")}</span></span>
+                    <Show when={/^[a-z]:/i.test(d.path)}><span class="drive-letter">{d.path[0].toUpperCase()}</span></Show>
+                    <span class="drive-name">{d.label || "Local Disk"}</span>
                     <span class="drive-free">{formatSize(d.free)} free</span>
                   </div>
                   <div class="drive-bar"><div classList={{ full: used() > 0.9 }} style={{ width: `${used() * 100}%` }} /></div>
@@ -140,10 +141,17 @@ export default function Sidebar(props: { overlay?: boolean }) {
             onClick={async (e) => { e.stopPropagation(); setRecents(await api.clearRecents()); }}><Trash2 size={12} /></button>
         }>
           <For each={recents().filter((r) => !samePath(r.path, current())).slice(0, 8)}>
-            {(r) => (
-              <SideItem icon={Clock} label={basename(r.path)} path={r.path} title={r.path}
-                onRemove={async () => setRecents(await api.removeRecent(r.path))} />
-            )}
+            {(r) => {
+              // A drive root reads like the Drives section: letter badge + the drive's name.
+              const letter = /^([a-z]):\\?$/i.exec(r.path)?.[1].toUpperCase();
+              const label = () => letter
+                ? places().drives.find((d) => d.path[0].toUpperCase() === letter)?.label || "Local Disk"
+                : basename(r.path);
+              return (
+                <SideItem icon={Clock} label={label()} badge={letter} path={r.path} title={r.path}
+                  onRemove={async () => setRecents(await api.removeRecent(r.path))} />
+              );
+            }}
           </For>
         </Section>
       </div>
@@ -213,6 +221,8 @@ function Section(props: { id: string; title: string; children: JSX.Element; acti
 function SideItem(props: {
   icon: any; label: string; path: string; active?: boolean; title?: string; extra?: JSX.Element; onRemove?: () => void;
   menuExtra?: MenuItem[];
+  /** Drive letter shown as a badge before the label. */
+  badge?: string;
 }) {
   return (
     <button class="side-item" classList={{ active: props.active }} title={props.title ?? props.path}
@@ -226,7 +236,10 @@ function SideItem(props: {
           ...(props.menuExtra ?? []),
         ]));
       }}>
-      <Dynamic component={props.icon} size={15} />
+      {/* A drive's letter badge takes the icon's place, so names stay aligned. */}
+      <Show when={props.badge} fallback={<Dynamic component={props.icon} size={15} />}>
+        <span class="drive-letter side-badge">{props.badge}</span>
+      </Show>
       <span class="side-label">{props.label}</span>
       {props.extra}
       <Show when={props.onRemove}>

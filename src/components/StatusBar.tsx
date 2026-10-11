@@ -18,7 +18,9 @@ export default function StatusBar() {
     const sel = new Set(t().selection[0]().map(pathKey));
     const selected = entries.filter((e) => sel.has(pathKey(e.path)));
     const bytes = selected.reduce((a, e) => a + (e.isDir ? 0 : e.size), 0);
-    return { total: shown.length, hidden: entries.length - shown.length, selected: selected.length, bytes, anyDir: selected.some((e) => e.isDir), anyFile: selected.some((e) => !e.isDir) };
+    const f = t().filter[0]().trim().toLowerCase();
+    const matching = f ? shown.filter((e) => e.name.toLowerCase().includes(f)).length : shown.length;
+    return { total: shown.length, matching, hidden: entries.length - shown.length, selected: selected.length, bytes, anyDir: selected.some((e) => e.isDir), anyFile: selected.some((e) => !e.isDir) };
   });
 
   const sortMenu = (e: MouseEvent) => {
@@ -46,12 +48,11 @@ export default function StatusBar() {
     <div class="statusbar">
       <div class="status-left">
         <Show when={t().loading[0]()}><LoaderCircle size={13} class="spin" /></Show>
-        <span>{plural(stats().total, "item")}</span>
+        <span>{t().filter[0]().trim() ? `${stats().matching.toLocaleString()} of ${plural(stats().total, "item")}` : plural(stats().total, "item")}</span>
         <Show when={stats().hidden && !v().showHidden}><span class="muted">· {stats().hidden} hidden</span></Show>
         <Show when={stats().selected}>
           <span class="sel-count">· {stats().selected} selected{stats().anyFile ? ` (${formatSize(stats().bytes)}${stats().anyDir ? "+" : ""})` : ""}</span>
         </Show>
-        <Show when={t().filter[0]()}><span class="muted">· filtered</span></Show>
       </div>
       <div class="status-right">
         <button class="sb-btn" onClick={sortMenu} title="Sort">

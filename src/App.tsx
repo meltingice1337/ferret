@@ -5,7 +5,7 @@ import FileView from "./components/FileView";
 import { DragGhost, JobsPanel } from "./components/Jobs";
 import UpdateCard, { WhatsNewDialog } from "./components/UpdateCard";
 import { checkForUpdate, setUpdater, startUpdater, updater } from "./lib/updater";
-import { addShellEntries, backgroundMenu, itemMenu } from "./components/menus";
+import { openKeyboardMenu } from "./components/menus";
 import PreviewPane, { QuickLook } from "./components/PreviewPane";
 import SettingsDialog from "./components/SettingsDialog";
 import SearchPalette, { type PaletteCommand } from "./components/SearchPalette";
@@ -19,9 +19,9 @@ import {
   startRename, targetsOf, undo, undoLabel,
 } from "./lib/ops";
 import { adminWindow, applyAppearance, elevateWindow, isFavorite, navigate, openNewWindow, persistSettings, places, resetView, setSettings } from "./lib/state";
-import { pathKey, RECYCLE } from "./lib/path";
+import { RECYCLE } from "./lib/path";
 import {
-  activeTab, boot, closeTab, cycleTab, dismissToast, goBack, goForward, goUp, newTab, openMenu,
+  activeTab, boot, closeTab, cycleTab, dismissToast, goBack, goForward, goUp, newTab,
   persistSession, previewSpace, ready, sidebarDocked, reload, reopenClosedTab, setUi, toast, toggleFavorite, ui, updateView,
 } from "./lib/state";
 import type { GroupBy } from "./lib/types";
@@ -98,22 +98,7 @@ function closeTopModal() {
 
 const modalOpen = () => !!(ui.dialog || ui.conflict || ui.properties || ui.batchRename || ui.settingsOpen || ui.quickLook || ui.palette || updater.notesOpen);
 
-/** Opens Ferret's context menu for the focused item (Shift+F10 / Menu key). */
-function keyboardMenu() {
-  const t = activeTab();
-  const el = document.querySelector<HTMLElement>(".row.cursor, .cell.cursor");
-  const targets = targetsOf(t);
-  if (el && targets.length) {
-    const r = el.getBoundingClientRect();
-    const cur = t.entries[0]().find((e) => pathKey(e.path) === pathKey(t.cursor[0]() ?? "")) ?? targets[0];
-    openMenu(r.left + 40, r.bottom, itemMenu(t, cur, targets, r.left + 40, r.bottom));
-    if (!targets.some((x) => x.inArchive)) addShellEntries(t, targets.map((x) => x.path), false);
-  } else {
-    const f = document.querySelector<HTMLElement>(".files")!.getBoundingClientRect();
-    openMenu(f.left + 60, f.top + 40, backgroundMenu(t, f.left + 60, f.top + 40));
-    addShellEntries(t, [], true);
-  }
-}
+const keyboardMenu = () => openKeyboardMenu(activeTab());
 
 export default function App() {
   // Return keyboard focus to the file list whenever a dialog or menu closes.
@@ -161,7 +146,8 @@ export default function App() {
         if (e.key === "ArrowUp") { e.preventDefault(); return goUp(t); }
         if (k === "p") {
           e.preventDefault();
-          if (!previewSpace() && !ui.previewOpen) return toast("The window is too narrow for the preview pane. Widen it or use Quick Look (Space)");
+          // Too narrow: say so, and leave the setting alone so the pane returns when there's room.
+          if (!previewSpace()) return toast("The window is too narrow for the preview pane. Widen it or use Quick Look (Space)");
           setUi("previewOpen", !ui.previewOpen);
           return persistSession();
         }
@@ -189,7 +175,13 @@ export default function App() {
       if (k === "t") { e.preventDefault(); return newTab(t.p); }
       if (k === "n" && !e.shiftKey) { e.preventDefault(); return openNewWindow(); }
       if (k === "w") { e.preventDefault(); return closeTab(t.id); }
-      if (k === "l") { e.preventDefault(); return setUi("editingPath", true); }
+      if (k === "l") {
+        e.preventDefault();
+        // Like a browser's address bar: the whole path is selected, even if the editor is already open.
+        const open = document.querySelector<HTMLInputElement>(".path-edit input");
+        if (open) { open.focus(); open.select(); return; }
+        return setUi("editingPath", true);
+      }
       if (k === "f") { e.preventDefault(); return setUi("filterOpen", true); }
       if (k === ",") { e.preventDefault(); return setUi("settingsOpen", true); }
       if (k === "b") { e.preventDefault(); return toggleSidebar(); }
@@ -243,11 +235,29 @@ export default function App() {
       e.stopImmediatePropagation();
       queueKey(e);
     };
+    // Tab and Shift+Tab cycle inside the top-most dialog instead of reaching the app behind it.
+    const trapTab = (e: KeyboardEvent) => {
+      if (e.key !== "Tab") return;
+      const dialogs = [...document.querySelectorAll<HTMLElement>(".modal, .ql")];
+      const d = dialogs[dialogs.length - 1];
+      if (!d) return;
+      const stops = [...d.querySelectorAll<HTMLElement>(
+        'button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), a[href], [tabindex]:not([tabindex="-1"])',
+      )].filter((el) => el.offsetParent !== null);
+      const here = document.activeElement as HTMLElement | null;
+      if (!stops.length) { e.preventDefault(); d.focus(); return; }
+      const first = stops[0], last = stops[stops.length - 1];
+      if (!here || !d.contains(here)) { e.preventDefault(); (e.shiftKey ? last : first).focus(); }
+      else if (e.shiftKey && (here === first || here === d)) { e.preventDefault(); last.focus(); }
+      else if (!e.shiftKey && here === last) { e.preventDefault(); first.focus(); }
+    };
+    window.addEventListener("keydown", trapTab, true);
     window.addEventListener("keydown", onHold, true);
     window.addEventListener("keydown", onKey);
     window.addEventListener("mouseup", onMouse);
     window.addEventListener("contextmenu", noMenu);
     onCleanup(() => {
+      window.removeEventListener("keydown", trapTab, true);
       window.removeEventListener("keydown", onKey);
       window.removeEventListener("keydown", onHold, true);
       window.removeEventListener("mouseup", onMouse);
@@ -256,22 +266,29 @@ export default function App() {
   });
 
   return (
-    <div class="app" style={{ "--sidebar-w": `${sidebarDocked() ? ui.sidebarWidth : 0}px` }}>
+    // The gaps around the panels move the window (double-click maximizes).
+    <div class="app" data-tauri-drag-region style={{ "--sidebar-w": `${sidebarDocked() ? ui.sidebarWidth : 0}px` }}>
       <Show when={ready()} fallback={<div class="splash"><img class="splash-logo" src="/ferret-256.png" alt="" /><div class="splash-mark">ferret</div></div>}>
+        {/* Narrow windows: the sidebar slides over a dimmed list (clicking it closes the sidebar). */}
+        <Show when={!sidebarDocked() && ui.sidebarOverlay}><div class="scrim" /></Show>
         <Show when={sidebarDocked() || ui.sidebarOverlay}>
           <Sidebar overlay={!sidebarDocked()} />
         </Show>
-        <main class="main panel">
+        {/* The preview is a column inside the files panel, so that panel (and the window
+            buttons in its corner) always reaches the right edge of the window. */}
+        <main class="main panel" style={{ "--pv-w": `${ui.previewOpen ? previewSpace() : 0}px` }}>
           <TitleBar />
           <Toolbar />
-          <Show when={activeTab()} keyed>
-            {(t) => <FileView tab={t} />}
-          </Show>
+          <div class="content">
+            <Show when={activeTab()} keyed>
+              {(t) => <FileView tab={t} />}
+            </Show>
+            <Show when={ui.previewOpen && previewSpace() > 0}><PreviewPane /></Show>
+          </div>
           <StatusBar />
           <JobsPanel />
           <UpdateCard />
         </main>
-        <Show when={ui.previewOpen && previewSpace() > 0}><PreviewPane /></Show>
         <Show when={ui.quickLook}><QuickLook /></Show>
       </Show>
       <Show when={ui.palette} keyed>

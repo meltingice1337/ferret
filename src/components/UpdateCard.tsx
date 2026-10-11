@@ -1,8 +1,8 @@
 import { openUrl } from "@tauri-apps/plugin-opener";
-import { Download, ExternalLink, LoaderCircle, Sparkles, X } from "lucide-solid";
+import { Download, ExternalLink, LoaderCircle, Sparkles, TriangleAlert, X } from "lucide-solid";
 import { For, Show } from "solid-js";
 import { formatSize, plural } from "../lib/format";
-import { dismissUpdate, installUpdate, parseNotes, setUpdater, showWhatsNew, updater } from "../lib/updater";
+import { dismissUpdate, installUpdate, parseNotes, setUpdater, showWhatsNew, updateErrorText, updater } from "../lib/updater";
 
 const notes = () => parseNotes(updater.notes);
 const changeCount = () => notes().sections.reduce((n, s) => n + s.items.length, 0);
@@ -22,8 +22,17 @@ export default function UpdateCard() {
     <Show when={visible() && !updater.notesOpen}>
       <div class="job update-card" classList={{ error: updater.phase === "error" }}>
         <div class="job-top">
-          <span class="job-icon"><Show when={busy()} fallback={<Sparkles size={14} />}><LoaderCircle size={14} class="spin" /></Show></span>
-          <span class="job-label">Ferret {updater.version} is available</span>
+          <span class="job-icon">
+            <Show when={busy()} fallback={updater.phase === "error" ? <TriangleAlert size={14} class="warn-icon" /> : <Sparkles size={14} />}>
+              <LoaderCircle size={14} class="spin" />
+            </Show>
+          </span>
+          <span class="job-label">{
+            updater.phase === "downloading" ? `Downloading Ferret ${updater.version}…`
+              : updater.phase === "installing" ? `Installing Ferret ${updater.version}…`
+              : updater.phase === "error" ? `Couldn't update to ${updater.version}`
+              : `Ferret ${updater.version} is available`
+          }</span>
           <Show when={!busy()}>
             <button class="icon-btn tiny" title="Later" onClick={dismissUpdate}><X size={12} /></button>
           </Show>
@@ -33,11 +42,11 @@ export default function UpdateCard() {
         </Show>
         <div class="job-sub">
           <Show when={updater.phase === "downloading"}>
-            <span>Downloading…</span>
+            <span>{pct() >= 0 ? `${Math.round(pct() * 100)}%` : ""}</span>
             <span>{updater.total ? `${formatSize(updater.done)} / ${formatSize(updater.total)}` : formatSize(updater.done)}</span>
           </Show>
           <Show when={updater.phase === "installing"}><span>Installing, Ferret will restart…</span></Show>
-          <Show when={updater.phase === "error"}><span class="job-cur" title={updater.error}>Update failed: {updater.error}</span></Show>
+          <Show when={updater.phase === "error"}><span class="update-error" title={updater.error}>{updateErrorText(updater.error)}</span></Show>
           <Show when={updater.phase === "available"}>
             <span>You have {updater.current}{changeCount() ? ` · ${plural(changeCount(), "change")}` : ""}</span>
           </Show>
@@ -82,7 +91,7 @@ export function WhatsNewDialog() {
                 <section class="wn-section">
                   <h3 class={`wn-tag ${s.title.split(" ")[0].toLowerCase()}`}>{s.title}</h3>
                   <ul>
-                    <For each={s.items}>{(item) => <li>{withCode(item)}</li>}</For>
+                    <For each={s.items}>{(item) => <li>{inline(item)}</li>}</For>
                   </ul>
                 </section>
               )}
@@ -92,9 +101,27 @@ export function WhatsNewDialog() {
             </Show>
           </div>
           <footer class="wn-actions">
-            <span class="wn-note">Ferret restarts to finish updating.</span>
-            <button class="btn" onClick={dismissUpdate}>Later</button>
-            <button class="btn accent" onClick={installUpdate}><Download size={14} />Update & restart</button>
+            <Show when={updater.phase === "downloading" || updater.phase === "installing"} fallback={
+              <>
+                <Show when={updater.phase === "error"} fallback={<span class="wn-note">Ferret restarts to finish updating.</span>}>
+                  <span class="wn-note wn-error">
+                    <TriangleAlert size={14} class="warn-icon" />
+                    <span>
+                      {updateErrorText(updater.error)}{" "}
+                      <button class="wn-details" title={updater.error} onClick={() => navigator.clipboard.writeText(updater.error)}>Copy details</button>
+                    </span>
+                  </span>
+                </Show>
+                <button class="btn" onClick={dismissUpdate}>Later</button>
+                <button class="btn accent" onClick={installUpdate}><Download size={14} />{updater.phase === "error" ? "Try again" : "Update & restart"}</button>
+              </>
+            }>
+              <div class="wn-progress">
+                <span>{updater.phase === "installing" ? "Installing, Ferret will restart…" : `Downloading… ${updater.total ? `${formatSize(updater.done)} / ${formatSize(updater.total)}` : ""}`}</span>
+                <div class="job-bar"><div classList={{ indet: !updater.total || updater.phase === "installing" }}
+                  style={{ width: `${updater.total ? (updater.done / updater.total) * 100 : 0}%` }} /></div>
+              </div>
+            </Show>
           </footer>
         </div>
       </div>
@@ -102,7 +129,18 @@ export function WhatsNewDialog() {
   );
 }
 
-/** `code` spans in commit subjects. */
-function withCode(text: string) {
-  return text.split(/(`[^`]+`)/).map((part) => (part.startsWith("`") && part.endsWith("`") && part.length > 2 ? <code>{part.slice(1, -1)}</code> : part));
+/** Inline markdown in release notes: `code`, **bold**, *italic* and [links](…) to Ferret's repository. */
+function inline(text: string) {
+  return text.split(/(`[^`]+`|\*\*[^*]+\*\*|\*[^*\s][^*]*\*|\[[^\]]+\]\([^)\s]+\))/).filter(Boolean).map((part) => {
+    if (/^`.+`$/.test(part)) return <code>{part.slice(1, -1)}</code>;
+    if (/^\*\*.+\*\*$/.test(part)) return <b>{part.slice(2, -2)}</b>;
+    if (/^\*.+\*$/.test(part)) return <i>{part.slice(1, -1)}</i>;
+    const link = part.match(/^\[([^\]]+)\]\(([^)\s]+)\)$/);
+    if (link) {
+      return link[2].startsWith(REPO)
+        ? <a class="wn-inline-link" href="#" onClick={(e) => { e.preventDefault(); openUrl(link[2]); }}>{link[1]}</a>
+        : link[1];
+    }
+    return part;
+  });
 }

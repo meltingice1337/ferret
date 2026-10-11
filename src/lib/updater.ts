@@ -71,35 +71,60 @@ export async function installUpdate() {
   }
 }
 
-export const dismissUpdate = () => setUpdater({ dismissed: updater.version, notesOpen: false, phase: updater.phase === "error" ? "idle" : updater.phase });
+// After a failed download the update is still on offer (the dot by the version stays).
+export const dismissUpdate = () => setUpdater({
+  dismissed: updater.version, notesOpen: false,
+  phase: updater.phase === "error" ? (updater.version ? "available" : "idle") : updater.phase,
+});
 
 export const showWhatsNew = () => setUpdater("notesOpen", true);
+
+/** A plain explanation of an update failure (the raw error stays available as details). */
+export function updateErrorText(raw: string) {
+  if (/signature|verify|minisign|pubkey/i.test(raw)) return "The download failed its signature check, so nothing was installed.";
+  if (/timed? ?out|request|network|connect|dns|resolve|offline|tls|certificate/i.test(raw)) return "Couldn't download the update. Check your connection and try again.";
+  if (/denied|access|permission|elevat/i.test(raw)) return "Windows didn't allow the installer to run.";
+  return "Something went wrong while updating.";
+}
 
 const SECTIONS: Record<string, string> = { feat: "New", fix: "Fixes", perf: "Improvements", refactor: "Improvements", style: "Improvements" };
 const ORDER = ["New", "Improvements", "Fixes", "Other changes"];
 
+/** "## Bug fixes" and the like map onto the same sections as commit prefixes. */
+function headingSection(text: string) {
+  if (/feat|new|added/i.test(text)) return "New";
+  if (/fix|bug/i.test(text)) return "Fixes";
+  if (/perf|improv|chang|polish/i.test(text)) return "Improvements";
+  return text;
+}
+
 /**
  * Release notes are the commit subjects since the last release ("- feat: …", "- fix(x): …")
- * plus a "Full changelog" link. Groups them for reading.
+ * plus a "Full changelog" link, possibly with "## Heading" sections written by hand.
+ * Groups them for reading; items keep their inline markdown (rendered by the dialog).
  */
 export function parseNotes(md: string) {
   const groups = new Map<string, string[]>();
   let link = "";
+  let heading = "";
   for (const raw of md.split(/\r?\n/)) {
+    const h = raw.trim().match(/^#{1,6}\s+(.+)$/);
+    if (h) { heading = headingSection(h[1].trim()); continue; }
     const line = raw.trim().replace(/^[-*]\s+/, "");
     if (!line || /^no changes listed$/i.test(line)) continue;
     const full = line.match(/^\*\*full changelog:?\*\*:?\s*(\S+)/i);
     if (full) { link = full[1]; continue; }
     const m = line.match(/^(\w+)(?:\([^)]*\))?!?:\s*(.+)$/);
     if (m?.[1].toLowerCase() === "release") continue;
-    const title = m ? SECTIONS[m[1].toLowerCase()] ?? "Other changes" : "Other changes";
+    const title = (m && SECTIONS[m[1].toLowerCase()]) || heading || "Other changes";
     const text = m ? m[2] : line;
-    groups.set(title, [...(groups.get(title) ?? []), text[0].toUpperCase() + text.slice(1)]);
+    // Capitalize the first letter, even behind markdown like "**".
+    groups.set(title, [...(groups.get(title) ?? []), text.replace(/\p{L}/u, (c) => c.toUpperCase())]);
   }
-  return {
-    sections: ORDER.filter((t) => groups.has(t)).map((title) => ({ title, items: groups.get(title)! })),
-    link,
-  };
+  const order = [...ORDER.filter((t) => groups.has(t) && t !== "Other changes"),
+    ...[...groups.keys()].filter((t) => !ORDER.includes(t)),
+    ...(groups.has("Other changes") ? ["Other changes"] : [])];
+  return { sections: order.map((title) => ({ title, items: groups.get(title)! })), link };
 }
 
 /** Starts the periodic check; also nudges about an outdated search service once. */

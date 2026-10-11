@@ -2,11 +2,11 @@ import {
   AppWindow, ArrowDownUp, ClipboardPaste, Code2, Copy, CopyPlus, Eye, FileArchive, FilePlus, FolderInput, FolderOpen,
   FolderOutput, FolderPlus, Info, Layers, LayoutGrid, List, MousePointerClick, PackageOpen, Pencil, Redo2, RotateCw,
   Scissors, SquareTerminal, Star, Trash2, Undo2, ExternalLink, MoreHorizontal, Hash, PanelRight, BookmarkPlus,
-  ArchiveRestore, FolderSearch, ShieldAlert,
+  ArchiveRestore, Blocks, FolderSearch, ShieldAlert, SquareArrowOutUpRight,
 } from "lucide-solid";
 import { api } from "../lib/api";
 import { kindOf } from "../lib/format";
-import { basename, isRecycle, isWsl, parent } from "../lib/path";
+import { basename, isRecycle, isWsl, parent, pathKey } from "../lib/path";
 import {
   favorites, isFavorite, recents, reload, resetView, saveViewForFolder, setUi,
   toggleFavorite, ui, updateView, type MenuItem, type Tab,
@@ -14,9 +14,9 @@ import {
 import {
   compress, copyPaths, copyToClipboard, deleteItems, duplicate, emptyBin, extractSmart, extractTo, newFile, newFolder,
   NEW_FILE_TYPES, openFile, openInVscode, openTerminal, paste, purgeFromBin, realPath, redo, redoLabel, restoreFromBin,
-  showNativeMenu, startRename, transferTo, transferWithPicker, undo, undoLabel, visibleEntries, zipNameFor,
+  showNativeMenu, startRename, targetsOf, transferTo, transferWithPicker, undo, undoLabel, visibleEntries, zipNameFor,
 } from "../lib/ops";
-import { adminWindow, elevateWindow, goTo, openEntry, openNewWindow, places, toast } from "../lib/state";
+import { adminWindow, elevateWindow, goTo, openEntry, openMenu, openNewWindow, places, toast } from "../lib/state";
 import type { Entry, GroupBy, ShellMenuItem, SortBy } from "../lib/types";
 
 export const SORT_LABELS: Record<SortBy, string> = {
@@ -25,6 +25,14 @@ export const SORT_LABELS: Record<SortBy, string> = {
 export const GROUP_LABELS: Record<GroupBy, string> = {
   none: "None", date: "Date", type: "Type", size: "Size", letter: "First letter",
 };
+
+/** Shift held while a menu opens shows extended items (as in Explorer). */
+let shiftHeld = false;
+const trackShift = (e: KeyboardEvent | MouseEvent) => { shiftHeld = e.shiftKey; };
+window.addEventListener("keydown", trackShift, true);
+window.addEventListener("keyup", trackShift, true);
+window.addEventListener("mousedown", trackShift, true);
+window.addEventListener("contextmenu", trackShift, true);
 
 const ARCHIVE = /\.(zip|7z|rar|tar|tgz|txz|tzst|tbz2?|gz|xz|zst|bz2|jar|apk|cbz|cbr|xpi|nupkg|vsix|whl|epub)$/i;
 export const isArchive = (e: Pick<Entry, "isDir" | "name">) => !e.isDir && ARCHIVE.test(e.name);
@@ -76,11 +84,18 @@ export function itemMenu(t: Tab, e: Entry, targets: Entry[], x: number, y: numbe
   const folderForShell = e.isDir ? e.path : parent(e.path)!;
   const items: MenuItem[] = [];
 
+  // --- everyday actions as an icon row, like the top of Windows 11's menu ---
+  items.push({ actions: [
+    { icon: Scissors, title: "Cut (Ctrl+X)", disabled: archived, action: () => copyToClipboard(paths, true) },
+    { icon: Copy, title: "Copy (Ctrl+C)", disabled: archived, action: () => copyToClipboard(paths, false) },
+    { icon: Pencil, title: multi ? `Rename ${targets.length} items… (F2)` : "Rename (F2)", disabled: archived, action: () => startRename(t) },
+    { icon: Trash2, title: "Delete (Del) · Shift+Del deletes permanently", disabled: archived, danger: true, action: () => deleteItems(paths, false) },
+  ] });
+  items.push({ separator: true });
+
   // --- open ---
   items.push({ label: "Open", icon: e.isDir ? FolderOpen : ExternalLink, shortcut: "Enter", action: () => openEntry(t, e) });
   if (e.isDir) items.push({ label: "Open in new tab", icon: FolderOpen, shortcut: "Ctrl+Enter", action: () => dirs.forEach((d) => openEntry(t, d, true)) });
-  if (e.isDir && single && !e.inArchive) items.push({ label: "Open in new window", icon: AppWindow, action: () => openNewWindow(e.path) });
-  if (e.isDir && single && !e.inArchive && !adminWindow()) items.push({ label: "Open as administrator", icon: ShieldAlert, action: () => elevateWindow(e.path) });
   if (!e.isDir && single) {
     items.push({ label: "Open with", icon: AppWindow, loadSubmenu: openWithItems(e) });
     items.push({ label: "Preview", icon: Eye, shortcut: "Space", action: () => setUi("quickLook", true) });
@@ -88,30 +103,27 @@ export function itemMenu(t: Tab, e: Entry, targets: Entry[], x: number, y: numbe
   if (isArchive(e) && single && !archived) {
     items.push({ label: "Browse archive", icon: FolderOpen, action: () => openEntry(t, { ...e, isDir: true }) });
   }
+  if (!archived) {
+    const openIn: MenuItem[] = [];
+    if (e.isDir && single) openIn.push({ label: "New window", icon: AppWindow, action: () => openNewWindow(e.path) });
+    if (e.isDir && single && !adminWindow()) openIn.push({ label: "New window as administrator", icon: ShieldAlert, action: () => elevateWindow(e.path) });
+    if (openIn.length) openIn.push({ separator: true });
+    openIn.push(
+      { label: "Terminal", icon: SquareTerminal, shortcut: "Ctrl+`", action: () => openTerminal(folderForShell) },
+      { label: "VS Code", icon: Code2, action: () => openInVscode(single ? e.path : folderForShell) },
+      { label: "Explorer", icon: ExternalLink, action: () => api.revealInExplorer(e.path) },
+    );
+    items.push({ label: "Open in", icon: SquareArrowOutUpRight, submenu: openIn });
+  }
   items.push({ separator: true });
 
-  // --- clipboard ---
-  items.push(
-    { label: "Cut", icon: Scissors, shortcut: "Ctrl+X", disabled: archived, action: () => copyToClipboard(paths, true) },
-    { label: "Copy", icon: Copy, shortcut: "Ctrl+C", disabled: archived, action: () => copyToClipboard(paths, false) },
-  );
+  // --- organize ---
   if (e.isDir && single && !archived) items.push({ label: "Paste into folder", icon: ClipboardPaste, shortcut: "Ctrl+V", action: () => paste(e.path) });
   items.push(
     { label: "Copy to", icon: FolderInput, submenu: destinations("copy", paths) },
     { label: "Move to", icon: FolderOutput, disabled: archived, submenu: destinations("move", paths) },
   );
   if (!archived) items.push({ label: "Duplicate", icon: CopyPlus, action: () => duplicate(paths) });
-  items.push({ separator: true });
-
-  // --- edit ---
-  if (!archived) {
-    items.push(
-      { label: multi ? `Rename ${targets.length} items…` : "Rename", icon: Pencil, shortcut: "F2", action: () => startRename(t) },
-      { label: "Delete", icon: Trash2, shortcut: "Del", action: () => deleteItems(paths, false) },
-      { label: "Delete permanently", icon: Trash2, shortcut: "Shift+Del", danger: true, action: () => deleteItems(paths, true) },
-      { separator: true },
-    );
-  }
 
   // --- archives ---
   if (isArchive(e) && single && !archived) {
@@ -137,16 +149,13 @@ export function itemMenu(t: Tab, e: Entry, targets: Entry[], x: number, y: numbe
   if (single && !archived) {
     items.push({ label: isFavorite(e.path) ? "Remove from favorites" : "Add to favorites", icon: Star, shortcut: "Ctrl+D", action: () => toggleFavorite(e.path, e.isDir) });
   }
-  if (!archived) {
-    items.push(
-      { label: "Open in Terminal", icon: SquareTerminal, shortcut: "Ctrl+`", action: () => openTerminal(folderForShell) },
-      { label: "Open in VS Code", icon: Code2, action: () => openInVscode(single ? e.path : folderForShell) },
-      { label: "Show in Explorer", icon: ExternalLink, action: () => api.revealInExplorer(e.path) },
-    );
-  }
   items.push({ separator: true });
+  // Like Explorer, the irreversible delete is listed when Shift is held while opening the menu.
+  if (!archived && shiftHeld) {
+    items.push({ label: "Delete permanently", icon: Trash2, shortcut: "Shift+Del", danger: true, action: () => deleteItems(paths, true) });
+  }
   items.push({ label: "Properties", icon: Info, shortcut: "Alt+Enter", disabled: archived, action: () => setUi("properties", paths) });
-  if (!archived) items.push({ label: "Show more options", icon: MoreHorizontal, shortcut: "Shift+F10", action: () => showNativeMenu(t, paths, x, y) });
+  if (!archived) items.push({ label: "Show more options", icon: MoreHorizontal, action: () => showNativeMenu(t, paths, x, y) });
   return items;
 }
 
@@ -222,7 +231,7 @@ export function backgroundMenu(t: Tab, x: number, y: number): MenuItem[] {
     { separator: true },
     { label: "Properties", icon: Info, shortcut: "Alt+Enter", disabled: archived, action: () => setUi("properties", [t.p]) },
   );
-  if (!archived) items.push({ label: "Show more options", icon: MoreHorizontal, shortcut: "Shift+F10", action: () => showNativeMenu(t, [], x, y) });
+  if (!archived) items.push({ label: "Show more options", icon: MoreHorizontal, action: () => showNativeMenu(t, [], x, y) });
   return items;
 }
 
@@ -314,8 +323,19 @@ export async function addShellEntries(t: Tab, paths: string[], background: boole
   const opened = ui.menu;
   const target = background ? [t.p] : paths;
   if (!opened || !target.length || isRecycle(t.p) || target.some((p) => isWsl(p) || /\.(zip|7z|rar|tar|gz|xz|zst|bz2|tgz|jar|apk|cbz|cbr)\\/i.test(p))) return;
+  // The menu waits (briefly) for these entries, so it opens once at its final size instead of
+  // growing under the pointer.
+  setUi("menu", "hold", true);
+  const release = () => { if (ui.menu === opened) setUi("menu", "hold", false); };
+  const timer = window.setTimeout(release, 250);
   const res = await api.shellMenuItems(target, background).catch(() => null);
-  if (!res?.items.length || ui.menu !== opened) return;
+  clearTimeout(timer);
+  if (!res?.items.length || ui.menu !== opened) return release();
+  merge(t, opened, res);
+  release();
+}
+
+function merge(t: Tab, opened: NonNullable<typeof ui.menu>, res: { token: number; items: ShellMenuItem[] }) {
   const items = [...opened.items];
   const key = (label?: string) => (label ?? "").replace(/…$/, "").trim().toLowerCase();
   // Windows' "New ▸" adds its extra types (Office documents, shortcuts…) to Ferret's own New menu.
@@ -328,15 +348,59 @@ export async function addShellEntries(t: Tab, paths: string[], background: boole
   }
   // Skip what Ferret's menu already has (e.g. "Open in Terminal"), then tidy separators.
   const own = new Set(items.map((it) => key(it.label)).filter(Boolean));
+  const openIn = items.findIndex((it) => it.label === "Open in" && it.submenu);
+  if (openIn >= 0) {
+    for (const it of items[openIn].submenu!) if (it.label) own.add(`open in ${key(it.label)}`);
+    // An app's own "Open with Code" entry stands in for Ferret's VS Code item.
+    if (res.items.some((it) => /^open (with|in) (vs )?code$/.test(key(it.label)))) {
+      items[openIn] = { ...items[openIn], submenu: items[openIn].submenu!.filter((x) => x.label !== "VS Code") };
+    }
+  }
   const kept = res.items.filter((it) => it !== shellNew && (it.separator || !own.has(key(it.label))));
-  const extra = kept.map((it) => shellToMenu(t, res.token, it))
+  // App launchers ("Open with Zed", "Edit in Notepad") and cascades (7-Zip, Send to) stay in
+  // view; the rest of the apps' one-off verbs share one submenu so the menu fits the window.
+  // At most four launchers stay in view (a folder's background menu can list many "Open … here").
+  const launchers = new Set(kept.filter((it) => !it.separator && !it.children.length && /^(open|edit)\b/i.test(it.label.trim())).slice(0, 4));
+  const inView = (it: ShellMenuItem) => it.separator || it.children.length > 0 || launchers.has(it);
+  const others = kept.filter((it) => !inView(it));
+  const grouped = others.length >= 2;
+  const shown = grouped ? kept.filter(inView) : kept;
+  const extra = shown.map((it) => shellToMenu(t, res.token, it))
     .filter((it, i, all) => !it.separator || (i > 0 && i < all.length - 1 && !all[i - 1].separator));
+  if (grouped) {
+    if (extra.length && !extra[extra.length - 1].separator) extra.push({ separator: true });
+    extra.push({ label: "More actions", icon: Blocks, submenu: others.map((it) => shellToMenu(t, res.token, it)) });
+  }
+  while (extra.length && extra[extra.length - 1].separator) extra.pop();
+  while (extra.length && extra[0].separator) extra.shift();
   if (!extra.length) return setUi("menu", "items", items);
-  const at = items.findIndex((it) => it.label === "Properties");
+  const at = items.findIndex((it) => it.label === "Delete permanently" || it.label === "Properties");
   const before = at > 0 && items[at - 1].separator ? at - 1 : Math.max(0, at);
   items.splice(at < 0 ? items.length : before, 0, { separator: true }, ...extra);
   setUi("menu", "items", items);
 }
+
+/** Ferret's context menu for the focused item, from the keyboard (Shift+F10 / Menu key):
+ *  anchored to the item, or the folder's menu when nothing is selected. */
+export function openKeyboardMenu(t: Tab) {
+  // Shift is part of Shift+F10 here, not a request for the extended items.
+  shiftHeld = false;
+  const el = document.querySelector<HTMLElement>(".row.cursor, .cell.cursor");
+  const targets = targetsOf(t);
+  if (el && targets.length) {
+    const r = el.getBoundingClientRect();
+    const cur = t.entries[0]().find((e) => pathKey(e.path) === pathKey(t.cursor[0]() ?? "")) ?? targets[0];
+    openMenu(r.left + 40, r.bottom, itemMenu(t, cur, targets, r.left + 40, r.bottom));
+    if (!targets.some((x) => x.inArchive)) addShellEntries(t, targets.map((x) => x.path), false);
+  } else {
+    const f = document.querySelector<HTMLElement>(".files")!.getBoundingClientRect();
+    openMenu(f.left + 60, f.top + 40, backgroundMenu(t, f.left + 60, f.top + 40));
+    addShellEntries(t, [], true);
+  }
+}
+
+/** A contextmenu event raised by the keyboard (Menu key) rather than the mouse. */
+export const fromKeyboard = (ev: MouseEvent) => ev.button === -1 || (ev as PointerEvent).pointerId === -1 || (ev.detail === 0 && ev.screenX === 0 && ev.screenY === 0);
 
 export const isPreviewable = (e: Entry) => kindOf(e) !== "folder";
 export { openFile };

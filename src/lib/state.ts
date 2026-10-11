@@ -19,6 +19,7 @@ export const [settings, setSettings] = createStore<Settings>({
   theme: "dark", accent: "#e2457f", backdrop: "mica", density: "comfortable",
   doubleClickOpen: true, rememberPerFolder: true, inheritToSubfolders: false, restoreSession: true,
   hiddenPlaces: [], hiddenSections: [],
+  columnWidths: { modified: 150, type: 140, size: 90 }, hiddenColumns: [],
   globalView: { ...DEFAULT_VIEW },
   profiles: {
     media: { enabled: true, view: {} },
@@ -91,6 +92,8 @@ export interface MenuItem {
   iconUrl?: string | null;
   /** Renders a row of small buttons instead of a single item. */
   row?: { label: string; title?: string; active?: boolean; color?: string; action: () => void }[];
+  /** A row of icon buttons (Cut, Copy, Rename, Delete), like the top of Windows 11's menu. */
+  actions?: { icon: any; title: string; disabled?: boolean; danger?: boolean; action: () => void }[];
   submenu?: MenuItem[];
   /** Submenu built on first hover (e.g. "Open with" apps). */
   loadSubmenu?: () => Promise<MenuItem[]>;
@@ -108,7 +111,8 @@ export const [ui, setUi] = createStore({
   filterOpen: false,
   sidebarWidth: 248,
   collapsedSections: [] as string[],
-  menu: null as null | { x: number; y: number; items: MenuItem[] },
+  /** `hold`: other apps' entries are still loading; the menu appears once they're in (or after a moment). */
+  menu: null as null | { x: number; y: number; items: MenuItem[]; hold?: boolean },
   toasts: [] as { id: number; text: string; kind: "info" | "error"; action?: ToastAction }[],
   previewOpen: false,
   previewWidth: 360,

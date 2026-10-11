@@ -42,12 +42,25 @@ const EXT_LABEL: Record<string, string> = {
   pptx: "PowerPoint deck", ppt: "PowerPoint deck", ini: "Settings file", iso: "Disc image",
 };
 
+/** Source files read better by language name ("Rust source", not "RS source"). */
+const LANGUAGE: Record<string, string> = {
+  rs: "Rust", py: "Python", js: "JavaScript", mjs: "JavaScript", cjs: "JavaScript", jsx: "JavaScript (JSX)",
+  ts: "TypeScript", tsx: "TypeScript (TSX)", go: "Go", java: "Java", kt: "Kotlin", cs: "C#", c: "C", h: "C header",
+  cpp: "C++", cc: "C++", hpp: "C++ header", swift: "Swift", rb: "Ruby", php: "PHP", lua: "Lua", sh: "Shell script",
+  ps1: "PowerShell", bat: "Batch", cmd: "Batch", sql: "SQL", html: "HTML", htm: "HTML", css: "CSS", scss: "SCSS",
+  vue: "Vue", svelte: "Svelte", dart: "Dart", zig: "Zig", scala: "Scala", r: "R", pl: "Perl", ex: "Elixir", hs: "Haskell",
+};
+
+/** "Rust", "Python"… for a file extension, or "" when there's no friendly name. */
+export const languageName = (ext: string) => LANGUAGE[ext.toLowerCase()] ?? "";
+
 export const plural = (n: number, word: string) => `${n.toLocaleString()} ${word}${n === 1 ? "" : "s"}`;
 
 export function typeLabel(e: Entry): string {
   if (!e.isDir && EXT_LABEL[e.ext]) return EXT_LABEL[e.ext];
   const k = kindOf(e);
   if (k === "other") return e.ext ? `${e.ext.toUpperCase()} file` : "File";
+  if (k === "code" && languageName(e.ext)) return `${languageName(e.ext)} source`;
   if (k === "code" || k === "data") return `${e.ext.toUpperCase()} ${k === "code" ? "source" : "file"}`;
   return KIND_LABEL[k];
 }
@@ -82,5 +95,8 @@ export function onColor(hex: string): string {
     return s <= 0.03928 ? s / 12.92 : ((s + 0.055) / 1.055) ** 2.4;
   };
   const L = 0.2126 * lin(n >> 16) + 0.7152 * lin((n >> 8) & 255) + 0.0722 * lin(n & 255);
-  return L > 0.4 ? "#111" : "#fff";
+  // Whichever text color contrasts more with the accent (WCAG ratio): white on cyan is only 2.4:1.
+  const onWhite = 1.05 / (L + 0.05);
+  const onDark = (L + 0.05) / (0.0056 + 0.05);
+  return onDark > onWhite ? "#111" : "#fff";
 }

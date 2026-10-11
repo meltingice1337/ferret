@@ -48,8 +48,9 @@ listen<JobUpdate>("job-update", (ev) => {
     if (u.status === "error" && !quietJobs && !/password/.test(u.error ?? "") && !u.error?.startsWith(ADMIN)) toast(`${u.label} failed: ${u.error}`, "error");
     if (u.status === "cancelled") toast(`Cancelled: ${u.label}`);
     cb?.(u);
-    // Leave finished jobs visible briefly in the panel.
-    setTimeout(() => setJobs(produce((j) => { delete j[u.id]; })), u.status === "error" ? 8000 : 1800);
+    // A finished job ticks to "Done" and leaves: the toast (with Undo) reports the result.
+    // Failures stay a while longer so their details can be read.
+    setTimeout(() => setJobs(produce((j) => { delete j[u.id]; })), u.status === "error" ? 8000 : 500);
     refreshAffected();
   }
 });
@@ -131,7 +132,7 @@ export async function undo() {
     const result = await step.undo();
     if (step.redo) redoStack.push(step);
     syncLabels();
-    toast(`Undid: ${step.label}`);
+    toast(`Undone: ${step.label}`);
     selectRestored(result);
   } catch (e) {
     toast(`Couldn't undo ${step.label}: ${reason(e)}`, "error");
@@ -151,7 +152,7 @@ export async function redo() {
     await step.redo();
     undoStack.push(step);
     syncLabels();
-    toast(`Redid: ${step.label}`);
+    toast(`Redone: ${step.label}`);
   } catch (e) {
     toast(`Couldn't redo ${step.label}: ${reason(e)}`, "error");
   } finally {

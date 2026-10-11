@@ -1,7 +1,7 @@
 import { AlertTriangle, ExternalLink, FolderOpen, ShieldCheck, X } from "lucide-solid";
 import { createMemo, createResource, createSignal, ErrorBoundary, For, onMount, Show, type JSX } from "solid-js";
 import { api } from "../lib/api";
-import { formatDate, formatSize, typeLabel } from "../lib/format";
+import { formatDate, formatSize, plural, typeLabel } from "../lib/format";
 import { batchRename } from "../lib/ops";
 import { basename, parent } from "../lib/path";
 import { activeTab, ASK_ALT, navigate, reload, setUi, toast, ui } from "../lib/state";
@@ -48,14 +48,16 @@ export function AskDialog() {
                   onInput={(e) => setValue(e.currentTarget.value)} />
               </Show>
               <div class="modal-actions">
-                <button type="button" class="btn" onClick={() => done(null)}>Cancel</button>
+                {/* Irreversible actions start on Cancel, so Enter never destroys anything. */}
+                <button type="button" class="btn" onClick={() => done(null)}
+                  ref={(el) => d.danger && d.input === undefined && queueMicrotask(() => el.focus())}>Cancel</button>
                 <Show when={d.alt}>
                   <button type="button" class="btn" onClick={() => done(ASK_ALT)}>
                     <Show when={d.shield}><ShieldCheck size={14} /></Show>{d.alt}
                   </button>
                 </Show>
                 <button type="submit" class="btn" classList={{ danger: d.danger, accent: !d.danger }}
-                  ref={(el) => d.input === undefined && queueMicrotask(() => el.focus())}>
+                  ref={(el) => d.input === undefined && !d.danger && queueMicrotask(() => el.focus())}>
                   <Show when={d.shield}><ShieldCheck size={14} /></Show>{d.confirmLabel ?? "OK"}
                 </button>
               </div>
@@ -95,11 +97,21 @@ export function ConflictDialog() {
                 </For>
                 <Show when={n > 6}><div class="pv-note small">…and {n - 6} more</div></Show>
               </div>
-              <div class="conflict-choices">
-                <button class="choice" onClick={() => done("replace")} ref={(el) => queueMicrotask(() => el.focus())}>
+              <div class="conflict-choices" role="radiogroup" onKeyDown={(e) => {
+                // ↑/↓ move between the choices; Enter picks the focused one.
+                if (e.key !== "ArrowDown" && e.key !== "ArrowUp") return;
+                const all = [...e.currentTarget.querySelectorAll<HTMLElement>(".choice")];
+                const i = all.indexOf(document.activeElement as HTMLElement);
+                e.preventDefault();
+                all[(i + (e.key === "ArrowDown" ? 1 : -1) + all.length) % all.length]?.focus();
+              }}>
+                <button class="choice" onClick={() => done("replace")}>
                   <b>Replace</b><span>Overwrite the existing {n === 1 ? "item" : "items"}; folders are merged</span>
                 </button>
-                <button class="choice" onClick={() => done("keepBoth")}><b>Keep both</b><span>Incoming items get a numbered name, e.g. “name (2)”</span></button>
+                {/* The safe choice has focus, so Enter never overwrites anything. */}
+                <button class="choice" onClick={() => done("keepBoth")} ref={(el) => queueMicrotask(() => el.focus())}>
+                  <b>Keep both</b><span>Incoming items get a numbered name, e.g. “name (2)”</span>
+                </button>
                 <button class="choice" onClick={() => done("skip")}><b>Skip</b><span>Leave the existing {n === 1 ? "item" : "items"} untouched</span></button>
               </div>
               <div class="modal-actions"><button class="btn" onClick={() => done(null)}>Cancel {c.op}</button></div>
@@ -170,7 +182,7 @@ function Properties(props: { paths: string[] }) {
             </Show>
           </Row>
           <Show when={(stats()?.dirs ?? 0) + (stats()?.files ?? 0) > 1 || info()?.isDir}>
-            <Row label="Contains">{stats() ? `${stats()!.files.toLocaleString()} files, ${stats()!.dirs.toLocaleString()} folders` : "…"}</Row>
+            <Row label="Contains">{stats() ? `${plural(stats()!.files, "file")}, ${plural(stats()!.dirs, "folder")}` : "…"}</Row>
           </Show>
           <Show when={info()}>
             {(i) => (

@@ -2,6 +2,8 @@ export type ViewMode = "list" | "grid";
 export type SortBy = "name" | "modified" | "created" | "size" | "type";
 export type SortDir = "asc" | "desc";
 export type GroupBy = "none" | "date" | "type" | "size" | "letter";
+/** List view columns besides Name. */
+export type ListColumn = "modified" | "type" | "size";
 
 export interface ViewSettings {
   mode: ViewMode;
@@ -144,6 +146,10 @@ export interface Settings {
   hiddenPlaces: string[];
   /** Sidebar sections the user hid ("linux", "drives", "recents", "dropzone"). */
   hiddenSections: string[];
+  /** List view column widths in px; Name takes the rest. */
+  columnWidths: Record<ListColumn, number>;
+  /** List view columns the user hid (Name always shows). */
+  hiddenColumns: ListColumn[];
   globalView: ViewSettings;
   profiles: Record<ProfileName, { enabled: boolean; view: Partial<ViewSettings> }>;
 }

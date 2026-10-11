@@ -6,7 +6,7 @@
 //   node scripts/ui.mjs clickText "Visible text" [right|double]
 //   node scripts/ui.mjs key "Control+C"             keyboard shortcut (Playwright key names)
 //   node scripts/ui.mjs type "some text"
-//   node scripts/ui.mjs mouse move|down|up|click|right x y
+//   node scripts/ui.mjs mouse move|down|up|click|double|right x y
 //   node scripts/ui.mjs drag x1 y1 x2 y2            press, move in steps, release
 //   node scripts/ui.mjs hover "<selector>"
 //   node scripts/ui.mjs text ["<selector>"]          innerText (default: body)
@@ -74,6 +74,7 @@ async function run(p, [cmd, ...a]) {
       else if (action === "down") await p.mouse.down();
       else if (action === "up") await p.mouse.up();
       else if (action === "click") await p.mouse.click(x, y);
+      else if (action === "double") await p.mouse.dblclick(x, y);
       else if (action === "right") await p.mouse.click(x, y, { button: "right" });
       return `mouse ${action}`;
     }

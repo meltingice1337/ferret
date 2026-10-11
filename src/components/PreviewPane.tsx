@@ -3,7 +3,7 @@ import { createEffect, createMemo, createSignal, For, on, onCleanup, onMount, Sh
 import { Portal } from "solid-js/web";
 import { formatDate, formatSize, kindOf, typeLabel } from "../lib/format";
 import { openFile } from "../lib/ops";
-import { basename, pathKey } from "../lib/path";
+import { basename, isRecycle, pathKey } from "../lib/path";
 import { activeTab, openEntry, persistSession, previewSpace, setUi, ui } from "../lib/state";
 import type { Entry } from "../lib/types";
 import { Thumb } from "./FileView";
@@ -39,7 +39,7 @@ function metaText(m: Meta) {
 }
 
 function folderEntry(path: string): Entry {
-  return { name: basename(path), path, isDir: true, isSymlink: false, hidden: false, size: 0, modified: null, created: null, ext: "", inArchive: false };
+  return { name: isRecycle(path) ? "Recycle Bin" : basename(path), path, isDir: true, isSymlink: false, hidden: false, size: 0, modified: null, created: null, ext: "", inArchive: false };
 }
 
 function MetaList(props: { entry: Entry; extra: Meta[] }) {
@@ -61,10 +61,13 @@ function MetaList(props: { entry: Entry; extra: Meta[] }) {
   return (
     <dl class="pv-meta">
       <For each={rows()}>{(r) => <><dt>{r.label}</dt><dd>{r.value}</dd></>}</For>
-      <dt>{original() ? "From" : "Path"}</dt>
-      <dd class="pv-path" title="Click to copy" onClick={() => navigator.clipboard.writeText(original() || props.entry.path)}>
-        {(original() || props.entry.path).split("\\").map((seg, i) => <>{i > 0 && "\\"}{i > 0 && <wbr />}{seg}</>)}
-      </dd>
+      {/* The Recycle Bin itself has no real path worth showing. */}
+      <Show when={!isRecycle(props.entry.path)}>
+        <dt>{original() ? "From" : "Path"}</dt>
+        <dd class="pv-path" title="Click to copy" onClick={() => navigator.clipboard.writeText(original() || props.entry.path)}>
+          {(original() || props.entry.path).split("\\").map((seg, i) => <>{i > 0 && "\\"}{i > 0 && <wbr />}{seg}</>)}
+        </dd>
+      </Show>
     </dl>
   );
 }
@@ -84,7 +87,7 @@ export default function PreviewPane() {
   };
 
   return (
-    <aside class="preview panel" style={{ width: `${previewSpace()}px` }}>
+    <aside class="preview" style={{ width: `${previewSpace()}px` }}>
       <div class="preview-resizer" onMouseDown={startResize} />
       <Show when={shown()}>
         {(e) => (
@@ -99,7 +102,6 @@ export default function PreviewPane() {
                 <button class="icon-btn" title="Open" onClick={() => openFile(e())}><ExternalLink size={15} /></button>
                 <button class="icon-btn" title="Quick Look (Space)" onClick={() => setUi("quickLook", true)}><Maximize2 size={15} /></button>
               </Show>
-              <button class="icon-btn" title="Close preview (Alt+P)" onClick={() => { setUi("previewOpen", false); persistSession(); }}><X size={15} /></button>
             </header>
             <div class="pv-body"><Preview entry={e()} onMeta={setMeta} /></div>
             <MetaList entry={e()} extra={meta()} />

@@ -4,8 +4,8 @@ import DOMPurify from "dompurify";
 import { marked } from "marked";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { api, fileUrl, thumbUrl } from "../../lib/api";
-import { formatDate, formatSize, typeLabel } from "../../lib/format";
-import { parent } from "../../lib/path";
+import { formatDate, formatSize, languageName, plural, typeLabel } from "../../lib/format";
+import { isRecycle, parent } from "../../lib/path";
 import { fsTick, isDark } from "../../lib/state";
 import type { Entry } from "../../lib/types";
 import FileIcon from "../FileIcon";
@@ -30,6 +30,10 @@ export function ErrorNote(props: { children: JSX.Element }) {
 // ---------- code / text ----------
 
 const MAX_HIGHLIGHT = 300 * 1024;
+/** Highlighter ids ("log", "yaml", "text") shown as words: "Log", "YAML", "Plain text". */
+const prettyLang = (id: string) =>
+  ({ text: "Plain text", txt: "Plain text", yaml: "YAML", yml: "YAML", json: "JSON", toml: "TOML", xml: "XML", ini: "INI", md: "Markdown" } as Record<string, string>)[id]
+  ?? id.charAt(0).toUpperCase() + id.slice(1);
 
 export function CodeView(props: { path: string; name: string; ext: string; setMeta: SetMeta; large?: boolean; text?: string }) {
   const [data] = createResource(() => props.path, async (p) => (props.text !== undefined ? { text: props.text, truncated: false, binary: false, encoding: "UTF-8", size: props.text.length } : api.readText(p, props.large ? 4 * 1024 * 1024 : 1024 * 1024)));
@@ -44,7 +48,7 @@ export function CodeView(props: { path: string; name: string; ext: string; setMe
     props.setMeta([
       { label: "Lines", value: `${lines.toLocaleString()}${d.truncated ? "+" : ""}` },
       { label: "Encoding", value: d.encoding },
-      { label: "Language", value: langFor(props.name, props.ext) },
+      { label: "Language", value: languageName(props.ext) || prettyLang(langFor(props.name, props.ext)) },
     ]);
     const src = body.length > MAX_HIGHLIGHT ? body.slice(0, MAX_HIGHLIGHT) : body;
     setHtml(null);
@@ -219,7 +223,7 @@ const clamp01 = (n: number) => Math.min(1, Math.max(0, n));
 /**
  * Click zooms in on the clicked spot, then the picture follows the mouse so moving across it
  * explores the whole image. Click again, or pick another file, to zoom back out. The wheel
- * changes the magnification (in the pane only once zoomed, so the pane still scrolls).
+ * zooms in and out from wherever the mouse is.
  */
 export function ImageView(props: { path: string; ext: string; setMeta: SetMeta; large?: boolean }) {
   const [failed, setFailed] = createSignal(false);
@@ -227,10 +231,13 @@ export function ImageView(props: { path: string; ext: string; setMeta: SetMeta; 
   // The next picture is decoded before it replaces the current one, so stepping through a
   // folder never flashes an empty frame.
   const [src, setSrc] = createSignal(want());
+  // Plain variable: the decode callback runs outside Solid's tracking scope.
+  let latest = src();
   createEffect(on(want, (url) => {
+    latest = url;
     const next = new Image();
     next.src = url;
-    next.decode().catch(() => {}).then(() => { if (want() === url) setSrc(url); });
+    next.decode().catch(() => {}).then(() => { if (latest === url) setSrc(url); });
   }, { defer: true }));
 
   let box!: HTMLDivElement;
@@ -318,13 +325,12 @@ export function ImageView(props: { path: string; ext: string; setMeta: SetMeta; 
     animate();
   };
   const onWheel = (e: WheelEvent) => {
-    if (!props.large && goal.z === 1) return;
     e.preventDefault();
     setZoom(goal.z * (e.deltaY < 0 ? 1.25 : 0.8), e);
   };
 
   return (
-    <div class="pv-image" classList={{ large: props.large, zoomed: zoomed() }} ref={box}
+    <div class="pv-image" classList={{ large: props.large, zoomed: zoomed(), opaque: /^(jpe?g|jfif|bmp)$/i.test(props.ext) }} ref={box}
       onClick={onClick} onMouseMove={onMove} onWheel={onWheel}>
       <img
         ref={pic}
@@ -538,7 +544,7 @@ export function ArchiveView(props: { entry: Entry; setMeta: SetMeta; onBrowse: (
     const i = info();
     if (i) props.setMeta([
       { label: "Format", value: i.format },
-      { label: "Contents", value: `${i.files.toLocaleString()} files, ${i.dirs.toLocaleString()} folders` },
+      { label: "Contents", value: `${plural(i.files, "file")}, ${plural(i.dirs, "folder")}` },
       { label: "Unpacked", value: formatSize(i.totalSize) },
       { label: "Saved", value: !i.totalSize ? "–" : i.compressedSize < i.totalSize
           ? `${Math.round((1 - i.compressedSize / i.totalSize) * 100)}% smaller than the contents`
@@ -565,7 +571,7 @@ export function ArchiveView(props: { entry: Entry; setMeta: SetMeta; onBrowse: (
                     </div>
                   )}
                 </For>
-                <Show when={i().entries > i().topLevel.length}><div class="pv-note small">…and more inside</div></Show>
+                <Show when={i().entries > i().topLevel.length}><div class="pv-note small">{plural(i().entries, "item")} in all</div></Show>
               </div>
               <Show when={i().comment}><pre class="pv-comment">{i().comment}</pre></Show>
             </>
@@ -611,13 +617,14 @@ export function FolderView(props: { path: string; setMeta: SetMeta; onOpen: (p: 
     const dirs = visible.length - files.length;
     const bytes = files.reduce((a, e) => a + e.size, 0);
     const recent = [...visible].sort((a, b) => (b.modified ?? 0) - (a.modified ?? 0)).slice(0, 8);
-    const images = files.filter((e) => /^(jpe?g|png|gif|webp|avif|heic|bmp|mp4|mov|mkv|webm)$/.test(e.ext)).slice(0, 4);
+    // Recycled files have no thumbnails of their own (only blurry icons), so no mosaic there.
+    const images = isRecycle(props.path) ? [] : files.filter((e) => /^(jpe?g|png|gif|webp|avif|heic|bmp|mp4|mov|mkv|webm)$/.test(e.ext)).slice(0, 4);
     return { total: visible.length, files: files.length, dirs, bytes, recent, images, hidden: l.entries.length - visible.length };
   });
   createEffect(() => {
     const s = summary();
     if (s) props.setMeta([
-      { label: "Contains", value: `${s.files.toLocaleString()} files, ${s.dirs.toLocaleString()} folders` },
+      { label: "Contains", value: `${plural(s.files, "file")}, ${plural(s.dirs, "folder")}` },
       ...(s.files ? [{ label: "Size of files", value: formatSize(s.bytes) }] : []),
       ...(s.hidden ? [{ label: "Hidden", value: String(s.hidden) }] : []),
     ]);
@@ -632,7 +639,10 @@ export function FolderView(props: { path: string; setMeta: SetMeta; onOpen: (p: 
                 <For each={s().images}>{(e) => <MosaicTile entry={e} />}</For>
               </div>
             </Show>
-            <div class="pv-folder-head">{s().total ? "Recently changed" : "This folder is empty"}</div>
+            {/* An empty folder already says so in the file list. */}
+            <Show when={s().total}>
+              <div class="pv-folder-head">{isRecycle(props.path) ? "Recently deleted" : "Recently changed"}</div>
+            </Show>
             <For each={s().recent}>
               {(e) => (
                 <button class="pv-folder-item" onDblClick={() => props.onOpen(e.path)} title={e.path}>
