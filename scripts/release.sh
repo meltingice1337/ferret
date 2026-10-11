@@ -6,8 +6,10 @@
 #   scripts/release.sh                     interactive: pick patch / minor / major, review, confirm
 #   scripts/release.sh --bump patch --yes  no questions
 #   scripts/release.sh --version 1.0.0     exact version
-#   options: --notes "text" (replaces the commit list), --draft, --dry-run (show the plan, change nothing)
+#   options: --notes "text" (replaces the commit list), --draft, --dry-run (show the plan, change nothing),
+#            --skip-checks (emergencies only)
 #
+# Before anything else it type-checks the frontend and runs the Rust tests; a failure stops it.
 # Release notes are the commit subjects since the previous tag, plus a compare link.
 # Needs: a clean working tree, `gh` logged in, and the updater signing key at
 # ~/.tauri/ferret.key (or $TAURI_SIGNING_PRIVATE_KEY).
@@ -16,16 +18,17 @@ set -euo pipefail
 repo="meltingice1337/ferret"
 cd "$(dirname "$0")/.."
 
-bump="" version="" notes="" draft=0 yes=0 dry=0
+bump="" version="" notes="" draft=0 yes=0 dry=0 skip=0
 while [[ $# -gt 0 ]]; do
   case "$1" in
+    --skip-checks) skip=1; shift ;;
     --bump) bump="${2:-}"; shift 2 ;;
     --version) version="${2:-}"; shift 2 ;;
     --notes) notes="${2:-}"; shift 2 ;;
     --draft) draft=1; shift ;;
     -y|--yes) yes=1; shift ;;
     --dry-run) dry=1; shift ;;
-    -h|--help) sed -n '2,13p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    -h|--help) sed -n '2,15p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
     *) echo "unknown option: $1 (see --help)" >&2; exit 1 ;;
   esac
 done
@@ -41,6 +44,17 @@ step() { echo "${cyan}==>${reset} $*"; }
 [[ -z "$bump" || "$bump" =~ ^(patch|minor|major)$ ]] || fail "--bump must be patch, minor or major"
 [[ -z "$version" || "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || fail "--version must look like 1.2.3"
 if [[ $dry -eq 0 && -n "$(git status --porcelain)" ]]; then fail "the working tree has uncommitted changes"; fi
+
+# ---- checks: nothing else happens unless these pass ----
+if [[ $skip -eq 1 ]]; then
+  echo "${dim}Skipping checks (--skip-checks).${reset}"
+else
+  step "Type-checking the frontend (tsc)"
+  npx tsc --noEmit -p . || fail "type check failed (fix it, or use --skip-checks)"
+  step "Running the Rust tests (cargo test)"
+  (cd src-tauri && cargo test --release --quiet) || fail "tests failed (fix them, or use --skip-checks)"
+  echo "${green}Checks passed.${reset}"
+fi
 
 # ---- pick the version ----
 current=$(node -p 'require("./src-tauri/tauri.conf.json").version')
