@@ -6,7 +6,13 @@ import { createEffect, createSignal, For, type JSX, onCleanup, Show } from "soli
 import { Dynamic } from "solid-js/web";
 import { api } from "../lib/api";
 import { formatSize } from "../lib/format";
-import { basename, isRecycle, isWithin, RECYCLE, samePath } from "../lib/path";
+import { basename, isRecycle, isWithin, parent, RECYCLE, samePath } from "../lib/path";
+
+/** Folder names that say little on their own (build output, sources, assets…). */
+const GENERIC_NAMES = new Set([
+  "src", "lib", "bin", "obj", "build", "dist", "out", "target", "debug", "release", "deps", "docs", "doc", "test", "tests",
+  "assets", "public", "static", "data", "temp", "tmp", "config", "scripts", "images", "img", "node_modules", "app", "packages",
+]);
 import {
   activeTab, favorites, goTo, openMenu, persistSession, persistSettings, places, recents,
   removeFromShelf, setFavorites, setRecents, setSettings, settings, setUi, SHELF, ui, type MenuItem,
@@ -46,6 +52,12 @@ export const FAVORITE_COLORS = ["#ef4444", "#f59e0b", "#22c55e", "#06b6d4", "#3b
 
 export default function Sidebar(props: { overlay?: boolean }) {
   const current = () => activeTab()?.p ?? "";
+  const shownRecents = () => recents().filter((r) => !samePath(r.path, current())).slice(0, 8);
+  /** Generic or repeated names ("debug", two "src") get their parent folder alongside. */
+  const needsParent = (path: string) => {
+    const name = basename(path).toLowerCase();
+    return GENERIC_NAMES.has(name) || shownRecents().filter((r) => basename(r.path).toLowerCase() === name).length > 1;
+  };
   // As an overlay, clicking outside closes it.
   createEffect(() => {
     if (!props.overlay) return;
@@ -140,7 +152,7 @@ export default function Sidebar(props: { overlay?: boolean }) {
           <button class="icon-btn tiny" title="Clear recents"
             onClick={async (e) => { e.stopPropagation(); setRecents(await api.clearRecents()); }}><Trash2 size={12} /></button>
         }>
-          <For each={recents().filter((r) => !samePath(r.path, current())).slice(0, 8)}>
+          <For each={shownRecents()}>
             {(r) => {
               // A drive root reads like the Drives section: letter badge + the drive's name.
               const letter = /^([a-z]):\\?$/i.exec(r.path)?.[1].toUpperCase();
@@ -149,6 +161,7 @@ export default function Sidebar(props: { overlay?: boolean }) {
                 : basename(r.path);
               return (
                 <SideItem icon={Clock} label={label()} badge={letter} path={r.path} title={r.path}
+                  extra={<Show when={!letter && needsParent(r.path)}><span class="side-hint">{basename(parent(r.path) ?? "")}</span></Show>}
                   onRemove={async () => setRecents(await api.removeRecent(r.path))} />
               );
             }}

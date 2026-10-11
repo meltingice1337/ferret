@@ -158,6 +158,9 @@ input::selection, textarea::selection { background: color-mix(in oklab, var(--ac
 }
 .side-item.dragging { opacity: 0.4; }
 .side-label { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* Parent folder after a generic name ("debug  target"): dim, and the first to shorten. */
+.side-item:has(.side-hint) .side-label { flex: 0 1 auto; }
+.side-hint { flex: 1 1 0; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 11.5px; color: var(--fg-3); }
 .side-badge { font-size: 10px; color: var(--fg-3); border: 1px solid var(--line-2); border-radius: 5px; padding: 0 5px; }
 .side-x { display: none; color: var(--fg-3); padding: 2px; border-radius: 4px; }
 .side-x:hover { color: var(--fg); background: var(--press); }

@@ -254,10 +254,28 @@ pub struct Recent {
     count: i64,
 }
 
+/// Folders you use most come first: visits weighted by how recent they are (like Explorer's
+/// frequent folders), so the list stays steady instead of reshuffling on every visit.
 pub fn recents(conn: &Connection, limit: i64) -> rusqlite::Result<Vec<Recent>> {
-    let mut st = conn.prepare("SELECT path, last_opened, count FROM recents ORDER BY last_opened DESC LIMIT ?1")?;
-    let rows = st.query_map([limit], |r| Ok(Recent { path: r.get(0)?, last_opened: r.get(1)?, count: r.get(2)? }))?;
-    rows.collect()
+    let mut st = conn.prepare("SELECT path, last_opened, count FROM recents")?;
+    let rows = st.query_map([], |r| Ok(Recent { path: r.get(0)?, last_opened: r.get(1)?, count: r.get(2)? }))?;
+    let mut all = rows.collect::<rusqlite::Result<Vec<_>>>()?;
+    let now = now();
+    all.sort_by(|a, b| frecency(b, now).total_cmp(&frecency(a, now)).then(b.last_opened.cmp(&a.last_opened)));
+    all.truncate(limit.max(0) as usize);
+    Ok(all)
+}
+
+fn frecency(r: &Recent, now: i64) -> f64 {
+    const HOUR: i64 = 3_600_000;
+    let age = (now - r.last_opened).max(0);
+    let weight = match age {
+        a if a < HOUR => 4.0,
+        a if a < 24 * HOUR => 2.0,
+        a if a < 7 * 24 * HOUR => 0.5,
+        _ => 0.25,
+    };
+    r.count as f64 * weight
 }
 
 pub fn push_recent(conn: &Connection, path: &str) -> rusqlite::Result<()> {
@@ -279,4 +297,34 @@ pub fn push_recent(conn: &Connection, path: &str) -> rusqlite::Result<()> {
 pub fn remove_recent(conn: &Connection, path: &str) -> rusqlite::Result<()> {
     conn.execute("DELETE FROM recents WHERE path_key = ?1", [paths::key(path)])?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn recents_rank_by_use_and_recency() {
+        let file = std::env::temp_dir().join(format!("ferret-db-{}.db", std::process::id()));
+        let conn = open(&file).unwrap();
+        let day = 24 * 3_600_000;
+        let add = |path: &str, age: i64, count: i64| {
+            conn.execute(
+                "INSERT INTO recents (path_key, path, last_opened, count) VALUES (?1, ?1, ?2, ?3)",
+                params![path, now() - age, count],
+            )
+            .unwrap();
+        };
+        add(r"c:\passed-through-just-now", 60_000, 1); // 1 × 4
+        add(r"c:\work", 2 * day, 20); // 20 × 0.5
+        add(r"c:\yesterday", day / 2, 3); // 3 × 2
+        add(r"c:\old-project", 30 * day, 8); // 8 × 0.25
+        let order: Vec<String> = recents(&conn, 10).unwrap().into_iter().map(|r| r.path).collect();
+        assert_eq!(order, [r"c:\work", r"c:\yesterday", r"c:\passed-through-just-now", r"c:\old-project"]);
+        assert_eq!(recents(&conn, 2).unwrap().len(), 2);
+        drop(conn);
+        for ext in ["", "-wal", "-shm"] {
+            let _ = std::fs::remove_file(format!("{}{ext}", file.display()));
+        }
+    }
 }

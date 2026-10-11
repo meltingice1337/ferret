@@ -382,10 +382,37 @@ export async function navigate(
     }
   });
   if (ui.sidebarOverlay) setUi("sidebarOverlay", false);
-  if (!isRecycle(res.path) && !adminWindow()) api.pushRecent(res.path).then(setRecents).catch(() => {});
+  noteVisit(tab, res.path);
   syncWatchers();
   persistSession();
   return true;
+}
+
+// ---------- recents: folders you actually used ----------
+
+/** A folder counts once you've stayed a moment or opened a file there, not when you pass
+ *  through it on the way somewhere else. */
+const DWELL_MS = 3000;
+const visits = new Map<number, { path: string; timer: number; counted: boolean }>();
+
+function noteVisit(tab: Tab, path: string) {
+  const prev = visits.get(tab.id);
+  if (prev) clearTimeout(prev.timer);
+  if (isRecycle(path) || adminWindow()) return visits.delete(tab.id);
+  const visit = { path, counted: false, timer: 0 };
+  visit.timer = window.setTimeout(() => {
+    if (document.visibilityState === "visible") countVisit(tab);
+  }, DWELL_MS);
+  visits.set(tab.id, visit);
+}
+
+/** Records the tab's current folder in Recent (once per visit). */
+export function countVisit(tab: Tab) {
+  const v = visits.get(tab.id);
+  if (!v || v.counted || !samePath(v.path, tab.p)) return;
+  v.counted = true;
+  clearTimeout(v.timer);
+  api.pushRecent(v.path).then(setRecents).catch(() => {});
 }
 
 /** Re-lists the folder in place, keeping selection and (unless asked) the current view. */
@@ -494,6 +521,9 @@ export function closeTab(id: number) {
   if (list.length <= 1) return;
   const idx = list.findIndex((t) => t.id === id);
   if (idx >= 0) setClosedTabs((c) => [...c.slice(-19), { path: list[idx].p, index: idx }]);
+  // A tab closed straight away doesn't make its folder "recent".
+  clearTimeout(visits.get(id)?.timer);
+  visits.delete(id);
   const next = list.filter((t) => t.id !== id);
   setTabs(next);
   if (activeId() === id) setActiveId(next[Math.min(idx, next.length - 1)].id);
@@ -535,6 +565,8 @@ export function openEntry(tab: Tab, e: Pick<Entry, "path" | "isDir">, inNewTab =
     if (inNewTab) newTab(e.path, false);
     else navigate(tab, e.path);
   } else {
+    // Opening a file is the clearest sign this folder is one you use.
+    countVisit(tab);
     import("./ops").then((m) => m.openFile(e as Entry));
   }
 }
