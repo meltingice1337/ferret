@@ -6,6 +6,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { relaunch } from "@tauri-apps/plugin-process";
 import { check, type Update } from "@tauri-apps/plugin-updater";
 import { createStore } from "solid-js/store";
+import { describeError, log } from "./log";
 import { toast } from "./state";
 
 const FIRST_CHECK_MS = 15_000;
@@ -39,15 +40,18 @@ export async function checkForUpdate(manual = false) {
     const u = await check();
     setUpdater("lastChecked", Date.now());
     if (!u) {
+      log.info("update check: up to date");
       pending = null;
       setUpdater("phase", "idle");
       if (manual) toast("Ferret is up to date");
       return;
     }
+    log.info(`update check: ${u.version} available`);
     pending = u;
     setUpdater({ phase: "available", version: u.version, notes: u.body ?? "", date: u.date?.match(/^\d{4}-\d{2}-\d{2}/)?.[0] ?? "" });
     if (manual) setUpdater("dismissed", "");
   } catch (e) {
+    log.warn(`update check failed: ${describeError(e)}`);
     setUpdater({ phase: manual ? "error" : "idle", error: String(e) });
     if (manual) toast(`Couldn't check for updates: ${e}`, "error");
   }
@@ -58,6 +62,7 @@ export async function installUpdate() {
   setUpdater("notesOpen", false);
   if (!pending) return;
   setUpdater({ phase: "downloading", done: 0, total: 0, error: "" });
+  log.info(`installing update ${pending.version}`);
   try {
     await pending.downloadAndInstall((ev) => {
       if (ev.event === "Started") setUpdater("total", ev.data.contentLength ?? 0);
@@ -67,6 +72,7 @@ export async function installUpdate() {
     // The Windows installer usually closes Ferret itself; this covers the case where it doesn't.
     await relaunch();
   } catch (e) {
+    log.error(`update install failed: ${describeError(e)}`);
     setUpdater({ phase: "error", error: String(e) });
   }
 }
@@ -144,6 +150,7 @@ export function startUpdater() {
 async function checkIndexer() {
   const outdated = await invoke<boolean>("search_service_outdated").catch(() => false);
   if (!outdated) return;
+  log.info("search service is out of date");
   toast("The drive index service is out of date", "info", { label: "Update…", run: updateIndexer });
 }
 

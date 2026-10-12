@@ -137,6 +137,7 @@ pub async fn empty_recycle_bin() -> Result<(), String> {
             if info().items == 0 {
                 return Ok(());
             }
+            log::info!("emptying the Recycle Bin ({} items)", info().items);
             unsafe { SHEmptyRecycleBinW(None, PCWSTR::null(), SHERB_NOCONFIRMATION | SHERB_NOPROGRESSUI | SHERB_NOSOUND) }
                 .map_err(|e| e.message().to_string())
         }

@@ -101,6 +101,7 @@ pub fn shell_op(app: AppHandle, window: tauri::WebviewWindow, op: ShellOp, eleva
     validate(&op)?;
     let owner = window.hwnd().ok().map(|h| h.0 as isize);
     let (kind, label) = describe(&op);
+    log::info!("shell op (elevate={elevate}): {op:?}");
     Ok(jobs::spawn(&app, kind, &label, move |ctx| perform(&op, owner.map(hwnd_from_raw), elevate, ctx)))
 }
 

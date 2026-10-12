@@ -333,11 +333,15 @@ function About() {
         <p class="card-desc">A fast, keyboard-first file manager for Windows. Search everything with Ctrl+K.</p>
         <Show when={status()}><p class="card-desc">{status()}</p></Show>
       </div>
-      <Show when={updater.phase === "available"} fallback={
-        <button class="btn" disabled={updater.phase !== "idle" && updater.phase !== "error"} onClick={() => checkForUpdate(true)}>Check for updates</button>
-      }>
-        <button class="btn accent" onClick={showWhatsNew}>What's new</button>
-      </Show>
+      <div class="about-actions">
+        <button class="btn" title="Ferret's log files, for tracking down problems"
+          onClick={() => api.openLogFolder().catch((e) => toast(String(e), "error"))}>Open logs</button>
+        <Show when={updater.phase === "available"} fallback={
+          <button class="btn" disabled={updater.phase !== "idle" && updater.phase !== "error"} onClick={() => checkForUpdate(true)}>Check for updates</button>
+        }>
+          <button class="btn accent" onClick={showWhatsNew}>What's new</button>
+        </Show>
+      </div>
     </section>
   );
 }

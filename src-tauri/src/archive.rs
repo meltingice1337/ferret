@@ -1895,6 +1895,7 @@ pub async fn archive_extract(
         Ok((archive, entries, pw))
     })
     .await?;
+    log::info!("extract \"{archive}\" to \"{dest}\" ({})", entries.as_ref().map_or("all entries".into(), |e| format!("{} entries", e.len())));
     let label = format!("Extracting {}", file_name_of(&archive));
     Ok(jobs::spawn(&app, "extract", &label, move |ctx| {
         extract_impl(&archive, &dest, entries.as_deref(), pw.as_deref(), ctx)
@@ -1909,6 +1910,7 @@ pub async fn archive_extract_smart(app: AppHandle, archive: String, password: Op
         Ok((archive, pw))
     })
     .await?;
+    log::info!("extract here \"{archive}\"");
     let label = format!("Extracting {}", file_name_of(&archive));
     Ok(jobs::spawn(&app, "extract", &label, move |ctx| {
         extract_smart_impl(&archive, pw.as_deref(), ctx)
@@ -1920,6 +1922,7 @@ pub async fn archive_extract_smart(app: AppHandle, archive: String, password: Op
 pub fn compress_zip(app: AppHandle, sources: Vec<String>, dest: String) -> Result<u64, String> {
     let dest = paths::normalize(&dest);
     validate_compress(&sources, &dest)?;
+    log::info!("compress to \"{dest}\": {}", crate::logging::paths(&sources));
     let label = format!("Compressing {}", file_name_of(&dest));
     Ok(jobs::spawn(&app, "compress", &label, move |ctx| compress_zip_impl(&sources, &dest, ctx)))
 }

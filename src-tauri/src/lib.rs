@@ -7,6 +7,7 @@ mod foldersize;
 mod integration;
 mod jobs;
 mod listing;
+mod logging;
 mod paths;
 mod places;
 mod protocol;
@@ -42,6 +43,7 @@ pub fn run() {
             unsafe { std::env::set_var("WEBVIEW2_USER_DATA_FOLDER", dir.join(&id).join("EBWebView-devtools")) };
         }
     }
+    logging::install_panic_hook();
     integration::init_launch_targets();
     integration::init_window_registry(&id);
 
@@ -55,6 +57,8 @@ pub fn run() {
         }
     }
     tauri::Builder::default()
+        // First, so everything after it (other plugins' setup included) is recorded.
+        .plugin(logging::plugin())
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_drag::init())
         .plugin(tauri_plugin_dialog::init())
@@ -71,6 +75,7 @@ pub fn run() {
             });
         })
         .setup(move |app| {
+            logging::log_startup(app.handle(), admin);
             let dir = app.path().app_data_dir()?;
             std::fs::create_dir_all(&dir)?;
             let conn = db::open(&dir.join("ferret.db"))?;
@@ -124,6 +129,7 @@ pub fn run() {
             commands::clear_recents,
             commands::set_backdrop,
             commands::drag_icon,
+            logging::open_log_folder,
             jobs::cancel_job,
             fileops::create_folder,
             fileops::create_file,

@@ -171,6 +171,7 @@ pub async fn shell_menu_invoke(
     token: u64,
     id: String,
 ) -> Result<Option<String>, String> {
+    log::info!("shell menu: invoking {id}");
     match parse_id(&id).ok_or_else(|| format!("Unknown menu entry: {id}"))? {
         (Source::Classic, offset) => {
             let raw = raw_hwnd(&window)?;
@@ -920,8 +921,7 @@ fn note_failure(v: &PackageVerb, e: &windows::core::Error) {
         v.clsid,
         hr_msg(e.clone())
     );
-    #[cfg(debug_assertions)]
-    eprintln!("[shellmenu] cannot activate {why}");
+    log::warn!("cannot activate {why}");
     if let Ok(mut f) = FAILED.lock() {
         f.push((v.clsid.to_u128(), why));
     }
@@ -968,9 +968,8 @@ fn refresh_catalog() {
     let spawned = std::thread::Builder::new()
         .name("ferret-appx-scan".into())
         .spawn(|| {
-            let verbs = scan_packages().unwrap_or_else(|_e| {
-                #[cfg(debug_assertions)]
-                eprintln!("[shellmenu] package scan failed: {_e}");
+            let verbs = scan_packages().unwrap_or_else(|e| {
+                log::warn!("package scan failed: {e}");
                 Vec::new()
             });
             if let Ok(mut c) = CATALOG.write() {

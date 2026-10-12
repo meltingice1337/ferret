@@ -301,6 +301,7 @@ pub fn default_manager_status() -> DefaultStatus {
 
 #[tauri::command]
 pub fn set_default_manager(state: State<'_, AppState>, enable: bool) -> Res<DefaultStatus> {
+    log::info!("set default file manager: {enable}");
     #[cfg(windows)]
     {
         let conn = state.db.lock().map_err(|e| e.to_string())?;
@@ -412,6 +413,7 @@ pub async fn restart_elevated(window: tauri::WebviewWindow, tabs: Vec<String>, a
     let size = window.outer_size().map_err(|e| e.to_string())?;
     let restore = Restore { tabs, active, x: pos.x, y: pos.y, w: size.width, h: size.height, maximized };
     let payload = base64::engine::general_purpose::STANDARD.encode(serde_json::to_vec(&restore).map_err(|e| e.to_string())?);
+    log::info!("restarting as administrator");
     let owner = window.hwnd().ok().map(|h| h.0 as isize);
     tauri::async_runtime::spawn_blocking(move || -> Res<()> {
         let pid = run_elevated(&format!("--restore {payload}"), owner)?;

@@ -4,6 +4,7 @@ import { listen } from "@tauri-apps/api/event";
 import { api } from "./api";
 import { invalidateFolderSizes } from "./foldersizes";
 import { onColor } from "./format";
+import { log } from "./log";
 import { basename, isArchiveName, isRecycle, parent, pathKey, samePath } from "./path";
 import type {
   Entry, Favorite, LaunchTarget, Places, ProfileName, Recent, ResolvedView, Session, Settings, ViewSettings, ViewSource,
@@ -237,6 +238,8 @@ export function ask(req: Omit<DialogRequest, "resolve">): Promise<string | null>
 let toastSeq = 0;
 export function toast(text: string, kind: "info" | "error" = "info", action?: ToastAction) {
   const id = ++toastSeq;
+  // What the user was told, next to the raw error the backend logged.
+  if (kind === "error") log.warn(`error shown: ${text}`);
   text = friendly(text);
   if (action && /Recycle Bin$/.test(text)) setUi("toasts", (t) => t.filter((x) => !(x.action && /Recycle Bin$/.test(x.text))));
   setUi("toasts", (t) => [...t.slice(-3), { id, text, kind, action }]);

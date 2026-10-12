@@ -133,11 +133,13 @@ where
             Instant::now() - Duration::from_secs(1),
         )),
     };
+    log::info!("job {id} {kind} started: {label}");
     {
         let mut s = ctx.state.lock().unwrap();
         ctx.emit_locked(&mut s, true);
     }
     tauri::async_runtime::spawn_blocking(move || {
+        let started = Instant::now();
         let res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| work(&ctx)))
             .unwrap_or_else(|_| Err("Internal error".into()));
         let mut s = ctx.state.lock().unwrap();
@@ -149,6 +151,14 @@ where
                 s.0.error = Some(e);
             }
         }
+        let u = &s.0;
+        log::log!(
+            if u.status == "error" { log::Level::Warn } else { log::Level::Info },
+            "job {id} {} {} in {:?}: {}/{} files, {}/{} bytes, {} created, {} replaced, {} skipped{}",
+            u.kind, u.status, started.elapsed(),
+            u.files_done, u.files_total, u.bytes_done, u.bytes_total, u.created.len(), u.replaced.len(), u.skipped,
+            u.error.as_ref().map(|e| format!("; error: {e}")).unwrap_or_default()
+        );
         ctx.emit_locked(&mut s, true);
         registry().lock().unwrap().remove(&id);
     });

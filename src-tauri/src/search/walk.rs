@@ -176,7 +176,7 @@ fn verify_dir(ix: &Index, dir: u32) {
         if cfg!(test) {
             panic!("{msg}");
         }
-        eprintln!("{msg}");
+        log::warn!("{msg}");
     }
     let _ = (ix, dir);
 }
@@ -584,8 +584,7 @@ impl Drop for DirWatch {
             std::thread::sleep(Duration::from_millis(10));
         }
         // Give up (leak the handle) rather than hang the caller.
-        #[cfg(debug_assertions)]
-        eprintln!("ferret-watch: watcher thread did not stop after cancel");
+        log::warn!("watcher thread did not stop after cancel");
     }
 }
 

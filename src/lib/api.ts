@@ -1,8 +1,16 @@
-import { convertFileSrc, invoke } from "@tauri-apps/api/core";
+import { convertFileSrc, invoke as rawInvoke, type InvokeArgs } from "@tauri-apps/api/core";
+import { logCommandFailure } from "./log";
 import type {
   ArchiveInfo, Bootstrap, ClipboardFiles, Conflict, DefaultManagerStatus, DirListing, Favorite, FolderSize, FolderView, ItemInfo,
   LaunchTarget, OpenWithApp, Places, Policy, Recent, RecycleInfo, Session, ShellMenuItem, ShellOp, Settings, Stats, TextPreview, ViewSettings,
 } from "./types";
+
+/** `invoke` that records failures in the log file before passing them on. */
+const invoke = <T>(cmd: string, args?: InvokeArgs) =>
+  rawInvoke<T>(cmd, args).catch((e) => {
+    logCommandFailure(cmd, args, e);
+    throw e;
+  });
 
 export const api = {
   bootstrap: () => invoke<Bootstrap>("bootstrap"),
@@ -104,6 +112,7 @@ export const api = {
   sharedState: () => invoke<{ settings: Settings; favorites: Favorite[]; recents: Recent[] }>("shared_state"),
   /** Runs an operation through the Windows shell; `elevate` lets it ask for administrator permission. */
   shellOp: (op: ShellOp, elevate: boolean) => invoke<number>("shell_op", { op, elevate }),
+  openLogFolder: () => invoke<void>("open_log_folder"),
 };
 
 /** URL that streams a local file into <img>/<video>/<iframe> (Range-capable). */

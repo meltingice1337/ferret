@@ -108,7 +108,9 @@ fn service_request(a: &'static AppSearch, req: &ipc::Request, timeout: Duration)
         }
         match ipc::PipeClient::connect_to_service(Duration::from_millis(50)) {
             Ok(c) => p.client = Some(c),
-            Err(_) => {
+            Err(e) => {
+                // Expected when the service isn't installed; retried every few seconds.
+                log::debug!("search service unavailable: {e}");
                 p.next_try = Some(Instant::now() + Duration::from_secs(5));
                 return None;
             }
@@ -116,7 +118,8 @@ fn service_request(a: &'static AppSearch, req: &ipc::Request, timeout: Duration)
     }
     let c = p.client.as_mut()?;
     match c.request(req, timeout) {
-        Ok(ipc::Response::Error { .. }) | Err(_) => {
+        bad @ (Ok(ipc::Response::Error { .. }) | Err(_)) => {
+            log::warn!("search service request failed: {bad:?}");
             p.client = None;
             p.ok_streak = 0;
             p.next_try = Some(Instant::now() + Duration::from_secs(2));
@@ -289,6 +292,7 @@ fn launch_installer() -> Result<(), String> {
     use windows::Win32::UI::Shell::ShellExecuteW;
     use windows::Win32::UI::WindowsAndMessaging::SW_HIDE;
     let exe = indexer_exe().ok_or_else(|| "ferret-indexer.exe was not found next to Ferret".to_string())?;
+    log::info!("launching the search service installer: {}", exe.display());
     let file: Vec<u16> = exe.to_string_lossy().encode_utf16().chain(Some(0)).collect();
     let r = unsafe { ShellExecuteW(None, w!("runas"), PCWSTR(file.as_ptr()), w!("--install"), PCWSTR::null(), SW_HIDE) };
     let code = r.0 as isize;

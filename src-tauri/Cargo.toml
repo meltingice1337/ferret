@@ -52,6 +52,9 @@ parking_lot = "0.12"
 # --- self-update (GitHub Releases) ---
 tauri-plugin-updater = "2"
 tauri-plugin-process = "2"
+# --- diagnostics (rotating log files in the app's log folder) ---
+tauri-plugin-log = "2"
+log = "0.4"
 
 [target.'cfg(windows)'.dependencies]
 winreg = "0.56"

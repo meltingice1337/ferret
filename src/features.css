@@ -420,6 +420,7 @@ body.reordering, body.reordering * { cursor: grabbing !important; }
 .card.about { display: flex; align-items: center; gap: 14px; }
 .card.about h3 { margin: 0; }
 .card.about .about-text { flex: 1; min-width: 0; }
+.card.about .about-actions { display: flex; gap: 8px; flex-shrink: 0; }
 
 /* ---------- Recycle Bin ---------- */
 .bin-bar {

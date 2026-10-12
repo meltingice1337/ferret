@@ -46,6 +46,7 @@ impl DirWatcher {
                 let _ = app.emit("fs-changed", dirs.into_iter().collect::<Vec<_>>());
             }
         })
+        .inspect_err(|e| log::warn!("file watcher unavailable: {e}"))
         .ok();
         Self { watcher, watched: HashMap::new(), bins }
     }
@@ -75,8 +76,11 @@ impl DirWatcher {
             }
             // Watching can fail on some network/WSL mounts; those tabs just
             // won't auto-refresh.
-            if w.watch(&PathBuf::from(paths::for_io(&p)), RecursiveMode::NonRecursive).is_ok() {
-                self.watched.insert(k, p);
+            match w.watch(&PathBuf::from(paths::for_io(&p)), RecursiveMode::NonRecursive) {
+                Ok(()) => {
+                    self.watched.insert(k, p);
+                }
+                Err(e) => log::debug!("not watching \"{p}\": {e}"),
             }
         }
     }

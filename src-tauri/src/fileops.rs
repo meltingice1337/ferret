@@ -135,6 +135,7 @@ pub fn rename_item(path: String, new_name: String) -> Res<String> {
         std::io::ErrorKind::PermissionDenied => "Access denied: the item may be open in another program".to_string(),
         _ => e.to_string(),
     })?;
+    log::info!("renamed \"{src}\" -> \"{dst}\"");
     Ok(dst)
 }
 
@@ -368,6 +369,7 @@ pub fn transfer(app: AppHandle, op: String, sources: Vec<String>, dest: String, 
         file_name(&dest)
     );
 
+    log::info!("{} to \"{dest}\" ({policy:?}): {}", if moving { "move" } else { "copy" }, crate::logging::paths(&sources));
     Ok(jobs::spawn(&app, if moving { "move" } else { "copy" }, &label, move |ctx| {
         let sources: Vec<String> = sources.iter().map(|s| paths::normalize(s)).collect();
 
@@ -440,6 +442,7 @@ pub fn undo_moves(app: AppHandle, pairs: Vec<(String, String)>) -> Res<u64> {
         return Err(admin_err(format!("move “{}” back", file_name(from))));
     }
     let label = if pairs.len() == 1 { format!("Moving “{}” back", file_name(&pairs[0].0)) } else { format!("Moving {} items back", pairs.len()) };
+    log::info!("undo move: {}", crate::logging::paths(&pairs.iter().map(|(from, to)| format!("{to} -> {from}")).collect::<Vec<_>>()));
     Ok(jobs::spawn(&app, "move", &label, move |ctx| {
         ctx.set_totals(0, pairs.len() as u64);
         let mut blocked = Vec::new();
@@ -484,6 +487,7 @@ pub fn delete_items(app: AppHandle, items: Vec<String>, permanent: bool) -> Res<
     } else {
         format!("{} {} items", if permanent { "Deleting" } else { "Recycling" }, items.len())
     };
+    log::info!("{}: {}", if permanent { "delete permanently" } else { "recycle" }, crate::logging::paths(&items));
     Ok(jobs::spawn(&app, if permanent { "delete" } else { "recycle" }, &label, move |ctx| {
         ctx.set_totals(0, items.len() as u64);
         for p in &items {
@@ -558,6 +562,7 @@ pub async fn restore_from_trash(items: Vec<String>) -> Res<Vec<String>> {
                 return Err(format!("elevate:You'll need administrator permission to restore into “{}”", file_name(&dir)));
             }
             trash::os_limited::restore_all(pick).map_err(err)?;
+            log::info!("restored from Recycle Bin: {}", crate::logging::paths(&restored));
             Ok(restored)
         }
         #[cfg(not(windows))]
@@ -699,6 +704,7 @@ pub async fn folder_stats(items: Vec<String>) -> Res<Stats> {
 
 #[tauri::command]
 pub fn set_attributes(path: String, readonly: bool, hidden: bool) -> Res<()> {
+    log::info!("set attributes on \"{path}\": readonly={readonly}, hidden={hidden}");
     let p = io(&path);
     let mut perms = fs::metadata(&p).map_err(err)?.permissions();
     #[allow(clippy::permissions_set_readonly_false)]
