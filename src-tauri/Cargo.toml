@@ -107,3 +107,8 @@ lto = "thin"
 opt-level = 3
 # No panic = "abort": jobs catch panics so a bug fails one operation, not the app.
 strip = true
+
+# drag 2.1.1 panics on the main thread for files on network/WSL shares (canonicalize
+# gives a \\?\UNC\ path the shell rejects, then unwrap). Patched copy; see "Ferret patch".
+[patch.crates-io]
+drag = { path = "vendor/drag" }
