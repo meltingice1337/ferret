@@ -4,7 +4,7 @@ import { For, Show } from "solid-js";
 import { formatSize, plural } from "../lib/format";
 import { dismissUpdate, installUpdate, parseNotes, setUpdater, showWhatsNew, updateErrorText, updater } from "../lib/updater";
 
-const notes = () => parseNotes(updater.notes);
+const notes = () => parseNotes(updater.notes, updater.current);
 const changeCount = () => notes().sections.reduce((n, s) => n + s.items.length, 0);
 // Release notes come from the update feed; only ever open links to Ferret's own repository.
 const REPO = "https://github.com/meltingice1337/ferret/";

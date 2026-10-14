@@ -10,7 +10,8 @@
 #            --skip-checks (emergencies only)
 #
 # Once the version is picked it type-checks the frontend and runs the Rust tests; a failure stops it.
-# Release notes are the commit subjects since the previous tag, plus a compare link.
+# Release notes are the commit subjects since the previous tag, plus a compare link. The updater
+# feed (latest.json) also lists every previous release's notes, for copies that skipped versions.
 # Needs: a clean working tree, `gh` logged in, and the updater signing key at
 # ~/.tauri/ferret.key (or $TAURI_SIGNING_PRIVATE_KEY).
 set -euo pipefail
@@ -93,7 +94,18 @@ else
   compare="https://github.com/$repo/commits/$tag"
 fi
 [[ -n "$notes" ]] || notes=${commits:-"- No changes listed"}
+# The updater feed also carries every previous release's notes, each under "## vX.Y.Z", so a copy
+# however far behind can show everything it's about to get (it keeps the ones newer than itself).
+# Commit subjects only: a few KB even after many releases.
+feed_notes="## $tag"$'\n'"$notes"
+mapfile -t older < <(git tag --list 'v*' --sort=-v:refname)
+for i in "${!older[@]}"; do
+  t=${older[$i]} before=${older[$((i + 1))]:-}
+  [[ -n "$before" ]] || break
+  feed_notes+=$'\n\n'"## $t"$'\n'"$(git log "$before..$t" --pretty='- %s' --no-merges)"
+done
 notes+=$'\n\n'"**Full changelog:** $compare"
+feed_notes+=$'\n\n'"**Full changelog:** $compare"
 
 echo
 echo "${green}Releasing Ferret $current -> $version ($tag)$([[ $draft -eq 1 ]] && echo ' as a draft')${reset}"
@@ -149,7 +161,7 @@ setup=$(ls "$bundle"/*_"${version}"_x64-setup.exe 2>/dev/null | head -n1 || true
 # ---- updater feed ----
 asset=$(basename "$setup" | tr ' ' '.')  # GitHub stores spaces in asset names as dots
 latest="$bundle/latest.json"
-VERSION="$version" NOTES="$notes" SIG="$setup.sig" URL="https://github.com/$repo/releases/download/$tag/$asset" OUT="$latest" node -e '
+VERSION="$version" NOTES="$feed_notes" SIG="$setup.sig" URL="https://github.com/$repo/releases/download/$tag/$asset" OUT="$latest" node -e '
   const fs = require("fs"), e = process.env;
   const feed = {
     version: e.VERSION,
