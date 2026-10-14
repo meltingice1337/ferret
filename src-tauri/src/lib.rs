@@ -35,6 +35,10 @@ pub fn run() {
     // The dev build runs under its own identifier (tauri.dev.conf.json), so it keeps its own
     // settings and WebView2 profiles apart from the installed app.
     let id = context.config().identifier.clone();
+    // The uninstaller gives folder windows back to Explorer before removing Ferret.
+    if std::env::args().any(|a| a == integration::UNREGISTER_ARG) {
+        return integration::unregister(&id);
+    }
     // SAFETY (the `set_var` calls below): they run before Tauri or Ferret start any thread.
     // UI tests drive a dev build over the WebView2 DevTools protocol. Any local program
     // could use that port, so it only opens when explicitly asked for (FERRET_DEVTOOLS=1),

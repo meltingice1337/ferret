@@ -19,6 +19,8 @@ const RUN_VALUE: &str = "FerretExplorerRedirect";
 /// Where Ferret says "the next Explorer window is meant to be Explorer" (a deadline, ms).
 const PASS_KEY: &str = r"Software\Ferret";
 const PASS_VALUE: &str = "ExplorerPassUntil";
+/// Held by the running redirector (one per sign-in session).
+const MUTEX: &str = "Local\\FerretExplorerRedirect";
 
 /// Starts the redirector at every sign-in, and now.
 #[cfg(windows)]
@@ -44,6 +46,26 @@ pub fn uninstall() {
     use winreg::{enums::*, RegKey};
     if let Ok(key) = RegKey::predef(HKEY_CURRENT_USER).open_subkey_with_flags(RUN_KEY, KEY_SET_VALUE) {
         let _ = key.delete_value(RUN_VALUE);
+    }
+}
+
+/// Waits for a running redirector to exit (it checks every few seconds whether Ferret is
+/// still the default).
+#[cfg(windows)]
+pub fn wait_until_stopped(timeout: Duration) {
+    use windows::core::PCWSTR;
+    use windows::Win32::Foundation::CloseHandle;
+    use windows::Win32::System::Threading::{OpenMutexW, SYNCHRONIZATION_SYNCHRONIZE};
+    let name: Vec<u16> = MUTEX.encode_utf16().chain(Some(0)).collect();
+    let start = Instant::now();
+    while start.elapsed() < timeout {
+        match unsafe { OpenMutexW(SYNCHRONIZATION_SYNCHRONIZE, false, PCWSTR(name.as_ptr())) } {
+            Ok(h) => unsafe {
+                let _ = CloseHandle(h);
+            },
+            Err(_) => return,
+        }
+        std::thread::sleep(Duration::from_millis(250));
     }
 }
 
@@ -121,7 +143,7 @@ pub fn run() {
     use windows::Win32::UI::WindowsAndMessaging::*;
 
     // One per sign-in session.
-    let name: Vec<u16> = "Local\\FerretExplorerRedirect".encode_utf16().chain(Some(0)).collect();
+    let name: Vec<u16> = MUTEX.encode_utf16().chain(Some(0)).collect();
     let _mutex = match unsafe { CreateMutexW(None, false, PCWSTR(name.as_ptr())) } {
         Ok(h) if unsafe { GetLastError() } != ERROR_ALREADY_EXISTS => h,
         _ => return,

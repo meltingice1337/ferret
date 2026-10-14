@@ -324,6 +324,30 @@ pub fn set_default_manager(state: State<'_, AppState>, enable: bool) -> Res<Defa
     Ok(status())
 }
 
+/// Command-line switch the uninstaller runs (`ferret.exe --unregister`).
+pub const UNREGISTER_ARG: &str = "--unregister";
+
+/// Uninstalling: give folder windows back to Explorer exactly as they were (from the backup
+/// in the settings database), stop starting the Explorer redirect at sign-in, and wait for a
+/// running one to exit so its exe can be removed.
+pub fn unregister(identifier: &str) {
+    #[cfg(windows)]
+    {
+        redirect::uninstall();
+        if reg::current_target().is_some() {
+            let backup = dirs::data_dir()
+                .and_then(|d| db::open(&d.join(identifier).join("ferret.db")).ok())
+                .and_then(|conn| db::kv_get(&conn, BACKUP_KEY));
+            if reg::disable(backup.as_ref()).is_ok() {
+                reg::notify();
+            }
+        }
+        redirect::wait_until_stopped(std::time::Duration::from_secs(10));
+    }
+    #[cfg(not(windows))]
+    let _ = identifier;
+}
+
 /// The Ferret exe that folder windows open in, while Ferret is the default file manager.
 pub(crate) fn default_target() -> Option<String> {
     #[cfg(windows)]

@@ -12,7 +12,7 @@ import { groupEntries, sortEntries, type Group } from "../lib/sortgroup";
 import { entryFilter } from "../lib/filter";
 import { isRecycle, pathKey } from "../lib/path";
 import { folderSizes, requestFolderSizes, sizesApply, sizesEpoch, uncounted } from "../lib/foldersizes";
-import { goUp, holdKeys, openEntry, openMenu, persistSettings, releaseKeys, reload, setSettings, setUi, settings, sortBy, takeTypeAhead, toast, ui, updateView, type Tab } from "../lib/state";
+import { ask, goUp, holdKeys, openEntry, openMenu, persistSettings, releaseKeys, reload, setSettings, setUi, settings, sortBy, takeTypeAhead, toast, ui, updateView, type Tab } from "../lib/state";
 import type { Entry, ListColumn, SortBy } from "../lib/types";
 
 export { GROUP_LABELS, SORT_LABELS } from "./menus";
@@ -754,6 +754,24 @@ function RenameInput(props: { tab: Tab; entry: Entry; grid?: boolean }) {
     const value = el.value.replace(/[\r\n]/g, "").trim();
     if (!value || value === props.entry.name) return close();
     busy = true;
+    // Like Explorer: a changed extension can leave the file opening in the wrong app, or none.
+    const ext = (n: string) => { const d = n.lastIndexOf("."); return d > 0 ? n.slice(d).toLowerCase() : ""; };
+    if (!props.entry.isDir && ext(value) !== ext(props.entry.name)) {
+      const from = ext(props.entry.name), to = ext(value);
+      const ok = await ask({
+        title: "Change the file extension?",
+        message: to
+          ? `Changing “${from || "no extension"}” to “${to}” can make the file open in the wrong app, or not open at all. Its contents stay the same.`
+          : `Removing “${from}” can stop Windows from knowing which app opens this file. Its contents stay the same.`,
+        confirmLabel: to ? `Use ${to}` : "Remove it",
+      });
+      if (ok === null) {
+        // Back to editing, with the name as typed.
+        busy = false;
+        if (el.isConnected) { el.focus(); selectStem(); } else close();
+        return;
+      }
+    }
     holdKeys();
     try {
       const to = await renamePath(props.entry.path, value);
