@@ -133,7 +133,8 @@ pub fn run() {
     unsafe {
         let _ = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
         MAIN_THREAD.store(GetCurrentThreadId(), std::sync::atomic::Ordering::Relaxed);
-        let hook = SetWinEventHook(EVENT_OBJECT_SHOW, EVENT_OBJECT_SHOW, None, Some(on_show), 0, 0, WINEVENT_OUTOFCONTEXT | WINEVENT_SKIPOWNPROCESS);
+        // Create (hide it before it's ever drawn), destroy (forget it), show (take it over).
+        let hook = SetWinEventHook(EVENT_OBJECT_CREATE, EVENT_OBJECT_SHOW, None, Some(on_event), 0, 0, WINEVENT_OUTOFCONTEXT | WINEVENT_SKIPOWNPROCESS);
         if hook.is_invalid() {
             say("can't watch windows");
             return;
@@ -163,12 +164,23 @@ static MAIN_THREAD: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32:
 #[cfg(windows)]
 const WM_EXPLORER_SHOWN: u32 = windows::Win32::UI::WindowsAndMessaging::WM_APP + 1;
 
-/// A window became visible: if it's an Explorer folder window, handle it on the main loop
-/// (the work involves COM calls, which shouldn't run inside the event callback).
+// Explorer windows between "created" and "handled" (event callbacks and the main loop run
+// on the same thread).
 #[cfg(windows)]
-unsafe extern "system" fn on_show(
+thread_local! {
+    /// Hidden at creation, waiting to be shown and read.
+    static VEILED: std::cell::RefCell<std::collections::HashMap<isize, Veil>> = Default::default();
+    /// Opened by Ferret's "Open in Explorer": stay Explorer.
+    static PASSED: std::cell::RefCell<std::collections::HashSet<isize>> = Default::default();
+}
+
+/// Window events for Explorer folder windows. A new one is made invisible right when it's
+/// created, before Windows draws or animates it; once shown it's read on the main loop
+/// (that takes COM calls, which shouldn't run inside the event callback).
+#[cfg(windows)]
+unsafe extern "system" fn on_event(
     _hook: windows::Win32::UI::Accessibility::HWINEVENTHOOK,
-    _event: u32,
+    event: u32,
     hwnd: windows::Win32::Foundation::HWND,
     id_object: i32,
     id_child: i32,
@@ -180,24 +192,45 @@ unsafe extern "system" fn on_show(
     if id_object != OBJID_WINDOW.0 || id_child != CHILDID_SELF as i32 || hwnd.is_invalid() {
         return;
     }
+    let key = hwnd.0 as isize;
+    if event == EVENT_OBJECT_DESTROY {
+        // Too late to check its class; drop whatever we kept for it.
+        VEILED.with_borrow_mut(|v| v.remove(&key).map(Veil::keep));
+        PASSED.with_borrow_mut(|p| p.remove(&key));
+        return;
+    }
     let mut class = [0u16; 32];
     let n = unsafe { GetClassNameW(hwnd, &mut class) } as usize;
     if String::from_utf16_lossy(&class[..n]) != "CabinetWClass" {
         return;
     }
-    let tid = MAIN_THREAD.load(std::sync::atomic::Ordering::Relaxed);
-    let _ = unsafe { PostThreadMessageW(tid, WM_EXPLORER_SHOWN, WPARAM(0), LPARAM(hwnd.0 as isize)) };
+    if event == EVENT_OBJECT_CREATE {
+        if crate::integration::default_target().is_none() {
+            return;
+        }
+        if take_pass() {
+            PASSED.with_borrow_mut(|p| p.insert(key));
+        } else {
+            VEILED.with_borrow_mut(|v| v.insert(key, Veil::put(hwnd)));
+        }
+        return;
+    }
+    if event == EVENT_OBJECT_SHOW {
+        let tid = MAIN_THREAD.load(std::sync::atomic::Ordering::Relaxed);
+        let _ = unsafe { PostThreadMessageW(tid, WM_EXPLORER_SHOWN, WPARAM(0), LPARAM(key)) };
+    }
 }
 
 #[cfg(windows)]
 fn handle(hwnd: windows::Win32::Foundation::HWND) {
-    let Some(ferret) = crate::integration::default_target() else { return };
-    if take_pass() {
+    let key = hwnd.0 as isize;
+    if PASSED.with_borrow_mut(|p| p.remove(&key)) {
         say("Explorer window opened by Ferret: left alone");
         return;
     }
-    // Invisible while we look, so a window that becomes Ferret doesn't flash up first.
-    let veil = Veil::put(hwnd);
+    // Shown again later (an Explorer window can be hidden and shown): nothing to do.
+    let Some(veil) = VEILED.with_borrow_mut(|v| v.remove(&key)) else { return };
+    let Some(ferret) = crate::integration::default_target() else { return };
     let Some(browser) = find_browser(hwnd, Duration::from_secs(3)) else {
         say("new Explorer window, but no folder in it: left alone");
         return;
@@ -222,7 +255,8 @@ fn handle(hwnd: windows::Win32::Foundation::HWND) {
     }
 }
 
-/// Makes a window fully transparent; puts it back on drop unless told to keep it so.
+/// Makes a window fully transparent and keeps it off the taskbar (a tool window gets no
+/// button); puts it back on drop unless told to keep it so.
 #[cfg(windows)]
 struct Veil {
     hwnd: windows::Win32::Foundation::HWND,
@@ -236,7 +270,7 @@ impl Veil {
         use windows::Win32::UI::WindowsAndMessaging::*;
         let ex_style = unsafe { GetWindowLongPtrW(hwnd, GWL_EXSTYLE) };
         unsafe {
-            SetWindowLongPtrW(hwnd, GWL_EXSTYLE, ex_style | WS_EX_LAYERED.0 as isize);
+            SetWindowLongPtrW(hwnd, GWL_EXSTYLE, ex_style | (WS_EX_LAYERED.0 | WS_EX_TOOLWINDOW.0) as isize);
             let _ = SetLayeredWindowAttributes(hwnd, Default::default(), 0, LWA_ALPHA);
         }
         Veil { hwnd, ex_style, keep: false }
@@ -256,7 +290,15 @@ impl Drop for Veil {
         }
         unsafe {
             let _ = SetLayeredWindowAttributes(self.hwnd, Default::default(), 255, LWA_ALPHA);
+            // The taskbar only notices the style change when the window is shown again.
+            let visible = IsWindowVisible(self.hwnd).as_bool();
+            if visible {
+                let _ = ShowWindow(self.hwnd, SW_HIDE);
+            }
             SetWindowLongPtrW(self.hwnd, GWL_EXSTYLE, self.ex_style);
+            if visible {
+                let _ = ShowWindow(self.hwnd, SW_SHOW);
+            }
         }
     }
 }
