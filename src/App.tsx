@@ -19,7 +19,8 @@ import {
   startRename, targetsOf, undo, undoLabel,
 } from "./lib/ops";
 import { adminWindow, applyAppearance, elevateWindow, isFavorite, navigate, openNewWindow, persistSettings, places, resetView, setSettings } from "./lib/state";
-import { RECYCLE } from "./lib/path";
+import { basename, isRecycle, RECYCLE } from "./lib/path";
+import { getCurrentWindow } from "@tauri-apps/api/window";
 import {
   activeTab, boot, closeTab, cycleTab, dismissToast, goBack, goForward, goUp, newTab,
   persistSession, previewSpace, ready, sidebarDocked, refresh, reopenClosedTab, setUi, toast, toggleFavorite, ui, updateView,
@@ -100,6 +101,16 @@ const modalOpen = () => !!(ui.dialog || ui.conflict || ui.properties || ui.batch
 
 const keyboardMenu = () => openKeyboardMenu(activeTab());
 
+/** "Downloads - Ferret", "Local Disk (C:) - Ferret (Administrator)"… */
+function windowTitle(path: string) {
+  const drive = /^([a-z]):\\?$/i.exec(path);
+  const folder = isRecycle(path) ? "Recycle Bin"
+    : drive ? `${places().drives.find((d) => d.path[0].toUpperCase() === drive[1].toUpperCase())?.label || "Local Disk"} (${drive[1].toUpperCase()}:)`
+    : basename(path) || path;
+  const marks = [import.meta.env.DEV && "Dev", adminWindow() && "Administrator"].filter(Boolean);
+  return `${folder} - Ferret${marks.length ? ` (${marks.join(", ")})` : ""}`;
+}
+
 export default function App() {
   // Return keyboard focus to the file list whenever a dialog or menu closes.
   createEffect(on(() => modalOpen() || !!ui.menu, (open, wasOpen) => {
@@ -108,6 +119,13 @@ export default function App() {
       if (!a || a === document.body) document.querySelector<HTMLElement>(".files")?.focus({ preventScroll: true });
     });
   }));
+
+  // Like Explorer, the window (taskbar, Alt+Tab) is named after the folder it shows.
+  createEffect(() => {
+    if (!ready()) return;
+    const t = activeTab();
+    if (t) getCurrentWindow().setTitle(windowTitle(t.p)).catch(() => {});
+  });
 
   onMount(() => {
     boot().catch((e) => toast(`Startup failed: ${e}`, "error"));

@@ -10,6 +10,7 @@
     "core:window:allow-toggle-maximize",
     "core:window:allow-internal-toggle-maximize",
     "core:window:allow-close",
+    "core:window:allow-set-title",
     "opener:default",
     "drag:default",
     "dialog:default",
