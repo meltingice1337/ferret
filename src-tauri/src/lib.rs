@@ -12,6 +12,7 @@ mod paths;
 mod places;
 mod protocol;
 mod recycle;
+mod redirect;
 pub mod search;
 mod shell;
 mod shellmenu;
@@ -26,6 +27,10 @@ use commands::AppState;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    // The background Explorer redirect (redirect.rs) is this exe without a window.
+    if std::env::args().any(|a| a == redirect::ARG) {
+        return redirect::run();
+    }
     let context = tauri::generate_context!();
     // The dev build runs under its own identifier (tauri.dev.conf.json), so it keeps its own
     // settings and WebView2 profiles apart from the installed app.

@@ -1682,12 +1682,22 @@ pub async fn open_in_vscode(path: String) -> Result<(), String> {
 
 fn reveal_blocking(path: &str) -> Result<(), String> {
     let path = paths::normalize(path);
+    // While Ferret is the default, Windows' reveal call opens Ferret instead (without the
+    // selection): ask Explorer itself, and tell the Explorer redirect to leave it be.
+    if crate::integration::default_target().is_some() {
+        crate::redirect::let_explorer_through();
+        return explorer_select(&path);
+    }
     let shell = Pidl::parse(&path).and_then(|pidl| {
         unsafe { SHOpenFolderAndSelectItems(pidl.ptr(), None, 0) }.map_err(hr_msg)
     });
     if shell.is_ok() {
         return Ok(());
     }
+    explorer_select(&path)
+}
+
+fn explorer_select(path: &str) -> Result<(), String> {
     let mut cmd = Command::new("explorer.exe");
     cmd.raw_arg(format!("/select,\"{path}\""));
     cmd.spawn()

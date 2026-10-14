@@ -11,7 +11,7 @@ use std::sync::Mutex;
 use tauri::State;
 
 use crate::commands::AppState;
-use crate::{db, paths, recycle};
+use crate::{db, paths, recycle, redirect};
 
 type Res<T> = Result<T, String>;
 
@@ -312,8 +312,10 @@ pub fn set_default_manager(state: State<'_, AppState>, enable: bool) -> Res<Defa
             }
             let saved = reg::enable(&exe()?, if status().enabled { backup.as_ref() } else { None })?;
             db::kv_set(&conn, BACKUP_KEY, &saved).map_err(|e| e.to_string())?;
+            redirect::install(&exe()?)?;
         } else {
             reg::disable(backup.as_ref())?;
+            redirect::uninstall();
         }
         reg::notify();
     }
@@ -322,8 +324,18 @@ pub fn set_default_manager(state: State<'_, AppState>, enable: bool) -> Res<Defa
     Ok(status())
 }
 
+/// The Ferret exe that folder windows open in, while Ferret is the default file manager.
+pub(crate) fn default_target() -> Option<String> {
+    #[cfg(windows)]
+    return reg::current_target();
+    #[cfg(not(windows))]
+    None
+}
+
 /// When Ferret is the default but the registry points at another copy of it (moved or
-/// updated install), re-point it at this one. Dev builds never take over.
+/// updated install), re-point it at this one, and make sure the Explorer redirect runs
+/// (it starts at sign-in; this also covers copies that were made default before it
+/// existed). Dev builds never take over.
 pub fn refresh_registration(state: &AppState) {
     #[cfg(windows)]
     {
@@ -331,13 +343,16 @@ pub fn refresh_registration(state: &AppState) {
             return;
         }
         let (Some(target), Ok(me)) = (reg::current_target(), exe()) else { return };
-        if target.eq_ignore_ascii_case(&me) {
-            return;
-        }
-        let Ok(conn) = state.db.lock() else { return };
-        let backup = db::kv_get(&conn, BACKUP_KEY);
-        if reg::enable(&me, backup.as_ref()).is_ok() {
+        if !target.eq_ignore_ascii_case(&me) {
+            let Ok(conn) = state.db.lock() else { return };
+            let backup = db::kv_get(&conn, BACKUP_KEY);
+            if reg::enable(&me, backup.as_ref()).is_err() {
+                return;
+            }
             reg::notify();
+        }
+        if let Err(e) = redirect::install(&me) {
+            log::warn!("can't set up the Explorer redirect: {e}");
         }
     }
     #[cfg(not(windows))]
@@ -502,6 +517,7 @@ fn wait_for_window(_pid: u32, _timeout: std::time::Duration) {}
 #[tauri::command]
 pub fn open_in_explorer(path: String) -> Res<()> {
     let target = if recycle::is_recycle(&path) { "shell:RecycleBinFolder".to_string() } else { paths::for_io(&path).trim_start_matches(r"\\?\").to_string() };
+    redirect::let_explorer_through();
     std::process::Command::new("explorer.exe").arg(target).spawn().map(|_| ()).map_err(|e| e.to_string())
 }
 
