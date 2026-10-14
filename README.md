@@ -27,6 +27,7 @@
 **⚡ Instant search — `Ctrl+K`**
 Fuzzy search over every file on every drive, ranked by name match and how often you open things.
 Filters: `ext:pdf,docx` · `type:folder` · `size:>100mb` · `modified:<7d` · `dm:2026-03-04` · `in:"C:\Program Files"` · `!node_modules\` · globs like `*.rs`.
+Filters are suggested as you type (`Tab` completes them). Running WSL distros are searchable too: each is listed from inside Linux and refreshed every 15 minutes, and a stopped distro is never started just to be indexed.
 
 **👁 Previews — `Alt+P`**
 Images, video, audio, PDF, Word (`.docx`), Markdown, CSV, fonts, SVG and syntax-highlighted code. A hex view for everything else, plus version and CPU architecture details for `.exe` and `.dll` files.
@@ -40,17 +41,25 @@ Browse, preview and extract `zip`, `7z`, `rar` and `tar` (`.gz`, `.xz`, `.zst`, 
 - Copy and move in the background with progress and conflict handling, plus undo/redo
 - Recycle Bin you can browse and restore from
 - Asks for admin rights only when a protected folder needs it, and any window can restart as administrator with its tabs intact
-- Optional: make Ferret the default file manager (Win+E, folder double-clicks), with a one-click switch back
+- Drag files to and from other apps, including switching apps with `Alt+Tab` mid-drag
+- Windows 11-style menus, and each window is named after its folder in the taskbar and `Alt+Tab`, like Explorer
+- Optional: make Ferret the default file manager (Win+E, folder double-clicks), with a one-click switch back. Apps' "Show in folder" opens Ferret too, with the file selected when the app passes it to Explorer: a small background helper swaps in Ferret before Explorer's window appears, and Control Panel and other non-folder windows stay in Explorer
 
 **🗂 Built for keyboards and many tabs**
 Tabs (`Ctrl+T`, `Ctrl+Shift+T`), a command palette (`Ctrl+Shift+P`), folder filter (`Ctrl+F`), editable path bar (`Ctrl+L`), favorites (`Ctrl+D`), and open in terminal (`` Ctrl+` ``) or VS Code.
 List or grid view with grouping by date, type, size or letter. Each folder remembers its own view, and folder types have presets.
+Resize list columns by dragging, hide them by right-clicking the headings, and show only one type of file (pictures, documents, code…) from the toolbar.
+Folder sizes appear in the Size column, counted in the background at low priority (can be turned off in Settings).
+Recent folders are ranked by how often and how recently you use them. A folder counts once you stay in it for a moment, not when you pass through it.
 
 **🐧 Plays well with others**
 WSL distros, network (UNC) paths and all drives in the sidebar. Folders refresh live when their contents change.
 
 **🎨 Make it yours**
 Dark, light or system theme, with a Mica, Acrylic or solid backdrop. Pick any accent color and a comfortable or compact layout.
+
+**🔄 Stays up to date**
+Updates come from GitHub Releases: Ferret shows what's new, then updates and restarts in one click. If something goes wrong, Settings → **Open logs** has the app's log files.
 
 ---
 
@@ -76,9 +85,11 @@ ferret-indexer --install | --uninstall | --status | --query <text> | --console |
 
 ```powershell
 npm install
-npm run tauri dev      # run the app with hot reload
+npm run app:dev        # run the app with hot reload
 npm run tauri build    # release build + installer
 ```
+
+`app:dev` runs a development build under its own app identity (`com.ferret.dev`), with its own settings, a "Ferret (Dev)" window title and an icon with a DEV badge. It can run next to the installed app without the two being mixed up. Releases are published with `scripts/release.sh`.
 
 | Path | What's there |
 | --- | --- |
@@ -86,3 +97,5 @@ npm run tauri build    # release build + installer
 | `src-tauri/src/` | Backend: file operations, shell integration, archives, previews |
 | `src-tauri/src/search/` | Search engine, MFT/USN indexer, named-pipe protocol |
 | `src-tauri/src/bin/ferret-indexer.rs` | Entry point of the indexer service |
+| `src-tauri/src/redirect.rs` | Background helper that opens Explorer's folder windows in Ferret |
+| `src-tauri/vendor/drag` | Patched copy of the `drag` crate (dragging files out of Ferret) |
