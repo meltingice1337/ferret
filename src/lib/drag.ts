@@ -131,6 +131,16 @@ export function beginDrag(down: MouseEvent, getPaths: () => string[], inArchive 
     else if (drag()) setDrag((d) => d && { ...d, op: d.target ? chooseOp(paths, d.target, e, inArchive) : d.op });
   };
 
+  // Alt+Tab (or anything else taking focus) mid-drag: the pointer never left the window,
+  // so hand off to the native drag now and the drop can land in the app switched to.
+  const onBlur = () => {
+    if (!started) return cleanup();
+    if (!native) {
+      native = true;
+      goNative();
+    }
+  };
+
   async function goNative() {
     const d = drag();
     cleanup();
@@ -149,6 +159,7 @@ export function beginDrag(down: MouseEvent, getPaths: () => string[], inArchive 
     window.removeEventListener("mouseup", onUp, true);
     window.removeEventListener("keydown", onKey, true);
     window.removeEventListener("keyup", onKey, true);
+    window.removeEventListener("blur", onBlur);
     document.body.classList.remove("dragging-files");
     setHover(null);
     clearTimeout(tabHoverTimer);
@@ -160,6 +171,7 @@ export function beginDrag(down: MouseEvent, getPaths: () => string[], inArchive 
   window.addEventListener("mouseup", onUp, true);
   window.addEventListener("keydown", onKey, true);
   window.addEventListener("keyup", onKey, true);
+  window.addEventListener("blur", onBlur);
 }
 
 /** Simple pointer reordering for tabs / favorites: calls onDrop(from, to). */
