@@ -1,4 +1,4 @@
-import { ArchiveRestore, Check, Copy, FileArchive, FilePlus, MoveRight, PackageOpen, Pencil, Trash2, X } from "lucide-solid";
+import { ArchiveRestore, Check, Copy, FileArchive, FilePlus, Minimize2, MoveRight, PackageOpen, Pencil, Trash2, X } from "lucide-solid";
 import { For, Show } from "solid-js";
 import { Dynamic } from "solid-js/web";
 import { api } from "../lib/api";
@@ -11,7 +11,7 @@ import { basename } from "../lib/path";
 
 const ICON: Record<string, any> = {
   copy: Copy, move: MoveRight, delete: Trash2, recycle: Trash2, extract: PackageOpen, compress: FileArchive,
-  rename: Pencil, new: FilePlus, restore: ArchiveRestore,
+  rename: Pencil, new: FilePlus, restore: ArchiveRestore, media: Minimize2,
 };
 
 function eta(j: { bytesTotal: number; bytesDone: number }, r: number) {

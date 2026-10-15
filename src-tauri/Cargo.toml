@@ -94,7 +94,18 @@ windows = { version = "0.62", features = [
     # shellmenu.rs (packaged apps' Windows 11 context menu entries)
     "ApplicationModel",
     "Management_Deployment",
+    # media.rs (video transcoder, WIC pictures)
+    "Foundation",
+    "Media_MediaProperties",
+    "Media_Transcoding",
+    "Storage",
+    "Storage_FileProperties",
+    "Storage_Search",
+    "Storage_Streams",
+    "Win32_Graphics_Imaging",
 ] }
+# media.rs: the transcoder's async progress
+windows-future = "0.3"
 # shellops.rs: the #[implement] macro expands to `::windows_core::…` paths.
 windows-core = "0.62"
 # shellmenu.rs: reads packaged apps' AppxManifest.xml

@@ -35,6 +35,14 @@ Images, video, audio, PDF, Word (`.docx`), Markdown, CSV, fonts, SVG and syntax-
 **🗜 Archives as folders**
 Browse, preview and extract `zip`, `7z`, `rar` and `tar` (`.gz`, `.xz`, `.zst`, `.bz2`) archives as if they were folders, or compress files into one.
 
+**🎬 Shrink videos and pictures**
+Right-click → **Compress video…** / **Compress picture…** opens an editor that shows the result's size before you commit (for example, a 132 MB phone screen recording came out at about 9 MB with the Small preset).
+- Video: presets (Small, Balanced, High quality, Fit 10 MB for Discord and chats), quality or target file size, resolution, frame rate, H.264 or HEVC, keep or remove the sound, and trimming on a timeline with frame previews (`I` / `O` set the ends, `Space` plays)
+- **Preview quality** encodes a few seconds with your settings: compare it with the original side by side with a slider while both play, and the size estimate becomes a measured one
+- Pictures: a before/after slider with zoom to actual pixels, a **Differences** view that lights up what compression changed, JPEG quality, longest side, and Auto format (PNG for pictures with transparency, JPEG for the rest). The size shown is exact. Photos are turned upright, and location and camera details aren't copied
+- Several files at once with the same settings; the originals are never touched and the result can be undone
+- Uses Windows' own encoders (the GPU for video), so there is nothing extra to install or download. iPhone videos (HEVC) and photos (HEIC) need Microsoft's free HEVC / HEIF extensions, which Ferret points to when they're missing
+
 **🪟 Feels like Windows, only faster**
 - The real Explorer context menu, including third-party entries (7-Zip, Git, VS Code, PowerToys…)
 - Properties and Open with dialogs, and a clipboard that works with Explorer
@@ -98,4 +106,5 @@ npm run tauri build    # release build + installer
 | `src-tauri/src/search/` | Search engine, MFT/USN indexer, named-pipe protocol |
 | `src-tauri/src/bin/ferret-indexer.rs` | Entry point of the indexer service |
 | `src-tauri/src/redirect.rs` | Background helper that opens Explorer's folder windows in Ferret |
+| `src-tauri/src/media.rs` | Video (Media Foundation transcoder) and picture (WIC) compression |
 | `src-tauri/vendor/drag` | Patched copy of the `drag` crate (dragging files out of Ferret) |

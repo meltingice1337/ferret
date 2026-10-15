@@ -122,6 +122,8 @@ export const [ui, setUi] = createStore({
   /** Paths whose Properties dialog is open. */
   properties: null as null | string[],
   batchRename: null as null | string[],
+  /** Videos or pictures open in the compress editor. */
+  media: null as null | { kind: "video" | "image"; paths: string[] },
   conflict: null as null | { conflicts: import("./types").Conflict[]; op: "copy" | "move"; dest: string; resolve: (p: import("./types").Policy | null) => void },
   /** Mirror of what Ferret put on the clipboard, to dim cut items. */
   clipboard: null as null | { paths: string[]; cut: boolean },

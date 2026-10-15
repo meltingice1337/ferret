@@ -1,8 +1,9 @@
 import { convertFileSrc, invoke as rawInvoke, type InvokeArgs } from "@tauri-apps/api/core";
 import { logCommandFailure } from "./log";
 import type {
-  ArchiveInfo, Bootstrap, ClipboardFiles, Conflict, DefaultManagerStatus, DirListing, Favorite, FolderSize, FolderView, ItemInfo,
-  LaunchTarget, OpenWithApp, Places, Policy, Recent, RecycleInfo, Session, ShellMenuItem, ShellOp, Settings, Stats, TextPreview, ViewSettings,
+  ArchiveInfo, Bootstrap, ClipboardFiles, Conflict, DefaultManagerStatus, DirListing, Favorite, FolderSize, FolderView, ImageInfo,
+  ImageOpts, ImagePreview, ItemInfo, LaunchTarget, OpenWithApp, Places, Policy, Recent, RecycleInfo, Session, ShellMenuItem, ShellOp,
+  Settings, Stats, TextPreview, VideoInfo, VideoJob, VideoSample, ViewSettings,
 } from "./types";
 
 /** `invoke` that records failures in the log file before passing them on. */
@@ -94,6 +95,17 @@ export const api = {
   compressZip: (sources: string[], dest: string) => invoke<number>("compress_zip", { sources, dest }),
   archiveInfo: (path: string) => invoke<ArchiveInfo>("archive_info", { path }),
   archiveUnlock: (path: string, password: string) => invoke<void>("archive_unlock", { path, password }),
+
+  // ---- video / picture compression ----
+  videoInfo: (path: string) => invoke<VideoInfo>("video_info", { path }),
+  videoSample: (job: VideoJob, atMs: number, lengthMs: number) =>
+    invoke<VideoSample | null>("video_sample", { job, atMs, lengthMs }),
+  compressVideos: (items: VideoJob[]) => invoke<number>("compress_videos", { items }),
+  imageInfo: (path: string) => invoke<ImageInfo>("image_info", { path }),
+  imagePreview: (path: string, opts: ImageOpts) => invoke<ImagePreview>("image_preview", { path, opts }),
+  compressImages: (items: { source: string; dest: string }[], opts: ImageOpts) =>
+    invoke<number>("compress_images", { items, opts }),
+  mediaRelease: () => invoke<void>("media_release"),
 
   // ---- Recycle Bin & Windows integration ----
   recycleInfo: () => invoke<RecycleInfo>("recycle_info"),

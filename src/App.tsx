@@ -3,6 +3,7 @@ import ContextMenu from "./components/ContextMenu";
 import { AskDialog, BatchRenameDialog, ConflictDialog, PropertiesDialog } from "./components/Dialogs";
 import FileView from "./components/FileView";
 import { DragGhost, JobsPanel } from "./components/Jobs";
+import MediaEditor, { closeMediaEditor } from "./components/MediaEditor";
 import UpdateCard, { WhatsNewDialog } from "./components/UpdateCard";
 import { checkForUpdate, setUpdater, startUpdater, updater } from "./lib/updater";
 import { openKeyboardMenu } from "./components/menus";
@@ -92,12 +93,13 @@ function closeTopModal() {
   if (ui.dialog) { const d = ui.dialog; setUi("dialog", null); d.resolve(null); }
   else if (ui.conflict) { const c = ui.conflict; setUi("conflict", null); c.resolve(null); }
   else if (ui.batchRename) setUi("batchRename", null);
+  else if (ui.media) closeMediaEditor();
   else if (ui.properties) setUi("properties", null);
   else if (updater.notesOpen) setUpdater("notesOpen", false);
   else if (ui.settingsOpen) setUi("settingsOpen", false);
 }
 
-const modalOpen = () => !!(ui.dialog || ui.conflict || ui.properties || ui.batchRename || ui.settingsOpen || ui.quickLook || ui.palette || updater.notesOpen);
+const modalOpen = () => !!(ui.dialog || ui.conflict || ui.properties || ui.batchRename || ui.media || ui.settingsOpen || ui.quickLook || ui.palette || updater.notesOpen);
 
 const keyboardMenu = () => openKeyboardMenu(activeTab());
 
@@ -319,6 +321,7 @@ export default function App() {
       <ConflictDialog />
       <PropertiesDialog />
       <BatchRenameDialog />
+      <MediaEditor />
       <DragGhost />
       <div class="toasts">
         <For each={ui.toasts}>

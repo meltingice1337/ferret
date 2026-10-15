@@ -705,6 +705,25 @@ export async function compress(paths: string[]) {
   }
 }
 
+/** Runs a compress job from the video / picture editor and says how much it saved. */
+export async function compressMedia(kind: "video" | "image", start: Promise<number>, sources: string[], sourceBytes: number) {
+  const dir = parent(sources[0])!;
+  touch(dir);
+  try {
+    const u = await runJob(start);
+    const t = activeTab();
+    if (samePath(t.p, dir)) selectAfterReload(t, u.created);
+    const after = await api.folderStats(u.created).then((s) => s.bytes).catch(() => 0);
+    const what = u.created.length === 1 ? basename(u.created[0]) : plural(u.created.length, kind === "video" ? "video" : "picture");
+    const msg = !after ? `Saved ${what}`
+      : after >= sourceBytes ? `${what} came out ${formatSize(after)}, not smaller than the original`
+      : `${what}: ${formatSize(sourceBytes)} → ${formatSize(after)}, ${Math.round((1 - after / sourceBytes) * 100)}% smaller`;
+    record({ label: `Compress ${what}`, undo: () => runJob(api.deleteItems(u.created, false)) }, msg);
+  } catch (e) {
+    fail("Compress failed", e);
+  }
+}
+
 /** Real filesystem path for an entry (archive entries are extracted to a cache first). */
 export async function realPath(e: Pick<Entry, "path" | "inArchive">): Promise<string | undefined> {
   if (!e.inArchive) return e.path;

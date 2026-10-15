@@ -2,7 +2,7 @@ import {
   AppWindow, ArrowDownUp, ClipboardPaste, Code2, Copy, CopyPlus, Eye, FileArchive, FilePlus, FolderInput, FolderOpen,
   FolderOutput, FolderPlus, Info, Layers, LayoutGrid, List, MousePointerClick, PackageOpen, Pencil, Redo2, RotateCw,
   Scissors, SquareTerminal, Star, Trash2, Undo2, ExternalLink, MoreHorizontal, Hash, PanelRight, BookmarkPlus,
-  ArchiveRestore, Blocks, FolderSearch, ShieldAlert, SquareArrowOutUpRight,
+  ArchiveRestore, Blocks, FolderSearch, ShieldAlert, SquareArrowOutUpRight, Clapperboard, ImageDown,
 } from "lucide-solid";
 import { api } from "../lib/api";
 import { kindOf } from "../lib/format";
@@ -36,6 +36,17 @@ window.addEventListener("contextmenu", trackShift, true);
 
 const ARCHIVE = /\.(zip|7z|rar|tar|tgz|txz|tzst|tbz2?|gz|xz|zst|bz2|jar|apk|cbz|cbr|xpi|nupkg|vsix|whl|epub)$/i;
 export const isArchive = (e: Pick<Entry, "isDir" | "name">) => !e.isDir && ARCHIVE.test(e.name);
+
+/** Pictures Windows can decode and re-encode (not animations, vectors, icons or camera raw). */
+const COMPRESSIBLE_IMAGE = new Set(["jpg", "jpeg", "png", "heic", "heif", "webp", "avif", "bmp", "tif", "tiff", "jxr", "wdp"]);
+
+/** "video" / "image" when every target can go to the compress editor of that kind. */
+export function mediaKind(targets: Entry[]): "video" | "image" | null {
+  if (!targets.length || targets.some((x) => x.isDir || x.inArchive)) return null;
+  if (targets.every((x) => kindOf(x) === "video")) return "video";
+  if (targets.every((x) => COMPRESSIBLE_IMAGE.has(x.ext))) return "image";
+  return null;
+}
 
 /** Destinations for "Copy to ▸" / "Move to ▸": favorites, recents, picker. */
 function destinations(op: "copy" | "move", paths: string[]): MenuItem[] {
@@ -139,6 +150,9 @@ export function itemMenu(t: Tab, e: Entry, targets: Entry[], x: number, y: numbe
   }
   if (archived) items.push({ label: "Extract to…", icon: PackageOpen, action: () => extractTo(e.path, undefined, paths) });
   else items.push({ label: `Compress to “${zipNameFor(paths)}”`, icon: FileArchive, action: () => compress(paths) });
+  const media = archived ? null : mediaKind(targets);
+  if (media === "video") items.push({ label: multi ? `Compress ${targets.length} videos…` : "Compress video…", icon: Clapperboard, action: () => setUi("media", { kind: "video", paths }) });
+  if (media === "image") items.push({ label: multi ? `Compress ${targets.length} pictures…` : "Compress picture…", icon: ImageDown, action: () => setUi("media", { kind: "image", paths }) });
   items.push({ separator: true });
 
   // --- paths & places ---

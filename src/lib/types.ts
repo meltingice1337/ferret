@@ -269,3 +269,71 @@ export interface Bootstrap {
   favorites: Favorite[];
   recents: Recent[];
 }
+
+// ---------- media compression (media.rs) ----------
+
+export interface VideoInfo {
+  path: string;
+  size: number;
+  /** Stored frame size; `rotation` (0/90/180/270) says how players turn it. */
+  width: number;
+  height: number;
+  rotation: number;
+  durationMs: number;
+  fps: number;
+  videoBitrate: number;
+  hasAudio: boolean;
+  audioBitrate: number;
+  codec: string;
+}
+
+export interface VideoJob {
+  source: string;
+  dest: string;
+  /** Output size in stored orientation (Windows turns rotated videos upright). */
+  width: number;
+  height: number;
+  /** 0 keeps the source's frame rate. */
+  fps: number;
+  videoBitrate: number;
+  /** 0 drops the sound. */
+  audioBitrate: number;
+  hevc: boolean;
+  trimStartMs?: number;
+  trimEndMs?: number;
+}
+
+export interface VideoSample {
+  path: string;
+  bytes: number;
+  durationMs: number;
+}
+
+export interface ImageInfo {
+  path: string;
+  size: number;
+  /** Upright size. */
+  width: number;
+  height: number;
+  alpha: boolean;
+  format: string;
+  /** data: URL of the original (upright, ≤ 2048 px). */
+  preview: string;
+}
+
+export interface ImageOpts {
+  png: boolean;
+  /** PNG for pictures with transparency, JPEG otherwise (overrides `png`). */
+  auto: boolean;
+  /** JPEG quality 1–100. */
+  quality: number;
+  /** Longest side in pixels; 0 keeps the size. */
+  maxSide: number;
+}
+
+export interface ImagePreview {
+  bytes: number;
+  width: number;
+  height: number;
+  dataUrl: string;
+}

@@ -8,6 +8,7 @@ mod integration;
 mod jobs;
 mod listing;
 mod logging;
+mod media;
 mod paths;
 mod places;
 mod protocol;
@@ -180,6 +181,14 @@ pub fn run() {
             archive::compress_zip,
             archive::archive_info,
             archive::archive_unlock,
+            // media.rs (video / picture compression)
+            media::video_info,
+            media::compress_videos,
+            media::video_sample,
+            media::image_info,
+            media::image_preview,
+            media::compress_images,
+            media::media_release,
             // search (whole-disk index)
             search::search_query,
             search::search_status,
