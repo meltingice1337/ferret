@@ -5,14 +5,32 @@
 use serde::Serialize;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{Arc, Condvar, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 use tauri::{AppHandle, Emitter};
 
 static NEXT_ID: AtomicU64 = AtomicU64::new(1);
+/// At most ~10 progress updates a second.
+const THROTTLE: Duration = Duration::from_millis(100);
+/// Jobs running right now. Background work that competes for the disk (folder-size counting)
+/// waits while there are any.
+static ACTIVE: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
 
-fn registry() -> &'static Mutex<HashMap<u64, Arc<AtomicBool>>> {
-    static R: OnceLock<Mutex<HashMap<u64, Arc<AtomicBool>>>> = OnceLock::new();
+/// A copy, move, delete or other file job is running.
+pub fn busy() -> bool {
+    ACTIVE.load(Ordering::Relaxed) > 0
+}
+
+/** What the UI can do to a running job: cancel it, or answer the question it's waiting on. */
+#[derive(Default)]
+struct Control {
+    cancel: AtomicBool,
+    answer: Mutex<Option<String>>,
+    wake: Condvar,
+}
+
+fn registry() -> &'static Mutex<HashMap<u64, Arc<Control>>> {
+    static R: OnceLock<Mutex<HashMap<u64, Arc<Control>>>> = OnceLock::new();
     R.get_or_init(Default::default)
 }
 
@@ -22,7 +40,7 @@ pub struct JobUpdate {
     pub id: u64,
     pub kind: String,
     pub label: String,
-    /// "running" | "done" | "error" | "cancelled"
+    /// "running" | "waiting" (for an answer to `question`) | "done" | "error" | "cancelled"
     pub status: &'static str,
     pub bytes_done: u64,
     pub bytes_total: u64,
@@ -38,17 +56,24 @@ pub struct JobUpdate {
     pub pairs: Vec<(String, String)>,
     /// Items left alone because of a "Skip" conflict choice.
     pub skipped: u64,
+    /// Items the job couldn't handle and left in place (path, reason): a locked file doesn't
+    /// stop the other 4,000.
+    pub failed: Vec<(String, String)>,
+    /// While waiting: what went wrong, for the user to retry, skip or cancel.
+    pub question: Option<String>,
 }
 
 pub struct JobCtx {
     app: AppHandle,
-    cancel: Arc<AtomicBool>,
-    state: Mutex<(JobUpdate, Instant)>,
+    control: Arc<Control>,
+    /// The latest update, when it was last sent, and whether it changed since (a throttled
+    /// change is sent shortly after by the job's ticker instead of being lost).
+    state: Arc<Mutex<(JobUpdate, Instant, bool)>>,
 }
 
 impl JobCtx {
     pub fn is_cancelled(&self) -> bool {
-        self.cancel.load(Ordering::Relaxed)
+        self.control.cancel.load(Ordering::Relaxed)
     }
 
     /// Returns Err("Cancelled") if the user cancelled; use with `?` in loops.
@@ -56,7 +81,35 @@ impl JobCtx {
     /// for cancellations that didn't come from `cancel_job` (e.g. the user
     /// declined the UAC prompt).
     pub fn mark_cancelled(&self) {
-        self.cancel.store(true, Ordering::Relaxed);
+        self.control.cancel.store(true, Ordering::Relaxed);
+    }
+
+    /// Pauses the job until the user answers `question` in the jobs panel: "retry", "skip",
+    /// "skipAll" or "cancel" (also what a cancelled job gets).
+    pub fn ask(&self, question: String) -> String {
+        *self.control.answer.lock().unwrap() = None;
+        {
+            let mut s = self.state.lock().unwrap();
+            s.0.status = "waiting";
+            s.0.question = Some(question);
+            self.emit_locked(&mut s, true);
+        }
+        let mut answer = self.control.answer.lock().unwrap();
+        let choice = loop {
+            if self.is_cancelled() {
+                break "cancel".to_string();
+            }
+            if let Some(a) = answer.take() {
+                break a;
+            }
+            answer = self.control.wake.wait(answer).unwrap();
+        };
+        drop(answer);
+        let mut s = self.state.lock().unwrap();
+        s.0.status = "running";
+        s.0.question = None;
+        self.emit_locked(&mut s, true);
+        choice
     }
 
     pub fn check(&self) -> Result<(), String> {
@@ -104,14 +157,21 @@ impl JobCtx {
         self.state.lock().unwrap().0.skipped += 1;
     }
 
+    pub fn failed(&self, path: impl Into<String>, reason: impl Into<String>) {
+        self.state.lock().unwrap().0.failed.push((path.into(), reason.into()));
+    }
+
     pub fn pair(&self, from: impl Into<String>, to: impl Into<String>) {
         self.state.lock().unwrap().0.pairs.push((from.into(), to.into()));
     }
 
-    fn emit_locked(&self, s: &mut (JobUpdate, Instant), force: bool) {
-        if force || s.1.elapsed() >= Duration::from_millis(100) {
+    fn emit_locked(&self, s: &mut (JobUpdate, Instant, bool), force: bool) {
+        if force || s.1.elapsed() >= THROTTLE {
             s.1 = Instant::now();
+            s.2 = false;
             let _ = self.app.emit("job-update", &s.0);
+        } else {
+            s.2 = true;
         }
     }
 }
@@ -123,17 +183,37 @@ where
     F: FnOnce(&JobCtx) -> Result<(), String> + Send + 'static,
 {
     let id = NEXT_ID.fetch_add(1, Ordering::Relaxed);
-    let cancel = Arc::new(AtomicBool::new(false));
-    registry().lock().unwrap().insert(id, cancel.clone());
+    let control = Arc::new(Control::default());
+    registry().lock().unwrap().insert(id, control.clone());
     let ctx = JobCtx {
         app: app.clone(),
-        cancel,
-        state: Mutex::new((
+        control,
+        state: Arc::new(Mutex::new((
             JobUpdate { id, kind: kind.into(), label: label.into(), status: "running", ..Default::default() },
             Instant::now() - Duration::from_secs(1),
-        )),
+            false,
+        ))),
     };
+    // Sends a change the throttle held back ("now on “big folder”") even when the job then
+    // works on that one item for a long time and reports nothing else.
+    let finished = Arc::new(AtomicBool::new(false));
+    {
+        let (state, app, finished) = (ctx.state.clone(), app.clone(), finished.clone());
+        std::thread::spawn(move || loop {
+            std::thread::sleep(THROTTLE);
+            if finished.load(Ordering::Relaxed) {
+                break;
+            }
+            let mut s = state.lock().unwrap();
+            if s.2 {
+                s.1 = Instant::now();
+                s.2 = false;
+                let _ = app.emit("job-update", &s.0);
+            }
+        });
+    }
     log::info!("job {id} {kind} started: {label}");
+    ACTIVE.fetch_add(1, Ordering::Relaxed);
     {
         let mut s = ctx.state.lock().unwrap();
         ctx.emit_locked(&mut s, true);
@@ -154,20 +234,33 @@ where
         let u = &s.0;
         log::log!(
             if u.status == "error" { log::Level::Warn } else { log::Level::Info },
-            "job {id} {} {} in {:?}: {}/{} files, {}/{} bytes, {} created, {} replaced, {} skipped{}",
+            "job {id} {} {} in {:?}: {}/{} files, {}/{} bytes, {} created, {} replaced, {} skipped, {} failed{}",
             u.kind, u.status, started.elapsed(),
-            u.files_done, u.files_total, u.bytes_done, u.bytes_total, u.created.len(), u.replaced.len(), u.skipped,
+            u.files_done, u.files_total, u.bytes_done, u.bytes_total, u.created.len(), u.replaced.len(), u.skipped, u.failed.len(),
             u.error.as_ref().map(|e| format!("; error: {e}")).unwrap_or_default()
         );
         ctx.emit_locked(&mut s, true);
+        finished.store(true, Ordering::Relaxed);
         registry().lock().unwrap().remove(&id);
+        ACTIVE.fetch_sub(1, Ordering::Relaxed);
     });
     id
 }
 
 #[tauri::command]
 pub fn cancel_job(id: u64) {
-    if let Some(flag) = registry().lock().unwrap().get(&id) {
-        flag.store(true, Ordering::Relaxed);
+    if let Some(c) = registry().lock().unwrap().get(&id) {
+        c.cancel.store(true, Ordering::Relaxed);
+        let _guard = c.answer.lock().unwrap();
+        c.wake.notify_all();
+    }
+}
+
+/// The user's answer to a waiting job's question (see `JobCtx::ask`).
+#[tauri::command]
+pub fn answer_job(id: u64, answer: String) {
+    if let Some(c) = registry().lock().unwrap().get(&id) {
+        *c.answer.lock().unwrap() = Some(answer);
+        c.wake.notify_all();
     }
 }

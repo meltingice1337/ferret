@@ -74,7 +74,8 @@ export interface JobUpdate {
   id: number;
   kind: "copy" | "move" | "delete" | "recycle" | "extract" | "compress" | string;
   label: string;
-  status: "running" | "done" | "error" | "cancelled";
+  /** "waiting": paused on an item it couldn't handle until the user answers `question`. */
+  status: "running" | "waiting" | "done" | "error" | "cancelled";
   bytesDone: number;
   bytesTotal: number;
   filesDone: number;
@@ -87,6 +88,9 @@ export interface JobUpdate {
   /** [source, destination] for everything the job produced. */
   pairs: [string, string][];
   skipped: number;
+  /** [path, reason] for items left in place (skipped after an error). */
+  failed: [string, string][];
+  question: string | null;
 }
 
 export interface ItemInfo {
@@ -168,6 +172,8 @@ export interface Settings {
   hiddenColumns: ListColumn[];
   /** Count folder sizes in the background and show them in the Size column. */
   folderSizes: boolean;
+  /** Short transitions between previews, folders and tabs (also off when Windows' animation effects are). */
+  animations: boolean;
   /** Ctrl+K queries that led somewhere, newest first. */
   searchHistory: string[];
   /** Searches pinned to the sidebar; each opens as a tab of its current matches. */

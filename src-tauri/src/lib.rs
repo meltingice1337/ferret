@@ -141,6 +141,7 @@ pub fn run() {
             commands::drag_icon,
             logging::open_log_folder,
             jobs::cancel_job,
+            jobs::answer_job,
             fileops::create_folder,
             fileops::create_file,
             fileops::rename_item,

@@ -125,27 +125,98 @@ pub async fn recycle_info() -> Result<RecycleInfo, String> {
     tauri::async_runtime::spawn_blocking(info).await.map_err(|e| e.to_string())
 }
 
-/// Empties the Recycle Bin on every drive. The UI asks for confirmation first.
-#[tauri::command]
-pub async fn empty_recycle_bin() -> Result<(), String> {
-    tauri::async_runtime::spawn_blocking(|| {
+/// Empties the Recycle Bin on every drive as a job (the UI asks for confirmation first): item
+/// by item, so it shows progress (by size, so a big folder moves the bar too), names what it's
+/// on, can be cancelled between items, and asks Try again / Skip / Skip all about an item it
+/// can't delete instead of failing as a whole. Returns the job id.
+#[tauri::command(async)]
+pub fn empty_recycle_bin(app: tauri::AppHandle) -> Result<u64, String> {
+    let items = list()?;
+    log::info!("emptying the Recycle Bin: {} items", items.len());
+    Ok(crate::jobs::spawn(&app, "delete", "Emptying the Recycle Bin", move |ctx| {
+        let total: u64 = items.iter().map(|e| e.size).sum();
+        ctx.set_totals(total, items.len() as u64);
+        let started = std::time::Instant::now();
+        let mut skip_all = false;
+        for e in &items {
+            ctx.check()?;
+            ctx.set_current(&e.name);
+            let item_start = std::time::Instant::now();
+            loop {
+                let Err(why) = purge(&e.path) else { break };
+                let why = format!("Couldn't delete “{}”: {why}", e.name);
+                if skip_all {
+                    ctx.failed(e.path.clone(), why);
+                    break;
+                }
+                match ctx.ask(why.clone()).as_str() {
+                    "retry" => continue,
+                    "skip" => ctx.failed(e.path.clone(), why),
+                    "skipAll" => {
+                        skip_all = true;
+                        ctx.failed(e.path.clone(), why);
+                    }
+                    _ => {
+                        ctx.mark_cancelled();
+                        return Err("Cancelled".into());
+                    }
+                }
+                break;
+            }
+            if item_start.elapsed() > std::time::Duration::from_secs(1) {
+                log::info!("empty bin: “{}” took {:?}", e.name, item_start.elapsed());
+            }
+            ctx.add_bytes(e.size);
+            ctx.file_done();
+        }
+        log::info!("emptied the Recycle Bin: {} items in {:?}", items.len(), started.elapsed());
+        refresh_bin_icon();
+        Ok(())
+    }))
+}
+
+/// Deletes one recycled item for good: its `$R` file or folder and its `$I` record. Directly
+/// first (fast); what that can't remove (read-only files, odd permissions) goes through the
+/// Recycle Bin's own delete.
+fn purge(r_path: &str) -> Result<(), String> {
+    let io = paths::for_io(r_path);
+    let r = Path::new(&io);
+    let info_file = r.file_name().and_then(|n| n.to_str()).and_then(|n| n.get(2..)).map(|rest| r.with_file_name(format!("$I{rest}")));
+    let direct = match fs::symlink_metadata(r) {
+        Ok(m) if m.is_dir() => fs::remove_dir_all(r),
+        Ok(_) => fs::remove_file(r),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(e),
+    };
+    if direct.is_err() {
         #[cfg(windows)]
         {
-            use windows::core::PCWSTR;
-            use windows::Win32::UI::Shell::{SHEmptyRecycleBinW, SHERB_NOCONFIRMATION, SHERB_NOPROGRESSUI, SHERB_NOSOUND};
-            // Already empty reports E_UNEXPECTED on some systems; that's fine.
-            if info().items == 0 {
+            let id = std::ffi::OsString::from(r_path);
+            if let Ok(item) = trash::os_limited::list().map(|all| all.into_iter().find(|i| i.id == id)) {
+                if let Some(item) = item {
+                    trash::os_limited::purge_all([item]).map_err(|e| e.to_string())?;
+                }
                 return Ok(());
             }
-            log::info!("emptying the Recycle Bin ({} items)", info().items);
-            unsafe { SHEmptyRecycleBinW(None, PCWSTR::null(), SHERB_NOCONFIRMATION | SHERB_NOPROGRESSUI | SHERB_NOSOUND) }
-                .map_err(|e| e.message().to_string())
         }
-        #[cfg(not(windows))]
-        Ok(())
-    })
-    .await
-    .map_err(|e| e.to_string())?
+        return direct.map_err(|e| e.to_string());
+    }
+    if let Some(i) = info_file {
+        let _ = fs::remove_file(i);
+    }
+    Ok(())
+}
+
+/// The Recycle Bin icon (desktop, Explorer) shows empty/full from its own cache.
+fn refresh_bin_icon() {
+    #[cfg(windows)]
+    unsafe {
+        use windows::Win32::UI::Shell::{SHChangeNotify, SHCNE_UPDATEDIR, SHCNF_PATHW};
+        for dir in bin_dirs() {
+            let w: Vec<u16> = dir.encode_utf16().chain(Some(0)).collect();
+            SHChangeNotify(SHCNE_UPDATEDIR, SHCNF_PATHW, Some(w.as_ptr() as *const _), None);
+        }
+    }
 }
 
 /// The current user's `X:\$Recycle.Bin\<SID>` folders that exist (for change watching).
@@ -207,5 +278,39 @@ pub(crate) fn user_sid() -> Option<String> {
         let out = s.to_string().ok();
         let _ = LocalFree(Some(HLOCAL(s.0.cast())));
         out
+    }
+}
+
+#[cfg(all(test, windows))]
+mod purge_tests {
+    use super::*;
+
+    /// Emptying deletes an item's `$R` data and its `$I` record, and only that item.
+    #[test]
+    fn purges_one_recycled_item() {
+        let dir = std::env::temp_dir().join(format!("ferret-purge-test-{}", std::process::id()));
+        fs::create_dir_all(dir.join("folder")).unwrap();
+        let file = dir.join("folder").join("bye.txt");
+        fs::write(&file, "x").unwrap();
+        let folder = dir.join("folder");
+        trash::delete(&folder).unwrap();
+        // The Recycle Bin records long paths (not 8.3 names like MELTIN~1).
+        let want = paths::key(&paths::long_form(&paths::normalize(&dir.to_string_lossy()))) + "\\folder";
+        let find = || trash::os_limited::list().unwrap().into_iter().find(|i| paths::key(&i.original_path().to_string_lossy()) == want);
+        let item = find().expect("recycled folder is in the Recycle Bin");
+        let r = paths::normalize(&item.id.to_string_lossy());
+        let name = Path::new(&r).file_name().unwrap().to_string_lossy().into_owned();
+        let info = Path::new(&r).with_file_name(format!("$I{}", &name[2..]));
+        assert!(info.exists(), "its $I record exists before");
+        purge(&r).unwrap();
+        assert!(!Path::new(&r).exists() && !info.exists(), "both $R and $I are gone");
+        assert!(find().is_none(), "no longer listed in the Recycle Bin");
+        let _ = fs::remove_dir_all(&dir);
+        // Leftovers of earlier failed runs of this test (and only those).
+        for i in trash::os_limited::list().unwrap() {
+            if i.original_path().to_string_lossy().contains("ferret-purge-test-") {
+                let _ = purge(&paths::normalize(&i.id.to_string_lossy()));
+            }
+        }
     }
 }

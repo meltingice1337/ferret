@@ -21,7 +21,7 @@ export const [settings, setSettings] = createStore<Settings>({
   theme: "dark", accent: "#e2457f", backdrop: "mica", density: "comfortable",
   doubleClickOpen: true, rememberPerFolder: true, inheritToSubfolders: false, restoreSession: true,
   hiddenPlaces: [], hiddenSections: [],
-  columnWidths: { modified: 150, type: 140, size: 90 }, hiddenColumns: [], folderSizes: true,
+  columnWidths: { modified: 150, type: 140, size: 90 }, hiddenColumns: [], folderSizes: true, animations: true,
   searchHistory: [], savedSearches: [],
   globalView: { ...DEFAULT_VIEW },
   profiles: {
@@ -608,14 +608,22 @@ function syncWatchers() {
 }
 
 const pendingReload = new Map<string, number>();
+/** File jobs running (ops.ts keeps it up to date). */
+export const [jobsRunning, setJobsRunning] = createSignal(0);
+
 listen<string[]>("fs-changed", (ev) => {
+  // While a job deletes or copies thousands of items the events never stop: reload at most once
+  // a second (so the list still visibly empties or fills) instead of waiting for a quiet moment
+  // or reloading after every item.
+  const busy = jobsRunning() > 0;
   for (const dir of ev.payload) {
     const k = pathKey(dir);
+    if (busy && pendingReload.has(k)) continue;
     clearTimeout(pendingReload.get(k));
     pendingReload.set(k, window.setTimeout(() => {
       pendingReload.delete(k);
       for (const t of tabs()) if (pathKey(t.p) === k) reload(t);
-    }, 180));
+    }, busy ? 1000 : 180));
   }
 });
 

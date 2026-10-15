@@ -20,7 +20,37 @@ function take(s: Record<string, FolderSize>, size: FolderSize) {
   if (!old?.done || (size.done && size.countedAt >= old.countedAt)) s[k] = size;
 }
 
-listen<FolderSize>("folder-size", (ev) => setFolderSizes(produce((s) => take(s, ev.payload))));
+// Counting a folder of 3,000 folders sends thousands of these: applied in bundles (a few times
+// a second), not one by one, or the list redraws itself for every single folder.
+let incoming: FolderSize[] = [];
+let flushTimer: number | undefined;
+let lastSort = 0;
+let sortTimer: number | undefined;
+listen<FolderSize>("folder-size", (ev) => {
+  incoming.push(ev.payload);
+  flushTimer ??= window.setTimeout(flush, 250);
+});
+function flush() {
+  flushTimer = undefined;
+  const batch = incoming;
+  incoming = [];
+  setFolderSizes(produce((s) => batch.forEach((x) => take(s, x))));
+  if (batch.some((x) => x.done)) resort();
+}
+
+/** Bumped when finished sizes arrived: a list sorted by size puts its folders in order again.
+ *  At most once a second, so rows don't keep jumping (and re-sorting thousands of items for
+ *  every counted folder doesn't slow scrolling). */
+export const [sizeOrder, setSizeOrder] = createSignal(0);
+function resort() {
+  if (sortTimer !== undefined) return;
+  const wait = Math.max(0, 1000 - (performance.now() - lastSort));
+  sortTimer = window.setTimeout(() => {
+    sortTimer = undefined;
+    lastSort = performance.now();
+    setSizeOrder((n) => n + 1);
+  }, wait);
+}
 
 export const folderSize = (path: string): FolderSize | undefined => folderSizes[pathKey(path)];
 
@@ -43,7 +73,10 @@ export function uncounted(path: string): string | undefined {
 /** Ask for the sizes of a tab's folders (in display order); replaces that tab's earlier ask. */
 export async function requestFolderSizes(tabId: number, paths: string[]) {
   const known = await api.folderSizes(tabId, paths).catch(() => [] as FolderSize[]);
-  if (known.length) setFolderSizes(produce((s) => known.forEach((k) => take(s, k))));
+  if (known.length) {
+    setFolderSizes(produce((s) => known.forEach((k) => take(s, k))));
+    resort();
+  }
 }
 
 /** Bumped when sizes were marked out of date, so open tabs ask again. */

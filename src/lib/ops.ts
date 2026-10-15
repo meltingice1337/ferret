@@ -11,6 +11,7 @@ import { invalidateFolderSizes } from "./foldersizes";
 import { plural } from "./format";
 import { basename, inRecycleBin, isRecycle, isSearch, isWithin, parent, pathKey, samePath } from "./path";
 import {
+  setJobsRunning,
   activeTab, ask, ASK_ALT, beginTypeAhead, elevateWindow, friendly, navigate, places, refreshRecycleInfo, reload, setUi, tabs,
   toast, ui, type Tab,
 } from "./state";
@@ -19,7 +20,8 @@ import type { Entry, JobUpdate, Policy } from "./types";
 
 // ---------- jobs ----------
 
-export const [jobs, setJobs] = createStore<Record<number, JobUpdate & { rate?: number; started?: number }>>({});
+/** `currentSince`: when the job moved on to its current item (one that takes long gets a note). */
+export const [jobs, setJobs] = createStore<Record<number, JobUpdate & { rate?: number; started?: number; currentSince?: number }>>({});
 type JobDone = (u: JobUpdate) => void;
 const jobCallbacks = new Map<number, JobDone>();
 /** Final updates of recently finished jobs. Fast jobs can finish before `invoke`
@@ -39,8 +41,12 @@ listen<JobUpdate>("job-update", (ev) => {
     s.b = u.bytesDone;
   }
   speed.set(u.id, s);
-  setJobs(u.id, { ...u, rate: s.rate, started: jobs[u.id]?.started ?? now });
-  if (u.status !== "running") {
+  const prev = jobs[u.id];
+  const currentSince = prev && prev.current === u.current && prev.filesDone === u.filesDone ? prev.currentSince ?? now : now;
+  setJobs(u.id, { ...u, rate: s.rate, started: prev?.started ?? now, currentSince });
+  setJobsRunning(Object.values(jobs).filter((j) => j.status === "running" || j.status === "waiting").length);
+  // "waiting" (paused on an item, asking in the jobs panel) isn't the end either.
+  if (u.status !== "running" && u.status !== "waiting") {
     speed.delete(u.id);
     finished.set(u.id, u);
     setTimeout(() => finished.delete(u.id), 120_000);
@@ -464,15 +470,23 @@ export async function deleteItems(paths: string[], permanent: boolean) {
     t.anchor[1](next?.path ?? null);
   });
   try {
-    await tracked(permanent ? destroy(paths) : recycle(paths));
-    if (permanent) toast(`Deleted ${describe(paths)}`);
+    const u = await tracked(permanent ? destroy(paths) : recycle(paths));
+    // Items skipped after "Skip" / "Skip all" stay where they were.
+    const left = (u?.failed ?? []).map(([p]) => p);
+    const leftKeys = new Set(left.map(pathKey));
+    const done = paths.filter((p) => !leftKeys.has(pathKey(p)));
+    const skippedNote = left.length ? ` · ${plural(left.length, "item")} skipped` : "";
+    if (!done.length) toast(`Nothing was ${permanent ? "deleted" : "moved to the Recycle Bin"}${skippedNote}`);
+    else if (permanent) toast(`Deleted ${describe(done)}${skippedNote}`);
     else
       record({
-        label: `Delete ${describe(paths)}`,
-        undo: () => unrecycle(paths),
-        redo: () => recycle(paths),
-      }, `Moved ${describe(paths)} to the Recycle Bin`);
-    if (next && !t.selection[0]().length) selectAfterReload(t, [next.path]);
+        label: `Delete ${describe(done)}`,
+        undo: () => unrecycle(done),
+        redo: () => recycle(done),
+      }, `Moved ${describe(done)} to the Recycle Bin${skippedNote}`);
+    // The skipped items get selected, so it's clear what's left (and easy to try again).
+    if (left.length) selectAfterReload(t, left);
+    else if (next && !t.selection[0]().length) selectAfterReload(t, [next.path]);
     if (ui.shelf.some((p) => gone.has(pathKey(p)))) setUi("shelf", ui.shelf.filter((p) => !gone.has(pathKey(p))));
   } catch (e) {
     fail("Delete failed", e);
@@ -627,11 +641,13 @@ export async function emptyBin() {
     confirmLabel: "Empty Recycle Bin", danger: true,
   });
   if (ok === null) return;
+  // A job like any delete: progress, Cancel, and Try again / Skip for an item it can't delete.
   try {
-    await api.emptyRecycleBin();
-    toast("Emptied the Recycle Bin");
+    const u = await tracked(runJob(api.emptyRecycleBin()));
+    const left = u.failed?.length ?? 0;
+    toast(left ? `Emptied the Recycle Bin · ${plural(left, "item")} skipped` : "Emptied the Recycle Bin");
   } catch (e) {
-    toast(`Couldn't empty the Recycle Bin: ${friendly(String(e))}`, "error");
+    fail("Couldn't empty the Recycle Bin", e);
   }
   refreshAffected();
 }

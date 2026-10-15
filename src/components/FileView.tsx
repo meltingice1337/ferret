@@ -10,10 +10,11 @@ import { formatDate, formatSize, kindOf, plural, timeAgo, typeLabel } from "../l
 import { emptyBin, isCut, newFolder, renamePath, restoreFromBin, targetsOf, visibleEntries } from "../lib/ops";
 import { groupEntries, sortEntries, type Group } from "../lib/sortgroup";
 import { entryFilter } from "../lib/filter";
-import { isRecycle, isSearch, pathKey, searchQuery } from "../lib/path";
+import { isRecycle, isSearch, isWithin, pathKey, samePath, searchQuery } from "../lib/path";
+import { enter } from "../lib/motion";
 import { openSearchPalette } from "./SearchPalette";
-import { folderSizes, requestFolderSizes, sizesApply, sizesEpoch, uncounted } from "../lib/foldersizes";
-import { ask, goUp, holdKeys, promptSaveSearch, savedSearch, openEntry, openMenu, persistSettings, releaseKeys, reload, setSettings, setUi, settings, sortBy, takeTypeAhead, toast, ui, updateView, type Tab } from "../lib/state";
+import { folderSizes, requestFolderSizes, sizeOrder, sizesApply, sizesEpoch, uncounted } from "../lib/foldersizes";
+import { ask, goUp, holdKeys, jobsRunning, promptSaveSearch, savedSearch, openEntry, openMenu, persistSettings, releaseKeys, reload, setSettings, setUi, settings, sortBy, takeTypeAhead, toast, ui, updateView, type Tab } from "../lib/state";
 import type { Entry, ListColumn, SortBy } from "../lib/types";
 
 export { GROUP_LABELS, SORT_LABELS } from "./menus";
@@ -114,6 +115,14 @@ export default function FileView(props: { tab: Tab }) {
   const [band, setBand] = createSignal<null | { x0: number; y0: number; x1: number; y1: number }>(null);
   let scroller!: HTMLDivElement;
 
+  // The listing eases in: from the right into a subfolder, from the left going up, a plain
+  // fade for anywhere else and when switching tabs.
+  onMount(() => enter(scroller, "fade", 150, "folder"));
+  createEffect(on(() => t.path[0](), (p, prev) => {
+    if (!prev || samePath(p, prev)) return;
+    enter(scroller, isWithin(p, prev) ? "in" : isWithin(prev, p) ? "out" : "fade", 200, "folder");
+  }, { defer: true }));
+
   // ---------- data pipeline: filter → sort → group → rows ----------
 
   const showFolderSizes = () => settings.folderSizes && sizesApply(t.p);
@@ -125,8 +134,12 @@ export default function FileView(props: { tab: Tab }) {
     if (match) list = list.filter(match);
     // Sorting by size puts folders in order once their sizes are counted (finished counts
     // only, so rows don't keep moving while totals grow).
-    const sizeOf = v.sortBy === "size" && showFolderSizes()
-      ? (e: Entry) => (e.isDir ? (folderSizes[pathKey(e.path)]?.done ? folderSizes[pathKey(e.path)].bytes : 0) : e.size)
+    // The sizes are read untracked: the order follows `sizeOrder` (at most once a second while
+    // counting), not every single size that arrives.
+    const sorting = v.sortBy === "size" && showFolderSizes();
+    if (sorting) sizeOrder();
+    const sizeOf = sorting
+      ? (e: Entry) => (e.isDir ? untrack(() => { const s = folderSizes[pathKey(e.path)]; return s?.done ? s.bytes : 0; }) : e.size)
       : undefined;
     // In the Recycle Bin the newest deletions come first, folders or not.
     return groupEntries(sortEntries(list, bin() ? { ...v, foldersFirst: false } : v, sizeOf), v);
@@ -139,7 +152,12 @@ export default function FileView(props: { tab: Tab }) {
     const hidden = view().showHidden;
     return t.entries[0]().filter((e) => e.isDir && !e.inArchive && (hidden || !e.hidden) && !uncounted(e.path)).map((e) => e.path).join("\n");
   });
-  createEffect(on([sizeTargets, sizesEpoch], ([s]) => requestFolderSizes(t.id, s ? s.split("\n") : [])));
+  // While a file job runs, counting waits (the backend pauses it) and the list doesn't ask: it
+  // would reload and re-ask after every deleted item. It asks once when the job is done.
+  const sizesPaused = () => jobsRunning() > 0;
+  createEffect(on([sizeTargets, sizesEpoch, sizesPaused], ([s, , paused]) => {
+    if (!paused) requestFolderSizes(t.id, s ? s.split("\n") : []);
+  }));
   onCleanup(() => requestFolderSizes(t.id, []));
 
   const itemH = () => (settings.density === "compact" ? 24 : 30);
@@ -191,6 +209,13 @@ export default function FileView(props: { tab: Tab }) {
   });
   const rowIndex = createMemo(() => new Map(rows().map((r, i) => [r, i] as const)));
   const topOf = (r: Row) => layout().offs[rowIndex().get(r) ?? 0] ?? 0;
+  /** The list row above (-1) or below (1) is selected too: a run of selected rows reads as
+   *  one block (a group heading in between breaks it). */
+  const selectedNeighbor = (r: Row, d: -1 | 1) => {
+    const i = rowIndex().get(r);
+    const n = i === undefined ? undefined : rows()[i + d];
+    return n?.kind === "items" && isSel(n.items[0].path);
+  };
 
   const layout = createMemo(() => {
     const offs: number[] = [];
@@ -584,6 +609,8 @@ export default function FileView(props: { tab: Tab }) {
     const why = uncounted(e.path);
     if (why) return { text: "", title: why };
     const s = folderSizes[pathKey(e.path)];
+    // Paused during a file job: the last known size, without "counting" marks.
+    if (sizesPaused()) return s?.done ? { text: formatSize(s.bytes), title: "Counted again once the current operation is done" } : { text: "" };
     if (!s) return { text: "…", counting: true, title: "Counting…" };
     if (!s.done) return { text: formatSize(s.bytes), counting: true, title: "Counting…" };
     const details = [s.files !== null && plural(s.files, "file"), s.partial && "some folders inside couldn't be read"];
@@ -647,7 +674,10 @@ export default function FileView(props: { tab: Tab }) {
                   {(e) => (
                     <div
                       class="row"
-                      classList={{ selected: isSel(e().path), cursor: t.cursor[0]() === e().path, dim: e().hidden, cut: isCut(e().path) }}
+                      classList={{
+                        selected: isSel(e().path), cursor: t.cursor[0]() === e().path, dim: e().hidden, cut: isCut(e().path),
+                        "join-up": isSel(e().path) && selectedNeighbor(row, -1), "join-down": isSel(e().path) && selectedNeighbor(row, 1),
+                      }}
                       style={{ transform: `translateY(${topOf(row)}px)`, height: `${itemH()}px`, "grid-template-columns": columns() }}
                       data-drop={dropAttr(e())}
                       onMouseDown={(ev) => onItemDown(ev, e())}

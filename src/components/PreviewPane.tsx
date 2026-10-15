@@ -8,6 +8,7 @@ import { activeTab, openEntry, persistSession, previewSpace, setUi, ui } from ".
 import type { Entry } from "../lib/types";
 import { Thumb } from "./FileView";
 import Preview from "./preview/Preview";
+import { enter } from "../lib/motion";
 import { imageUrl, type Meta } from "./preview/renderers";
 
 /** The entry the user is looking at: the cursor if selected, or the single selection. */
@@ -76,6 +77,10 @@ export default function PreviewPane() {
   const focused = useFocusedEntry(140);
   const shown = () => focused() ?? (activeTab() ? folderEntry(activeTab().p) : null);
   const [meta, setMeta] = createSignal<Meta[]>([]);
+  // A different item eases in once it's on screen. Pictures fade by themselves once decoded
+  // (ImageView), since the previous one stays up until then.
+  let body: HTMLDivElement | undefined;
+  const swapped = (image: boolean) => !image && enter(body, "lift", 180, "preview");
 
   const startResize = (e: MouseEvent) => {
     e.preventDefault();
@@ -103,7 +108,7 @@ export default function PreviewPane() {
                 <button class="icon-btn" title="Quick Look (Space)" onClick={() => setUi("quickLook", true)}><Maximize2 size={15} /></button>
               </Show>
             </header>
-            <div class="pv-body"><Preview entry={e()} onMeta={setMeta} /></div>
+            <div class="pv-body" ref={body}><Preview entry={e()} onMeta={setMeta} onSwap={swapped} /></div>
             <MetaList entry={e()} extra={meta()} />
           </>
         )}

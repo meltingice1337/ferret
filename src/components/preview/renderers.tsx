@@ -1,5 +1,5 @@
 import { AppWindow, Binary, ChevronDown, ChevronRight, FolderOpen, LoaderCircle, PackageOpen, Play } from "lucide-solid";
-import { createEffect, createMemo, createResource, createSignal, For, Index, on, onCleanup, Show, type JSX } from "solid-js";
+import { createEffect, createMemo, createResource, createSignal, For, Index, on, onCleanup, onMount, Show, type JSX } from "solid-js";
 import DOMPurify from "dompurify";
 import { marked } from "marked";
 import { openUrl } from "@tauri-apps/plugin-opener";
@@ -7,6 +7,7 @@ import { api, fileUrl, thumbUrl } from "../../lib/api";
 import { formatDate, formatSize, languageName, plural, typeLabel } from "../../lib/format";
 import { isRecycle, parent } from "../../lib/path";
 import { fsTick, isDark } from "../../lib/state";
+import { enter } from "../../lib/motion";
 import type { Entry } from "../../lib/types";
 import FileIcon from "../FileIcon";
 import { highlight, langFor } from "./highlight";
@@ -235,15 +236,25 @@ export function ImageView(props: { path: string; ext: string; setMeta: SetMeta; 
   const [src, setSrc] = createSignal(want());
   // Plain variable: the decode callback runs outside Solid's tracking scope.
   let latest = src();
+  let shownPath = props.path;
   createEffect(on(want, (url) => {
     latest = url;
+    const path = props.path;
     const next = new Image();
     next.src = url;
-    next.decode().catch(() => {}).then(() => { if (latest === url) setSrc(url); });
+    next.decode().catch(() => {}).then(() => {
+      if (latest !== url) return;
+      setSrc(url);
+      // A different picture fades in (not the same one reloaded after an edit).
+      if (path !== shownPath) enter(pic, "fade", 170, "preview");
+      shownPath = path;
+    });
   }, { defer: true }));
 
   let box!: HTMLDivElement;
   let pic!: HTMLImageElement;
+  // The first picture after another kind of preview fades in too.
+  onMount(() => enter(pic, "fade", 170, "preview"));
   const [zoomed, setZoomed] = createSignal(false);
   const [factor, setFactor] = createSignal(1);
   // `goal` follows the mouse and the clicks; `cur` eases toward it every frame. x/y are where

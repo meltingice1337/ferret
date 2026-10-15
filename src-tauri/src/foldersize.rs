@@ -81,7 +81,9 @@ fn with_db<T>(app: &AppHandle, f: impl FnOnce(&rusqlite::Connection) -> rusqlite
 /// come back at once; missing ones, then out-of-date ones, are counted in the background and
 /// reported as `folder-size` events (also while counting). A newer request from the same tab
 /// replaces the work it no longer needs. `refresh` counts everything again (F5).
-#[tauri::command]
+// Off the main thread: with thousands of items this can take a moment, and the window
+// must keep answering meanwhile.
+#[tauri::command(async)]
 pub fn folder_sizes(app: AppHandle, requester: u32, paths: Vec<String>, refresh: bool) -> Vec<FolderSize> {
     let s = sizes();
     let wanted: Vec<(String, String)> =
@@ -151,8 +153,13 @@ pub fn folder_sizes(app: AppHandle, requester: u32, paths: Vec<String>, refresh:
             st.queue.push_back(Job { path, key, wanted_by: HashSet::from([requester]), cancel: Arc::default() });
         }
     }
+    let (queued, running) = (st.queue.len(), st.running.len());
     drop(st);
     s.wake.notify_all();
+    log::info!(
+        "folder sizes: tab {requester} asked for {} ({} known, {} to count{}); queue {queued}, counting {running}",
+        paths.len(), out.len(), queued, if refresh { ", refresh" } else { "" }
+    );
     out
 }
 
@@ -160,7 +167,9 @@ pub fn folder_sizes(app: AppHandle, requester: u32, paths: Vec<String>, refresh:
 /// containing them are out of date; with `deep`, so are those of every folder inside them
 /// (for changes whose exact place isn't known, like an undo or a refresh). They're counted
 /// again the next time a tab asks, and the old value stays on screen until then.
-#[tauri::command]
+// Off the main thread: with thousands of items this can take a moment, and the window
+// must keep answering meanwhile.
+#[tauri::command(async)]
 pub fn folder_sizes_invalidate(app: AppHandle, paths: Vec<String>, deep: bool) {
     let changed: Vec<String> = paths.iter().map(|p| paths::key(p)).collect();
     {
@@ -201,6 +210,11 @@ fn worker(app: AppHandle) {
         let job = {
             let mut st = s.state.lock();
             loop {
+                // File operations go first: counting walks the same folders and competes for the disk.
+                if crate::jobs::busy() {
+                    s.wake.wait_for(&mut st, Duration::from_millis(500));
+                    continue;
+                }
                 if let Some(job) = st.queue.pop_front() {
                     st.running.insert(job.key.clone(), (job.wanted_by.clone(), job.cancel.clone()));
                     break job;
@@ -208,6 +222,7 @@ fn worker(app: AppHandle) {
                 s.wake.wait(&mut st);
             }
         };
+        let started = Instant::now();
         let result = if paths::is_wsl(&job.path) {
             count_wsl(&job.path, &job.cancel)
         } else {
@@ -216,7 +231,24 @@ fn worker(app: AppHandle) {
             })
         };
         let mut st = s.state.lock();
-        st.running.remove(&job.key);
+        let who = st.running.remove(&job.key).map(|(who, _)| who).unwrap_or_default();
+        // Stopped because a file operation started: count it again once that's done.
+        if result.is_none() && !job.cancel.load(Ordering::Relaxed) && crate::jobs::busy() {
+            if !who.is_empty() {
+                st.queue.push_front(Job { wanted_by: who, ..job });
+            }
+            continue;
+        }
+        // Slow counts, cancellations and failures (fast ones would flood the log).
+        let took = started.elapsed();
+        if took >= Duration::from_millis(500) || result.is_none() {
+            log::info!(
+                "folder size {}: {} in {took:?}; {} still queued",
+                job.path,
+                match &result { Some(r) => format!("{} files", r.files.unwrap_or(0)), None if job.cancel.load(Ordering::Relaxed) => "cancelled".into(), None => "failed".into() },
+                st.queue.len()
+            );
+        }
         let Some(mut size) = result else {
             // Couldn't count it again (not stopped on purpose): the earlier size stops showing as refreshing.
             if !job.cancel.load(Ordering::Relaxed) {
@@ -247,7 +279,7 @@ fn count(path: &str, cancel: &AtomicBool, mut progress: impl FnMut(FolderSize)) 
     let mut stack = vec![PathBuf::from(paths::for_io(path))];
     let mut last = Instant::now();
     while let Some(dir) = stack.pop() {
-        if cancel.load(Ordering::Relaxed) {
+        if cancel.load(Ordering::Relaxed) || crate::jobs::busy() {
             return None;
         }
         let Ok(entries) = std::fs::read_dir(&dir) else {

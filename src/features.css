@@ -62,10 +62,24 @@ body.reordering, body.reordering * { cursor: grabbing !important; }
 .job-icon { color: var(--accent-text); display: inline-flex; }
 .job.done .job-icon { color: #22c55e; }
 .job.error { border-color: #ef4444; }
+/* Paused on an item it can't handle: the reason and what to do about it. */
+.job.waiting { border-color: #f59e0b; }
+.job.waiting .job-icon { color: #f59e0b; }
+.job-ask { display: flex; flex-direction: column; gap: 8px; }
+.job-question { font-size: 12.5px; line-height: 1.45; color: var(--fg); }
+.job-ask-actions { display: flex; gap: 6px; flex-wrap: wrap; }
+.job-ask-actions .btn { height: 26px; padding: 0 10px; font-size: 12px; }
 .job-label { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 600; }
 .job-bar { height: 4px; border-radius: 4px; background: var(--line-2); margin: 8px 0 6px; overflow: hidden; }
 .job-bar > div { height: 100%; background: var(--accent); border-radius: 4px; transition: width 0.15s; }
 .job-bar > div.indet { width: 35% !important; animation: indet 1.1s ease-in-out infinite; }
+/* A running job's bar keeps a light sweeping across it, so it's clear it's still working even
+   while one big item takes a while (and the count doesn't move). */
+.job.running .job-bar > div:not(.indet) {
+  background-image: linear-gradient(90deg, transparent 0%, rgba(255, 255, 255, 0.38) 50%, transparent 100%);
+  background-size: 60px 100%; background-repeat: no-repeat; animation: job-sweep 1.3s linear infinite;
+}
+@keyframes job-sweep { from { background-position: -60px 0; } to { background-position: calc(100% + 60px) 0; } }
 @keyframes indet { from { transform: translateX(-100%); } to { transform: translateX(300%); } }
 .job.done .job-bar > div { background: #22c55e; }
 .job-sub { display: flex; justify-content: space-between; gap: 10px; font-size: 11.5px; color: var(--fg-3); }

@@ -127,6 +127,9 @@ function Appearance() {
         <Seg value={settings.density} onChange={(v) => appearance("density", v)}
           options={[{ value: "comfortable", label: "Comfortable" }, { value: "compact", label: "Compact" }]} />
       </Field>
+      <Field label="Animations" hint="Short transitions between previews, folders and tabs. Also off when Windows' animation effects are">
+        <Toggle checked={settings.animations} onChange={(v) => { setSettings("animations", v); persistSettings(); }} />
+      </Field>
     </Card>
   );
 }

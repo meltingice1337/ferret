@@ -159,7 +159,9 @@ fn ms(m: &fs::Metadata) -> Option<i64> {
 }
 
 /// Items in `sources` whose name already exists in `dest` (ignores moving onto itself).
-#[tauri::command]
+// Off the main thread: with thousands of items this can take a moment, and the window
+// must keep answering meanwhile.
+#[tauri::command(async)]
 pub fn check_conflicts(sources: Vec<String>, dest: String) -> Vec<Conflict> {
     let dest = paths::normalize(&dest);
     sources
@@ -337,7 +339,9 @@ fn remove_any(p: &Path) -> std::io::Result<()> {
 }
 
 /// Copy or move `sources` into `dest`. Returns a job id; progress via `job-update`.
-#[tauri::command]
+// Off the main thread: with thousands of items this can take a moment, and the window
+// must keep answering meanwhile.
+#[tauri::command(async)]
 pub fn transfer(app: AppHandle, op: String, sources: Vec<String>, dest: String, policy: Policy) -> Res<u64> {
     let moving = op == "move";
     let dest = paths::normalize(&dest);
@@ -434,7 +438,9 @@ pub fn transfer(app: AppHandle, op: String, sources: Vec<String>, dest: String, 
 }
 
 /// Undo for a move: puts each moved item back where it came from.
-#[tauri::command]
+// Off the main thread: with thousands of items this can take a moment, and the window
+// must keep answering meanwhile.
+#[tauri::command(async)]
 pub fn undo_moves(app: AppHandle, pairs: Vec<(String, String)>) -> Res<u64> {
     if let Some((from, _)) = pairs.iter().take(64).find(|(from, to)| {
         crate::shellops::needs_admin_delete(to) || paths::parent(from).is_some_and(|d| crate::shellops::needs_admin_write(&d))
@@ -477,7 +483,12 @@ pub fn undo_moves(app: AppHandle, pairs: Vec<(String, String)>) -> Res<u64> {
 
 // ---------- delete / restore ----------
 
-#[tauri::command]
+/// Items recycled per Windows operation (one operation per item is slow for thousands).
+const RECYCLE_BATCH: usize = 64;
+
+// Off the main thread: with thousands of items this can take a moment, and the window
+// must keep answering meanwhile.
+#[tauri::command(async)]
 pub fn delete_items(app: AppHandle, items: Vec<String>, permanent: bool) -> Res<u64> {
     if let Some(p) = items.iter().take(256).find(|p| crate::shellops::needs_admin_delete(p)) {
         return Err(admin_err(format!("delete “{}”", file_name(p))));
@@ -490,19 +501,116 @@ pub fn delete_items(app: AppHandle, items: Vec<String>, permanent: bool) -> Res<
     log::info!("{}: {}", if permanent { "delete permanently" } else { "recycle" }, crate::logging::paths(&items));
     Ok(jobs::spawn(&app, if permanent { "delete" } else { "recycle" }, &label, move |ctx| {
         ctx.set_totals(0, items.len() as u64);
-        for p in &items {
+        // Like Explorer: an item that can't go (open in another program, protected) pauses the
+        // job with Try again / Skip / Skip all / Cancel instead of failing the whole job.
+        let mut skip_all = false;
+        let job_start = std::time::Instant::now();
+        let (mut fast_ok, mut fast_failed, mut slowest) = (0usize, 0usize, (std::time::Duration::ZERO, String::new()));
+        for batch in recycle_units(&items, permanent).iter() {
             ctx.check()?;
-            ctx.set_current(&file_name(p));
-            let path = io(p);
-            if permanent {
-                remove_any(&path).map_err(|e| format!("{}: {e}", file_name(p)))?;
-            } else {
-                trash::delete(&path).map_err(|e| explain_delete_failure(&path, &file_name(p), &e.to_string()))?;
+            let started = std::time::Instant::now();
+            // Fast path: a group of files in one Windows operation. It stops at the first item
+            // that can't go; the group is then retried one by one below.
+            if batch.len() > 1 {
+                ctx.set_current(&file_name(&batch[0]));
+                match trash::delete_all(batch.iter().map(|p| io(p))) {
+                    Ok(()) => {
+                        fast_ok += 1;
+                        batch.iter().for_each(|_| ctx.file_done());
+                        if started.elapsed() > SLOW {
+                            log::info!("recycle: {} files from “{}” took {:?}", batch.len(), file_name(&batch[0]), started.elapsed());
+                        }
+                        continue;
+                    }
+                    Err(e) => {
+                        fast_failed += 1;
+                        log::info!("recycle: group of {} from “{}” stopped after {:?} ({e}); one by one", batch.len(), file_name(&batch[0]), started.elapsed());
+                    }
+                }
             }
-            ctx.file_done();
+            for p in batch.iter() {
+                ctx.check()?;
+                let path = io(p);
+                // Already recycled by the batch attempt before it stopped (or gone meanwhile).
+                if fs::symlink_metadata(&path).is_err() {
+                    ctx.file_done();
+                    continue;
+                }
+                ctx.set_current(&file_name(p));
+                let item_start = std::time::Instant::now();
+                loop {
+                    let res = if permanent {
+                        remove_any(&path).map_err(|e| format!("Couldn't delete “{}”: {e}", file_name(p)))
+                    } else {
+                        trash::delete(&path).map_err(|e| explain_delete_failure(&path, &file_name(p), &e.to_string()))
+                    };
+                    let Err(why) = res else { break };
+                    if skip_all {
+                        ctx.failed(p.clone(), why);
+                        break;
+                    }
+                    match ctx.ask(why.clone()).as_str() {
+                        "retry" => continue,
+                        "skip" => ctx.failed(p.clone(), why),
+                        "skipAll" => {
+                            skip_all = true;
+                            ctx.failed(p.clone(), why);
+                        }
+                        _ => {
+                            ctx.mark_cancelled();
+                            return Err("Cancelled".into());
+                        }
+                    }
+                    break;
+                }
+                // Slow items, to see what a long job spent its time on (includes any wait for
+                // the user's answer).
+                let took = item_start.elapsed();
+                if took > SLOW {
+                    log::info!("{}: “{}” took {took:?}", if permanent { "delete" } else { "recycle" }, file_name(p));
+                }
+                if took > slowest.0 {
+                    slowest = (took, file_name(p));
+                }
+                ctx.file_done();
+            }
         }
+        log::info!(
+            "{}: {} items in {:?}; {fast_ok} file groups in one go, {fast_failed} redone one by one; slowest “{}” {:?}",
+            if permanent { "delete" } else { "recycle" }, items.len(), job_start.elapsed(), slowest.1, slowest.0
+        );
         Ok(())
     }))
+}
+
+/// Anything slower than this gets a log line (where did a long delete spend its time?).
+const SLOW: std::time::Duration = std::time::Duration::from_secs(1);
+
+/// The delete job's units of work: files go in groups (one Windows operation each, fast for
+/// thousands), folders one at a time. A folder can take long (Windows goes through everything
+/// inside it), so the progress names it, and one locked folder doesn't send a whole group
+/// down the slow path. Deleting permanently goes item by item.
+fn recycle_units(items: &[String], permanent: bool) -> Vec<Vec<String>> {
+    let mut units: Vec<Vec<String>> = Vec::new();
+    let mut files: Vec<String> = Vec::new();
+    for p in items {
+        let is_dir = fs::symlink_metadata(io(p)).map(|m| m.is_dir()).unwrap_or(false);
+        if permanent || is_dir {
+            if !files.is_empty() {
+                units.push(std::mem::take(&mut files));
+            }
+            units.push(vec![p.clone()]);
+        } else {
+            files.push(p.clone());
+            if files.len() == RECYCLE_BATCH {
+                units.push(std::mem::take(&mut files));
+            }
+        }
+    }
+    if !files.is_empty() {
+        units.push(files);
+    }
+    units
 }
 
 /// Turns the Recycle Bin's vague failures ("Some operations were aborted") into a

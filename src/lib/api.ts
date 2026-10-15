@@ -68,6 +68,8 @@ export const api = {
   /** Version resource and CPU architecture of executables / libraries. */
   fileDetails: (path: string) => invoke<{ version: [string, string][]; arch: string | null }>("file_details", { path }),
   cancelJob: (id: number) => invoke<void>("cancel_job", { id }),
+  /** Answers a job paused on an item it couldn't handle. */
+  answerJob: (id: number, answer: "retry" | "skip" | "skipAll") => invoke<void>("answer_job", { id, answer }),
   dragIcon: (path?: string) => invoke<string>("drag_icon", { path }),
 
   // ---- windows shell ----
@@ -110,7 +112,8 @@ export const api = {
 
   // ---- Recycle Bin & Windows integration ----
   recycleInfo: () => invoke<RecycleInfo>("recycle_info"),
-  emptyRecycleBin: () => invoke<void>("empty_recycle_bin"),
+  /** Starts emptying the Recycle Bin; returns the job id. */
+  emptyRecycleBin: () => invoke<number>("empty_recycle_bin"),
   launchTargets: () => invoke<LaunchTarget[]>("launch_targets"),
   defaultManagerStatus: () => invoke<DefaultManagerStatus>("default_manager_status"),
   setDefaultManager: (enable: boolean) => invoke<DefaultManagerStatus>("set_default_manager", { enable }),

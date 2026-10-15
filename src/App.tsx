@@ -19,7 +19,7 @@ import {
   copyPaths, copyToClipboard, deleteItems, emptyBin, newFile, newFolder, openInVscode, openTerminal, paste, redo, redoLabel,
   startRename, targetsOf, undo, undoLabel,
 } from "./lib/ops";
-import { adminWindow, applyAppearance, elevateWindow, searchTitle, isFavorite, navigate, openNewWindow, persistSettings, places, resetView, setSettings } from "./lib/state";
+import { adminWindow, applyAppearance, elevateWindow, searchTitle, settings, isFavorite, navigate, openNewWindow, persistSettings, places, resetView, setSettings } from "./lib/state";
 import { basename, isRecycle, isSearch, RECYCLE } from "./lib/path";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import {
@@ -122,6 +122,9 @@ export default function App() {
       if (!a || a === document.body) document.querySelector<HTMLElement>(".files")?.focus({ preventScroll: true });
     });
   }));
+
+  // Settings → Animations (the CSS entrances follow it; lib/motion.ts reads the setting itself).
+  createEffect(() => { document.documentElement.dataset.motion = settings.animations === false ? "off" : "on"; });
 
   // Like Explorer, the window (taskbar, Alt+Tab) is named after the folder it shows.
   createEffect(() => {

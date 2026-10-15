@@ -1,4 +1,4 @@
-import { ArchiveRestore, Check, Copy, FileArchive, FilePlus, Minimize2, MoveRight, PackageOpen, Pencil, Trash2, X } from "lucide-solid";
+import { ArchiveRestore, Check, Copy, FileArchive, FilePlus, Minimize2, MoveRight, PackageOpen, Pencil, RotateCw, Trash2, TriangleAlert, X } from "lucide-solid";
 import { For, Show } from "solid-js";
 import { Dynamic } from "solid-js/web";
 import { api } from "../lib/api";
@@ -27,7 +27,7 @@ export function JobsPanel() {
   const timer = setInterval(() => setNow(performance.now()), 250);
   onCleanup(() => clearInterval(timer));
   const list = () => Object.values(jobs)
-    .filter((j) => j.status === "error" || (j.started !== undefined && now() - j.started > 600 && (j.status === "running" || (j.filesTotal > 1 || j.bytesTotal > 8 * 1024 * 1024))))
+    .filter((j) => j.status === "error" || j.status === "waiting" || (j.started !== undefined && now() - j.started > 600 && (j.status === "running" || (j.filesTotal > 1 || j.bytesTotal > 8 * 1024 * 1024))))
     .sort((a, b) => a.id - b.id);
   return (
     <Show when={list().length}>
@@ -41,18 +41,36 @@ export function JobsPanel() {
           {(j) => {
             const pct = () => (j.bytesTotal ? j.bytesDone / j.bytesTotal : j.filesTotal ? j.filesDone / j.filesTotal : j.status === "running" ? -1 : 1);
             return (
-              <div class="job" classList={{ done: j.status === "done", error: j.status === "error", cancelled: j.status === "cancelled" }}>
+              <div class="job" classList={{ running: j.status === "running", done: j.status === "done", error: j.status === "error", cancelled: j.status === "cancelled", waiting: j.status === "waiting" }}>
                 <div class="job-top">
-                  <span class="job-icon"><Dynamic component={j.status === "done" ? Check : ICON[j.kind] ?? Copy} size={14} /></span>
+                  <span class="job-icon"><Dynamic component={j.status === "done" ? Check : j.status === "waiting" ? TriangleAlert : ICON[j.kind] ?? Copy} size={14} /></span>
                   <span class="job-label" title={j.label}>{j.label}</span>
                   <Show when={j.status === "running"}>
                     <button class="icon-btn tiny" title="Cancel" onClick={() => api.cancelJob(j.id)}><X size={12} /></button>
                   </Show>
                 </div>
-                <div class="job-bar"><div classList={{ indet: pct() < 0 }} style={{ width: `${Math.max(0, pct()) * 100}%` }} /></div>
-                <div class="job-sub">
+                {/* Nothing finished yet: the sliding bar says it has started. */}
+                <div class="job-bar"><div classList={{ indet: pct() < 0 || (j.status === "running" && pct() === 0) }} style={{ width: `${Math.max(0, pct()) * 100}%` }} /></div>
+                {/* Paused on an item it can't handle, like Explorer's "File in use" dialog. */}
+                <Show when={j.status === "waiting"}>
+                  <div class="job-ask">
+                    <span class="job-question">{friendly(j.question ?? "")}</span>
+                    <div class="job-ask-actions">
+                      <button class="btn" onClick={() => api.answerJob(j.id, "retry")}><RotateCw size={13} />Try again</button>
+                      <button class="btn" onClick={() => api.answerJob(j.id, "skip")}>Skip</button>
+                      <button class="btn" title="Skip every item that can't be handled, without asking again" onClick={() => api.answerJob(j.id, "skipAll")}>Skip all</button>
+                      <button class="btn warn" onClick={() => api.cancelJob(j.id)}>Cancel</button>
+                    </div>
+                  </div>
+                </Show>
+                <div class="job-sub" style={j.status === "waiting" ? { display: "none" } : undefined}>
                   <Show when={j.status === "running"} fallback={<span>{j.status === "done" ? "Done" : j.status === "cancelled" ? "Cancelled" : friendly(j.error ?? "Failed")}</span>}>
-                    <span class="job-cur" title={j.current}>{j.current || "Preparing…"}</span>
+                    {/* One item taking long (a big folder): say so, so it doesn't look stuck. */}
+                    <span class="job-cur" title={j.current}>
+                      {!j.current ? "Preparing…" : now() - (j.currentSince ?? now()) > 3000
+                        ? (j.kind === "recycle" || j.kind === "delete" ? `Still on “${j.current}”, big folders take a while` : `Still on “${j.current}”…`)
+                        : j.current}
+                    </span>
                     <span>
                       {j.bytesTotal ? `${formatSize(j.bytesDone)} / ${formatSize(j.bytesTotal)}` : j.filesTotal ? `${j.filesDone} / ${j.filesTotal}` : ""}
                       {(j.rate ?? 0) > 0 ? ` · ${formatSize(j.rate!)}/s${eta(j, j.rate!) ? ` · ${eta(j, j.rate!)}` : ""}` : ""}
