@@ -4,3 +4,5 @@ src-tauri/target
 src-tauri/gen
 *.log
 .vite
+dist-e2e
+e2e-artifacts

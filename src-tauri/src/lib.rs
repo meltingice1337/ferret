@@ -61,6 +61,8 @@ pub fn run() {
     // started from one) uses its own WebView2 profile: a profile can't be shared across
     // privilege levels.
     let admin = integration::admin_mode();
+    // Debug builds only: the end-to-end tests start Ferret with FERRET_E2E=1.
+    let e2e = cfg!(debug_assertions) && std::env::var_os("FERRET_E2E").is_some();
     if admin {
         if let Some(dir) = dirs::data_local_dir() {
             unsafe { std::env::set_var("WEBVIEW2_USER_DATA_FOLDER", dir.join(&id).join("EBWebView-admin")) };
@@ -107,8 +109,22 @@ pub fn run() {
                     let _ = window.set_title(title);
                 }
                 integration::apply_placement(&window);
-                let _ = window.show();
-                let _ = window.set_focus();
+                if e2e {
+                    // End-to-end test run (scripts/e2e): a real, rendering window, but off-screen,
+                    // out of the taskbar and never activated, so it doesn't disturb the desktop.
+                    let _ = window.set_skip_taskbar(true);
+                    let _ = window.set_position(tauri::PhysicalPosition::new(-32000, -32000));
+                    #[cfg(windows)]
+                    if let Ok(hwnd) = window.hwnd() {
+                        use windows::Win32::UI::WindowsAndMessaging::{ShowWindow, SW_SHOWNOACTIVATE};
+                        unsafe {
+                            let _ = ShowWindow(windows::Win32::Foundation::HWND(hwnd.0 as *mut _), SW_SHOWNOACTIVATE);
+                        }
+                    }
+                } else {
+                    let _ = window.show();
+                    let _ = window.set_focus();
+                }
             }
             if !admin {
                 integration::refresh_registration(&app.state::<AppState>());

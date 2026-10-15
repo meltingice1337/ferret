@@ -5,6 +5,7 @@ import "./features.css";
 import "./media.css";
 import App from "./App";
 import { installErrorHandlers } from "./lib/log";
+import "./lib/testhooks";
 
 installErrorHandlers();
 

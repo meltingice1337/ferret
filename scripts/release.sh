@@ -7,9 +7,10 @@
 #   scripts/release.sh --bump patch        no questions
 #   scripts/release.sh --version 1.0.0     exact version
 #   options: --notes "text" (replaces the commit list), --draft, --dry-run (show the plan, change nothing),
-#            --skip-checks (emergencies only)
+#            --skip-e2e (skip the end-to-end run), --skip-checks (emergencies only)
 #
-# Once the version is picked it type-checks the frontend and runs the Rust tests; a failure stops it.
+# Once the version is picked it type-checks the frontend and runs the unit tests, the Rust tests and
+# the end-to-end tests (an off-screen test copy of the app); a failure stops it.
 # Release notes are the commit subjects since the previous tag, plus a compare link. The updater
 # feed (latest.json) also lists every previous release's notes, for copies that skipped versions.
 # Needs: a clean working tree, `gh` logged in, and the updater signing key at
@@ -19,10 +20,11 @@ set -euo pipefail
 repo="meltingice1337/ferret"
 cd "$(dirname "$0")/.."
 
-bump="" version="" notes="" draft=0 dry=0 skip=0
+bump="" version="" notes="" draft=0 dry=0 skip=0 skip_e2e=0
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --skip-checks) skip=1; shift ;;
+    --skip-e2e) skip_e2e=1; shift ;;
     --bump) bump="${2:-}"; shift 2 ;;
     --version) version="${2:-}"; shift 2 ;;
     --notes) notes="${2:-}"; shift 2 ;;
@@ -120,8 +122,16 @@ if [[ $skip -eq 1 ]]; then
 else
   step "Type-checking the frontend (tsc)"
   npx tsc --noEmit -p . || fail "type check failed (fix it, or use --skip-checks)"
+  step "Running the unit tests (vitest)"
+  npm test --silent || fail "unit tests failed (fix them, or use --skip-checks)"
   step "Running the Rust tests (cargo test)"
   (cd src-tauri && cargo test --release --quiet) || fail "tests failed (fix them, or use --skip-checks)"
+  if [[ $skip_e2e -eq 1 ]]; then
+    echo "${dim}Skipping the end-to-end tests (--skip-e2e).${reset}"
+  else
+    step "Running the end-to-end tests"
+    npm run test:e2e --silent || fail "end-to-end tests failed (see e2e-artifacts/; fix them, or use --skip-e2e)"
+  fi
   echo "${green}Checks passed.${reset}"
 fi
 

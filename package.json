@@ -9,7 +9,10 @@
     "build": "vite build",
     "serve": "vite preview",
     "tauri": "tauri",
-    "app:dev": "tauri dev --config src-tauri/tauri.dev.conf.json"
+    "app:dev": "tauri dev --config src-tauri/tauri.dev.conf.json",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "test:e2e": "node scripts/e2e/run.mjs"
   },
   "license": "MIT",
   "dependencies": {
@@ -33,6 +36,7 @@
     "playwright-core": "^1.64.0",
     "typescript": "~6.0.3",
     "vite": "^8.0.16",
-    "vite-plugin-solid": "^2.11.12"
+    "vite-plugin-solid": "^2.11.12",
+    "vitest": "^4.1.11"
   }
 }
