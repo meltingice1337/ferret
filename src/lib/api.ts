@@ -1,4 +1,5 @@
 import { convertFileSrc, invoke as rawInvoke, type InvokeArgs } from "@tauri-apps/api/core";
+import { createStore } from "solid-js/store";
 import { logCommandFailure } from "./log";
 import type {
   ArchiveInfo, Bootstrap, ClipboardFiles, Conflict, DefaultManagerStatus, DirListing, Favorite, FolderSize, FolderView, ImageInfo,
@@ -127,9 +128,25 @@ export const api = {
   openLogFolder: () => invoke<void>("open_log_folder"),
 };
 
+/** Each shown file's version (modified time + size). File and thumbnail URLs carry it, so a
+ *  file edited in place loads again everywhere it's shown instead of from the webview's
+ *  cache. Reactive: a picture already on screen swaps to the new version by itself. */
+const [versions, setVersions] = createStore<Record<string, string>>({});
+export function noteVersion(path: string, modified: number | null | undefined, size: number) {
+  const k = path.toLowerCase();
+  const v = `${modified ?? 0}-${size}`;
+  if (versions[k] !== v) setVersions(k, v);
+}
+const versionOf = (path: string) => versions[path.toLowerCase()];
+
 /** URL that streams a local file into <img>/<video>/<iframe> (Range-capable). */
-export const fileUrl = (path: string) => convertFileSrc(path, "fs");
+export const fileUrl = (path: string) => {
+  const v = versionOf(path);
+  return convertFileSrc(path, "fs") + (v ? `?v=${v}` : "");
+};
 
 /** Shell thumbnail (or icon) PNG for any path. */
-export const thumbUrl = (path: string, size: number, iconOnly = false) =>
-  `${convertFileSrc(path, "thumb")}?s=${size}${iconOnly ? "&icon=1" : ""}`;
+export const thumbUrl = (path: string, size: number, iconOnly = false) => {
+  const v = versionOf(path);
+  return `${convertFileSrc(path, "thumb")}?s=${size}${iconOnly ? "&icon=1" : ""}${v ? `&v=${v}` : ""}`;
+};

@@ -13,6 +13,18 @@ function loadPdfjs() {
   return pdfjs;
 }
 
+/** pdf.js's own decoders and data, served with the app (vite.config.ts copies them):
+ *  WebAssembly image decoders (JBIG2 scans, JPEG 2000), color profiles, the standard
+ *  fonts and CJK character maps. Without them those images and fonts are skipped. */
+const asset = (dir: string) => new URL(`/pdfjs/${dir}/`, location.href).href;
+const PDF_ASSETS = {
+  wasmUrl: asset("wasm"),
+  iccUrl: asset("iccs"),
+  standardFontDataUrl: asset("standard_fonts"),
+  cMapUrl: asset("cmaps"),
+  cMapPacked: true,
+};
+
 const MAX_PAGES = 200;
 
 export default function PdfPages(props: { path: string; setMeta: SetMeta; large?: boolean }) {
@@ -28,7 +40,7 @@ export default function PdfPages(props: { path: string; setMeta: SetMeta; large?
     setError(null);
     loadPdfjs().then((lib) => {
       if (cancelled) return;
-      task = lib.getDocument({ url: fileUrl(path), disableAutoFetch: true });
+      task = lib.getDocument({ url: fileUrl(path), disableAutoFetch: true, ...PDF_ASSETS });
       task.promise.then((d: any) => {
         if (cancelled) return task?.destroy?.();
         setDoc(d);
@@ -109,7 +121,7 @@ export function PdfThumb(props: { path: string; size: number; fallback: JSX.Elem
       try {
         if (cancelled) return;
         const lib = await loadPdfjs();
-        const task = lib.getDocument({ url: fileUrl(props.path), disableAutoFetch: true });
+        const task = lib.getDocument({ url: fileUrl(props.path), disableAutoFetch: true, ...PDF_ASSETS });
         const doc = await task.promise;
         const page = await doc.getPage(1);
         const base = page.getViewport({ scale: 1 });

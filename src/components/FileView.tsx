@@ -1,18 +1,19 @@
-import { ArchiveRestore, ArrowDown, ArrowUp, ChevronDown, ChevronRight, LoaderCircle, Play, Trash2 } from "lucide-solid";
-import { batch, createEffect, createMemo, createResource, createSignal, For, Match, on, onCleanup, onMount, Show, Switch, untrack } from "solid-js";
+import { ArchiveRestore, ArrowDown, ArrowUp, ChevronDown, ChevronRight, LoaderCircle, Pencil, Play, Search, Star, Trash2 } from "lucide-solid";
+import { batch, createComputed, createEffect, createMemo, createResource, createSignal, For, Match, on, onCleanup, onMount, Show, Switch, untrack } from "solid-js";
 import { Portal } from "solid-js/web";
 import FileIcon from "./FileIcon";
 import { PdfThumb } from "./preview/PdfPages";
 import { addShellEntries, backgroundMenu, fromKeyboard, itemMenu, openKeyboardMenu } from "./menus";
-import { api, fileUrl, thumbUrl } from "../lib/api";
+import { api, fileUrl, noteVersion, thumbUrl } from "../lib/api";
 import { beginDrag } from "../lib/drag";
 import { formatDate, formatSize, kindOf, plural, timeAgo, typeLabel } from "../lib/format";
 import { emptyBin, isCut, newFolder, renamePath, restoreFromBin, targetsOf, visibleEntries } from "../lib/ops";
 import { groupEntries, sortEntries, type Group } from "../lib/sortgroup";
 import { entryFilter } from "../lib/filter";
-import { isRecycle, pathKey } from "../lib/path";
+import { isRecycle, isSearch, pathKey, searchQuery } from "../lib/path";
+import { openSearchPalette } from "./SearchPalette";
 import { folderSizes, requestFolderSizes, sizesApply, sizesEpoch, uncounted } from "../lib/foldersizes";
-import { ask, goUp, holdKeys, openEntry, openMenu, persistSettings, releaseKeys, reload, setSettings, setUi, settings, sortBy, takeTypeAhead, toast, ui, updateView, type Tab } from "../lib/state";
+import { ask, goUp, holdKeys, promptSaveSearch, savedSearch, openEntry, openMenu, persistSettings, releaseKeys, reload, setSettings, setUi, settings, sortBy, takeTypeAhead, toast, ui, updateView, type Tab } from "../lib/state";
 import type { Entry, ListColumn, SortBy } from "../lib/types";
 
 export { GROUP_LABELS, SORT_LABELS } from "./menus";
@@ -46,6 +47,8 @@ export function useThumbPath(entry: () => Entry) {
 }
 
 export function Thumb(props: { entry: Entry; size: number; fallbackSize?: number }) {
+  // An edited file gets a new thumbnail (its URL carries the version).
+  createComputed(() => !props.entry.isDir && !props.entry.inArchive && noteVersion(props.entry.path, props.entry.modified, props.entry.size));
   const [failed, setFailed] = createSignal(false);
   const kind = () => kindOf(props.entry);
   // Windows has no SVG thumbnailer; browser-native formats can fall back to the file itself.
@@ -101,6 +104,8 @@ export default function FileView(props: { tab: Tab }) {
   const view = () => t.view[0]();
   /** Showing the Recycle Bin: items can only be previewed, restored or deleted. */
   const bin = () => isRecycle(t.p);
+  /** A search opened as a tab: results from all over, each with the folder it's in. */
+  const found = () => isSearch(t.p);
   const [width, setWidth] = createSignal(800);
   const [height, setHeight] = createSignal(600);
   /** Scrollbar width (0 when the list doesn't scroll): column headings leave the same room. */
@@ -515,7 +520,7 @@ export default function FileView(props: { tab: Tab }) {
   // Columns drop out as the list narrows (Type first, then Modified), or when the user hides
   // them (right-click the headings). Widths come from dragging the lines between headings.
   const hiddenCol = (k: ListColumn) => settings.hiddenColumns.includes(k);
-  const showOrigin = () => bin() && width() >= 600;
+  const showOrigin = () => (bin() || found()) && width() >= 600;
   const showType = () => !bin() && width() >= 600 && !hiddenCol("type");
   const showDate = () => width() >= 430 && !hiddenCol("modified");
   const showSize = () => !hiddenCol("size");
@@ -593,11 +598,12 @@ export default function FileView(props: { tab: Tab }) {
   return (
     <div class="fileview" classList={{ grid: view().mode === "grid", bin: bin() }}>
       <Show when={bin()}><BinBar tab={t} /></Show>
+      <Show when={found()}><SearchBar tab={t} /></Show>
       <Show when={view().mode === "list"}>
         <div class="colheads" style={{ "grid-template-columns": columns(), "padding-right": `${10 + gutter()}px` }}
           onContextMenu={headingsMenu}>
           <ColHead tab={t} k="name" label="Name" />
-          <Show when={showOrigin()}><span class="colhead static">Original location</span></Show>
+          <Show when={showOrigin()}><span class="colhead static">{bin() ? "Original location" : "Folder"}</span></Show>
           <Show when={showDate()}>
             <ColHead tab={t} k="modified" label={bin() ? "Date deleted" : "Modified"} grip={(e) => resizeColumn(e, "modified")} onReset={resetColumns} />
           </Show>
@@ -609,7 +615,7 @@ export default function FileView(props: { tab: Tab }) {
         class="files"
         ref={scroller}
         tabIndex={0}
-        data-drop={t.p.match(/\.(zip|7z|rar|tar|gz|xz|zst|bz2|tgz|jar)(\\|$)/i) ? undefined : t.p}
+        data-drop={found() || t.p.match(/\.(zip|7z|rar|tar|gz|xz|zst|bz2|tgz|jar)(\\|$)/i) ? undefined : t.p}
         onScroll={() => setScrollTop(scroller.scrollTop)}
         onKeyDown={onKeyDown}
         onMouseDown={(e) => {
@@ -658,7 +664,11 @@ export default function FileView(props: { tab: Tab }) {
                           <RenameInput tab={t} entry={e()} />
                         </Show>
                       </span>
-                      <Show when={showOrigin()}><span class="c-type c-origin" title={e().origin}>{e().origin}</span></Show>
+                      <Show when={showOrigin()}>
+                        {/* Search results cut the path from the left, keeping the folder names that tell them apart
+                            (the left-to-right marks keep "C:\a\b" from reading "a\b\C:" in the right-to-left box). */}
+                        <span class="c-type c-origin" classList={{ tail: found() }} title={e().origin}>{found() ? `‎${e().origin}‎` : e().origin}</span>
+                      </Show>
                       <Show when={showDate()}><span class="c-date">{formatDate(e().modified)}</span></Show>
                       <Show when={showType()}><span class="c-type">{typeLabel(e())}</span></Show>
                       <Show when={showSize()}>
@@ -683,7 +693,7 @@ export default function FileView(props: { tab: Tab }) {
                           onClick={(ev) => onItemClick(ev, e)}
                           onDblClick={() => settings.doubleClickOpen && t.renaming[0]() !== e.path && openEntry(t, e)}
                           onContextMenu={(ev) => onItemMenu(ev, e)}
-                          title={bin() ? `${e.name}\nFrom ${e.origin}\nDeleted ${formatDate(e.modified)} · ${formatSize(e.size)}` : `${e.name}\n${typeLabel(e)}${e.isDir ? (folderSizes[pathKey(e.path)]?.done ? ` · ${formatSize(folderSizes[pathKey(e.path)].bytes)}` : "") : ` · ${formatSize(e.size)}`}\n${formatDate(e.modified)}`}
+                          title={found() ? `${e.name}\nIn ${e.origin}\n${formatDate(e.modified)}` : bin() ? `${e.name}\nFrom ${e.origin}\nDeleted ${formatDate(e.modified)} · ${formatSize(e.size)}` : `${e.name}\n${typeLabel(e)}${e.isDir ? (folderSizes[pathKey(e.path)]?.done ? ` · ${formatSize(folderSizes[pathKey(e.path)].bytes)}` : "") : ` · ${formatSize(e.size)}`}\n${formatDate(e.modified)}`}
                         >
                           <div class="cell-icon" style={{ height: `${view().iconSize}px` }}>
                             <Thumb entry={e} size={view().iconSize} />
@@ -716,7 +726,7 @@ export default function FileView(props: { tab: Tab }) {
         </div>
         <Show when={!t.loading[0]() && ordered().length === 0 && rows().length === 0}>
           <div class="files-empty">
-            {t.filter[0]() ? `Nothing here matches “${t.filter[0]()}”` : t.entries[0]().length ? "Only hidden items here. Press Ctrl+H to show them." : bin() ? "The Recycle Bin is empty" : "This folder is empty"}
+            {t.filter[0]() ? `Nothing here matches “${t.filter[0]()}”` : t.entries[0]().length ? "Only hidden items here. Press Ctrl+H to show them." : bin() ? "The Recycle Bin is empty" : found() ? "Nothing matches this search right now" : "This folder is empty"}
           </div>
         </Show>
       </div>
@@ -873,6 +883,28 @@ function BinBar(props: { tab: Tab }) {
         <ArchiveRestore size={14} />{selected().length ? `Restore ${plural(selected().length, "item")}` : "Restore all"}
       </button>
       <button class="btn warn" disabled={!all().length} onClick={() => emptyBin()}><Trash2 size={14} />Empty Recycle Bin</button>
+    </div>
+  );
+}
+
+/** Most results a search tab lists (the backend's limit). */
+const SEARCH_TAB_LIMIT = 2000;
+
+function SearchBar(props: { tab: Tab }) {
+  const t = props.tab;
+  const q = () => searchQuery(t.p);
+  const n = () => t.entries[0]().length;
+  const saved = () => savedSearch(q());
+  return (
+    <div class="bin-bar search-bar">
+      <Search size={15} />
+      <span class="bin-count">{t.loading[0]() ? "Searching…" : n() >= SEARCH_TAB_LIMIT ? `First ${SEARCH_TAB_LIMIT.toLocaleString()} matches` : n() === 1 ? "1 match" : `${n().toLocaleString()} matches`}</span>
+      <code class="search-bar-query" title={q()}>{q()}</code>
+      <span class="bin-hint">Always current · F5 searches again</span>
+      <button class="btn" onClick={() => openSearchPalette(q())}><Pencil size={14} />Edit search</button>
+      <button class="btn" onClick={() => promptSaveSearch(q())}>
+        <Star size={14} fill={saved() ? "currentColor" : "none"} />{saved() ? "Rename" : "Save to sidebar"}
+      </button>
     </div>
   );
 }

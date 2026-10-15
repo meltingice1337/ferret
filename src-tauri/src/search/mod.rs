@@ -245,6 +245,30 @@ pub async fn search_query(
     tauri::async_runtime::spawn_blocking(move || run_query(req)).await.map_err(|e| e.to_string())
 }
 
+/// A search opened as a tab: the virtual folder `search:<query>` (saved searches in the
+/// sidebar, "Open results in a tab" in Ctrl+K). Lists like a folder, always current.
+pub const SEARCH_PREFIX: &str = "search:";
+/// Most results a search tab lists.
+const TAB_LIMIT: u32 = 2_000;
+
+pub fn search_query_of(path: &str) -> Option<&str> {
+    path.get(..SEARCH_PREFIX.len()).filter(|p| p.eq_ignore_ascii_case(SEARCH_PREFIX)).map(|_| path[SEARCH_PREFIX.len()..].trim())
+}
+
+/// The matches of `query` as folder entries, each with the folder it's in as `origin`.
+/// Items that vanished since they were indexed are left out.
+pub fn list_matches(query: &str) -> Vec<crate::listing::Entry> {
+    let req = SearchRequest { query: filetypes::expand(query), limit: TAB_LIMIT, scope: None, frecency: None };
+    let hits = run_query(req).results;
+    hits.par_iter()
+        .filter_map(|h| {
+            let mut e = crate::listing::entry_for(&h.path)?;
+            e.origin = std::path::Path::new(&h.path).parent().map(|p| p.to_string_lossy().into_owned());
+            Some(e)
+        })
+        .collect()
+}
+
 #[tauri::command]
 pub async fn search_status() -> Result<SearchStatus, String> {
     tauri::async_runtime::spawn_blocking(status).await.map_err(|e| e.to_string())

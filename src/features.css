@@ -431,11 +431,18 @@ body.reordering, body.reordering * { cursor: grabbing !important; }
 }
 .bin-count { font-weight: 600; color: var(--fg); white-space: nowrap; }
 .bin-hint { flex: 1; min-width: 0; color: var(--fg-3); font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* A search tab: what it searches for, beside the match count. */
+.search-bar-query {
+  min-width: 0; max-width: 40%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  font-family: var(--mono); font-size: 12px; padding: 2px 7px; border-radius: 6px;
+  background: color-mix(in oklab, var(--accent) 16%, transparent); color: var(--fg);
+}
 .btn.warn { color: #f87171; }
 .btn.warn:hover:not(:disabled) { background: #dc2626; color: #fff; }
 .colhead.static { cursor: default; }
 .colhead.static:hover { background: none; color: var(--fg-3); }
 .c-origin { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.c-origin.tail { direction: rtl; text-align: left; }
 
 /* ---------- administrator prompt ---------- */
 .ask-msg.shield { display: flex; gap: 12px; align-items: flex-start; }

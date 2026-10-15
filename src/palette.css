@@ -90,6 +90,19 @@
 .palette-suggest-label { color: var(--fg); }
 .palette-suggest-exts { flex: 1; min-width: 0; font-size: 12px; color: var(--fg-3); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .palette-suggest kbd { min-width: 0; }
+/* Empty box: saved and recent searches. */
+.palette-heading {
+  padding: 10px 14px 4px; font-size: 11px; font-weight: 600; letter-spacing: 0.04em;
+  text-transform: uppercase; color: var(--fg-3);
+}
+.palette-suggest-main .palette-suggest-label + code { margin-left: 8px; }
+.palette-suggest .palette-recent-query { background: none; padding: 0; color: var(--fg); }
+.palette-suggest-act {
+  flex: none; display: grid; place-items: center; width: 24px; height: 24px; border-radius: 6px;
+  color: var(--fg-3); opacity: 0; transition: opacity 0.1s;
+}
+.palette-suggest:hover .palette-suggest-act, .palette-suggest.active .palette-suggest-act { opacity: 1; }
+.palette-suggest-act:hover { background: var(--hover); color: var(--fg); }
 
 /* "?": every type and filter. */
 .palette-help { display: grid; grid-template-columns: minmax(0, 1.2fr) minmax(0, 1fr); gap: 0 16px; padding: 2px 4px 8px; }

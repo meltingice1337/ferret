@@ -138,6 +138,9 @@ pub fn default_settings() -> Value {
         "restoreSession": true,
         "hiddenPlaces": [],
         "hiddenSections": [],
+        // Ctrl+K: queries used recently (newest first) and the ones saved to the sidebar.
+        "searchHistory": [],
+        "savedSearches": [],
         "globalView": default_view(),
         "profiles": {
             "media":     { "enabled": true, "view": { "mode": "grid", "sortBy": "modified", "sortDir": "desc", "groupBy": "date" } },

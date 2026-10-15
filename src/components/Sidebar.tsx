@@ -1,12 +1,13 @@
 import {
   ChevronDown, Clock, Download, EyeOff, FileText, FolderOpen, HardDrive, House, Image, Monitor, Music, Pencil,
-  Inbox, Settings as SettingsIcon, SlidersHorizontal, Star, Terminal, Trash2, Usb, Video, X,
+  Inbox, Search, Settings as SettingsIcon, SlidersHorizontal, Star, Terminal, Trash2, Usb, Video, X,
 } from "lucide-solid";
+import { openSearchPalette } from "./SearchPalette";
 import { createEffect, createSignal, For, type JSX, onCleanup, Show } from "solid-js";
 import { Dynamic } from "solid-js/web";
 import { api } from "../lib/api";
 import { formatSize } from "../lib/format";
-import { basename, isRecycle, isWithin, parent, RECYCLE, samePath } from "../lib/path";
+import { basename, isRecycle, isSearch, isWithin, parent, RECYCLE, samePath, searchPath, searchQuery } from "../lib/path";
 
 /** Folder names that say little on their own (build output, sources, assets…). */
 const GENERIC_NAMES = new Set([
@@ -14,8 +15,8 @@ const GENERIC_NAMES = new Set([
   "assets", "public", "static", "data", "temp", "tmp", "config", "scripts", "images", "img", "node_modules", "app", "packages",
 ]);
 import {
-  activeTab, favorites, goTo, openMenu, persistSession, persistSettings, places, recents,
-  removeFromShelf, setFavorites, setRecents, setSettings, settings, setUi, SHELF, ui, type MenuItem,
+  activeTab, favorites, goTo, navigate, newTab, openMenu, persistSession, persistSettings, places, promptSaveSearch, recents,
+  removeFromShelf, removeSavedSearch, setFavorites, setRecents, setSettings, settings, setUi, SHELF, ui, type MenuItem,
 } from "../lib/state";
 import FileIcon from "./FileIcon";
 import { binPlaceMenu, placeMenu } from "./menus";
@@ -29,7 +30,7 @@ const KNOWN_ICONS: Record<string, any> = {
 
 /** Sidebar sections that can be hidden (Settings → Sidebar). */
 export const SECTIONS = [
-  { id: "favorites", name: "Favorites" }, { id: "places", name: "Places" }, { id: "linux", name: "Linux (WSL)" },
+  { id: "favorites", name: "Favorites" }, { id: "searches", name: "Saved searches" }, { id: "places", name: "Places" }, { id: "linux", name: "Linux (WSL)" },
   { id: "drives", name: "Drives" }, { id: "recents", name: "Recent" }, { id: "dropzone", name: "Dropzone" },
 ];
 
@@ -91,6 +92,38 @@ export default function Sidebar(props: { overlay?: boolean }) {
             <FavoriteList current={current()} />
           </Show>
         </Section>
+
+        <Show when={settings.savedSearches.length}>
+          <Section id="searches" title="Searches">
+            <For each={settings.savedSearches}>
+              {(s) => {
+                const path = () => searchPath(s.query);
+                const open = (inNewTab = false) => (inNewTab ? newTab(path(), false) : navigate(activeTab(), path()));
+                return (
+                  <button class="side-item" classList={{ active: isSearch(current()) && searchQuery(current()).toLowerCase() === s.query.toLowerCase() }}
+                    title={`${s.name}\n${s.query}\nAlways lists the current matches`}
+                    onClick={() => open()}
+                    onMouseDown={(e) => e.button === 1 && (e.preventDefault(), open(true))}
+                    onContextMenu={(e) => {
+                      e.preventDefault();
+                      openMenu(e.clientX, e.clientY, [
+                        { label: "Open", icon: Search, action: () => open() },
+                        { label: "Open in new tab", icon: FolderOpen, action: () => open(true) },
+                        { separator: true },
+                        { label: "Edit search…", icon: Pencil, action: () => openSearchPalette(s.query) },
+                        { label: "Rename…", icon: Pencil, action: () => promptSaveSearch(s.query) },
+                        { label: "Remove from sidebar", icon: X, action: () => removeSavedSearch(s.query) },
+                      ]);
+                    }}>
+                    <Search size={15} />
+                    <span class="side-label">{s.name}</span>
+                    <span class="side-x" title="Remove from sidebar" onClick={(e) => { e.stopPropagation(); removeSavedSearch(s.query); }}><X size={12} /></span>
+                  </button>
+                );
+              }}
+            </For>
+          </Section>
+        </Show>
 
         <Section id="places" title="Places">
           <For each={places().known.filter((k) => placeShown(k.id))}>

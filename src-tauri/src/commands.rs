@@ -93,6 +93,13 @@ pub async fn list_dir(state: State<'_, AppState>, path: String) -> Res<DirListin
         })?;
         return Ok(DirListing { path: recycle::PATH.into(), entries, resolved });
     }
+    if let Some(query) = crate::search::search_query_of(&path).map(str::to_string) {
+        let q = query.clone();
+        let entries = tauri::async_runtime::spawn_blocking(move || crate::search::list_matches(&q)).await.map_err(err)?;
+        let path = format!("{}{query}", crate::search::SEARCH_PREFIX);
+        let resolved = with_db(&state, |c| Ok(db::resolve_view(c, &db::load_settings(c), &path, None)))?;
+        return Ok(DirListing { path, entries, resolved });
+    }
     // Long form so 8.3 aliases (MELTIN~1) share remembered views/recents with the real path.
     let path = paths::long_form(&path);
     let p = path.clone();
@@ -130,6 +137,9 @@ pub async fn resolve_input(input: String, current: Option<String>) -> Res<Resolv
         let mut s = input.trim().trim_matches('"').to_string();
         if recycle::is_recycle(&s) {
             return Ok(ResolvedInput { path: recycle::PATH.into(), kind: "dir" });
+        }
+        if let Some(q) = crate::search::search_query_of(&s) {
+            return Ok(ResolvedInput { path: format!("{}{q}", crate::search::SEARCH_PREFIX), kind: "dir" });
         }
         if s == "~" || s.starts_with("~/") || s.starts_with("~\\") {
             let home = dirs::home_dir().map(|h| h.to_string_lossy().into_owned()).unwrap_or_default();

@@ -41,6 +41,32 @@ fn hidden_attr(_m: &fs::Metadata) -> bool {
     false
 }
 
+/// One file or folder by its full path (search results list like a folder's contents).
+pub fn entry_for(path: &str) -> Option<Entry> {
+    let meta = fs::symlink_metadata(paths::for_io(path)).ok()?;
+    let is_symlink = meta.file_type().is_symlink();
+    let is_dir = if is_symlink { fs::metadata(paths::for_io(path)).map(|m| m.is_dir()).unwrap_or(false) } else { meta.is_dir() };
+    let name = std::path::Path::new(path).file_name()?.to_string_lossy().into_owned();
+    let ext = if is_dir {
+        String::new()
+    } else {
+        name.rsplit_once('.').filter(|(stem, _)| !stem.is_empty()).map(|(_, e)| e.to_lowercase()).unwrap_or_default()
+    };
+    Some(Entry {
+        hidden: hidden_attr(&meta) || (paths::is_wsl(path) && name.starts_with('.')),
+        path: path.to_string(),
+        size: if is_dir { 0 } else { meta.len() },
+        modified: ms(meta.modified()),
+        created: ms(meta.created()),
+        name,
+        is_dir,
+        is_symlink,
+        ext,
+        in_archive: false,
+        origin: None,
+    })
+}
+
 pub fn list(dir: &str) -> Result<Vec<Entry>, String> {
     let wsl = paths::is_wsl(dir);
     let rd = fs::read_dir(paths::for_io(dir)).map_err(|e| e.to_string())?;

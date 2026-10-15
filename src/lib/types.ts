@@ -168,8 +168,17 @@ export interface Settings {
   hiddenColumns: ListColumn[];
   /** Count folder sizes in the background and show them in the Size column. */
   folderSizes: boolean;
+  /** Ctrl+K queries that led somewhere, newest first. */
+  searchHistory: string[];
+  /** Searches pinned to the sidebar; each opens as a tab of its current matches. */
+  savedSearches: SavedSearch[];
   globalView: ViewSettings;
   profiles: Record<ProfileName, { enabled: boolean; view: Partial<ViewSettings> }>;
+}
+
+export interface SavedSearch {
+  name: string;
+  query: string;
 }
 
 export interface Favorite {

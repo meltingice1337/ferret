@@ -10,6 +10,14 @@ export const isRecycle = (p?: string | null) => !!p && p.toLowerCase() === RECYC
 /** Real file inside the Recycle Bin (C:\$Recycle.Bin\<SID>\$R…). */
 export const inRecycleBin = (p: string) => /^[a-z]:\\\$recycle\.bin\\/i.test(p);
 
+/** A search opened as a tab (`search:ext:pdf modified:<30d`): lists its matches like a folder. */
+export const SEARCH = "search:";
+export const isSearch = (p?: string | null) => !!p && p.slice(0, SEARCH.length).toLowerCase() === SEARCH;
+export const searchQuery = (p: string) => p.slice(SEARCH.length).trim();
+export const searchPath = (query: string) => SEARCH + query.trim();
+/** Not a real folder: nothing can be created, pasted or dropped into it. */
+export const isVirtual = (p?: string | null) => isRecycle(p) || isSearch(p);
+
 export const samePath = (a?: string | null, b?: string | null) =>
   !!a && !!b && pathKey(a) === pathKey(b);
 
@@ -21,6 +29,7 @@ export interface Segment {
 export function segments(p: string): Segment[] {
   const out: Segment[] = [];
   if (isRecycle(p)) return [{ label: "Recycle Bin", path: RECYCLE }];
+  if (isSearch(p)) return [{ label: `“${searchQuery(p)}”`, path: p }];
   if (p.startsWith("\\\\")) {
     const parts = p.slice(2).split("\\").filter(Boolean);
     if (parts.length < 2) return [{ label: p, path: p }];

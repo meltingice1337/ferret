@@ -9,7 +9,7 @@ import { api } from "./api";
 import { entryFilter } from "./filter";
 import { invalidateFolderSizes } from "./foldersizes";
 import { plural } from "./format";
-import { basename, inRecycleBin, isRecycle, isWithin, parent, pathKey, samePath } from "./path";
+import { basename, inRecycleBin, isRecycle, isSearch, isWithin, parent, pathKey, samePath } from "./path";
 import {
   activeTab, ask, ASK_ALT, beginTypeAhead, elevateWindow, friendly, navigate, places, refreshRecycleInfo, reload, setUi, tabs,
   toast, ui, type Tab,
@@ -318,8 +318,12 @@ export async function copyToClipboard(paths: string[], cut: boolean) {
   }
 }
 
+/** A search tab lists files from many folders: nothing goes "into" it. */
+const SEARCH_TAB_NOTE = "Search results aren't a folder. Open a folder to add items to it";
+
 export async function paste(dest: string) {
   if (isRecycle(dest)) return toast("To delete files, drop them on the Recycle Bin or press Delete", "error");
+  if (isSearch(dest)) return toast(SEARCH_TAB_NOTE, "error");
   let clip;
   try {
     await clipboardWrite;
@@ -346,6 +350,7 @@ function askConflict(conflicts: import("./types").Conflict[], op: "copy" | "move
 export async function transferTo(op: "copy" | "move", sources: string[], dest: string): Promise<void> {
   // Dropping onto the Recycle Bin deletes.
   if (isRecycle(dest)) return deleteItems(sources, false);
+  if (isSearch(dest)) return toast(SEARCH_TAB_NOTE, "error");
   touch(dest, ...(op === "move" ? sources : []));
   if (binGuard(sources, op === "move" ? "moved" : "copied")) return;
   sources = sources.filter((s) => !(op === "move" && samePath(parent(s), dest)));
@@ -532,6 +537,7 @@ export function startRename(t: Tab) {
 export async function newFolder(t: Tab) {
   if (inArchive([t.p + "\\"])) return toast("Can't create items inside an archive", "error");
   if (isRecycle(t.p)) return toast("Can't create items in the Recycle Bin", "error");
+  if (isSearch(t.p)) return toast(SEARCH_TAB_NOTE, "error");
   beginTypeAhead();
   try {
     const p = await tracked(withAdmin(
@@ -554,6 +560,7 @@ export const NEW_FILE_TYPES = [
 
 export async function newFile(t: Tab, name: string, content?: string) {
   if (isRecycle(t.p)) return toast("Can't create items in the Recycle Bin", "error");
+  if (isSearch(t.p)) return toast(SEARCH_TAB_NOTE, "error");
   touch(t.p);
   beginTypeAhead();
   try {

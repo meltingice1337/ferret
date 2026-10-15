@@ -1,12 +1,12 @@
 import { getCurrentWindow } from "@tauri-apps/api/window";
-import { ChevronDown, Copy, Minus, Plus, ShieldAlert, Square, Trash2, X } from "lucide-solid";
+import { ChevronDown, Copy, Minus, Plus, Search, ShieldAlert, Square, Trash2, X } from "lucide-solid";
 import { createEffect, createSignal, For, on, onCleanup, onMount, Show } from "solid-js";
 import FileIcon from "./FileIcon";
 import { placeMenu } from "./menus";
 import { beginReorder } from "../lib/drag";
-import { basename, isRecycle, parent } from "../lib/path";
+import { basename, isRecycle, isSearch, parent } from "../lib/path";
 import {
-  activeId, adminWindow, closedTabs, closeTab, goTo, moveTab, newTab, openMenu, persistSession, reload, reopenClosedTab, setActiveId,
+  activeId, adminWindow, closedTabs, closeTab, goTo, moveTab, newTab, openMenu, persistSession, reload, reopenClosedTab, searchTitle, setActiveId,
   tabs, type MenuItem,
 } from "../lib/state";
 
@@ -68,7 +68,7 @@ export default function TitleBar() {
                 title={tab.p}
                 data-index={i()}
                 data-tab-id={tab.id}
-                data-drop={tab.p}
+                data-drop={isSearch(tab.p) ? undefined : tab.p}
                 onMouseDown={(e) => {
                   if (e.button === 1) { e.preventDefault(); closeTab(tab.id); return; }
                   if (e.button !== 0) return;
@@ -80,9 +80,11 @@ export default function TitleBar() {
                 onContextMenu={(e) => tabMenu(e, tab.id, tab.p)}
               >
                 <Show when={!isRecycle(tab.p)} fallback={<Trash2 size={14} class="tab-bin" />}>
-                  <FileIcon entry={{ isDir: true, ext: "", isSymlink: false }} size={14} />
+                  <Show when={!isSearch(tab.p)} fallback={<Search size={14} class="tab-bin" />}>
+                    <FileIcon entry={{ isDir: true, ext: "", isSymlink: false }} size={14} />
+                  </Show>
                 </Show>
-                <span class="tab-label">{basename(tab.p) || "…"}</span>
+                <span class="tab-label">{isSearch(tab.p) ? searchTitle(tab.p) : basename(tab.p) || "…"}</span>
                 <button class="tab-close" title="Close tab (Ctrl+W)"
                   onMouseDown={(e) => e.stopPropagation()}
                   onClick={() => closeTab(tab.id)}><X size={13} /></button>

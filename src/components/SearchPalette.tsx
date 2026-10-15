@@ -1,7 +1,7 @@
 // Ctrl+K: instant whole-disk search. Ctrl+Shift+P (or ">" prefix): command palette.
 
 import { invoke } from "@tauri-apps/api/core";
-import { AppWindow, CalendarClock, CircleHelp, Command, Copy, ExternalLink, FolderOpen, FolderSearch, HardDrive, Hash, Info, LoaderCircle, Ruler, Search, Shapes, ShieldCheck, SquareTerminal, X } from "lucide-solid";
+import { AppWindow, CalendarClock, CircleHelp, Command, Copy, ExternalLink, FolderOpen, FolderSearch, HardDrive, Hash, History, Info, LoaderCircle, Ruler, Search, Shapes, ShieldCheck, SquareTerminal, Star, X } from "lucide-solid";
 import { createEffect, createMemo, createSignal, For, on, onCleanup, onMount, Show, type JSX } from "solid-js";
 import { Dynamic, Portal } from "solid-js/web";
 import FileIcon from "./FileIcon";
@@ -9,8 +9,11 @@ import { typeIcon } from "./typeIcons";
 import { didYouMean, extPreview, FILE_TYPES, findType, FOLDERS, KIND_EXTS, knownType, typeTokens, withoutTypes } from "../lib/filetypes";
 import "../palette.css";
 import { formatDate, formatSize, KIND_LABEL, kindOf } from "../lib/format";
-import { basename, parent } from "../lib/path";
-import { activeTab, navigate, newTab, openMenu, recents, setUi, toast, ui } from "../lib/state";
+import { basename, parent, searchPath } from "../lib/path";
+import {
+  activeTab, forgetSearch, navigate, newTab, openMenu, promptSaveSearch, recents, rememberSearch, removeSavedSearch, savedSearch,
+  setUi, settings, toast, ui,
+} from "../lib/state";
 import { api } from "../lib/api";
 import { openFile } from "../lib/ops";
 
@@ -116,6 +119,18 @@ interface Suggestion {
   main: JSX.Element;
   detail?: string;
   apply: () => void;
+  /** Small buttons at the row's end (forget, save…). */
+  actions?: { icon: typeof Search; title: string; run: () => void; on?: boolean }[];
+  /** Section heading shown above this row. */
+  heading?: string;
+}
+
+/** What the next Ctrl+K opens with (a search tab's "Edit search"). */
+let seed = "";
+export function openSearchPalette(query = "") {
+  seed = query;
+  setUi("palette", null);
+  queueMicrotask(() => setUi("palette", "files"));
 }
 
 /** Filters offered while their name is typed ("ty" → type:). */
@@ -225,7 +240,8 @@ function SearchHelp(props: { onType: (id: string) => void; onInsert: (token: str
 }
 
 export default function SearchPalette(props: { mode: "files" | "commands"; commands: PaletteCommand[] }) {
-  const [text, setText] = createSignal(props.mode === "commands" ? ">" : "");
+  const [text, setText] = createSignal(props.mode === "commands" ? ">" : seed);
+  seed = "";
   const [scoped, setScoped] = createSignal(false);
   const [res, setRes] = createSignal<SearchResults | null>(null);
   const [status, setStatus] = createSignal<SearchStatus | null>(null);
@@ -297,8 +313,53 @@ export default function SearchPalette(props: { mode: "files" | "commands"; comma
     setHelpOpen(false);
     queueMicrotask(() => { input.focus(); input.setSelectionRange(next.length, next.length); });
   };
+  // ---- search history and saved searches ----
+  /** The search as a tab sees it: "This folder" becomes an `in:` filter. */
+  const tabQuery = () => (scoped() ? `${fullQuery()} in:"${activeTab().p}"` : fullQuery()).trim();
+  const openAsTab = () => {
+    const q = tabQuery();
+    if (!q) return;
+    close();
+    rememberSearch(q);
+    newTab(searchPath(q));
+  };
+  const useQuery = (q: string) => {
+    setTypeChip(null);
+    setScoped(false);
+    setText(q);
+    queueMicrotask(() => { input.focus(); input.setSelectionRange(q.length, q.length); });
+  };
+  const historyRows = (): Suggestion[] => {
+    const saved = settings.savedSearches;
+    const recent = settings.searchHistory.filter((q) => !savedSearch(q)).slice(0, 8);
+    return [
+      ...saved.map((s, i): Suggestion => ({
+        heading: i === 0 ? "Saved searches" : undefined,
+        icon: Star,
+        main: <><span class="palette-suggest-label">{s.name}</span>{s.name !== s.query && <code>{s.query}</code>}</>,
+        apply: () => useQuery(s.query),
+        actions: [
+          { icon: FolderSearch, title: "Open as a tab", run: () => { close(); newTab(searchPath(s.query)); } },
+          { icon: X, title: "Remove from the sidebar", run: () => removeSavedSearch(s.query) },
+        ],
+      })),
+      ...recent.map((q, i): Suggestion => ({
+        heading: i === 0 ? "Recent searches" : undefined,
+        icon: History,
+        main: <code class="palette-recent-query">{q}</code>,
+        apply: () => useQuery(q),
+        actions: [
+          { icon: Star, title: "Save to the sidebar", run: () => { close(); promptSaveSearch(q); } },
+          { icon: X, title: "Forget this search", run: () => forgetSearch(q) },
+        ],
+      })),
+    ];
+  };
+
   const suggestions = createMemo((): { rows: Suggestion[]; first: boolean } => {
     if (commandMode() || showHelp()) return { rows: [], first: false };
+    // An empty box offers saved searches, then recent ones.
+    if (!text().trim() && !typeChip()) return { rows: historyRows(), first: true };
     const word = typing();
     const filter = word && !word.includes('"') ? /^(type|kind|ext|size|modified|mod|date|in):(.*)$/i.exec(word) : null;
     if (filter) {
@@ -322,8 +383,19 @@ export default function SearchPalette(props: { mode: "files" | "commands"; comma
         apply: () => { setText(s.rest); setTypeChip(s.type.id); input.focus(); },
       });
     }
+    // Last, so the first result stays picked: every match as a tab.
+    const r = res();
+    if (r?.results.length) {
+      rows.push({
+        icon: FolderSearch,
+        main: <>Open all {r.total > 2000 ? "2,000+" : r.total.toLocaleString()} matches in a tab</>,
+        detail: "Ctrl+Shift+Enter",
+        apply: openAsTab,
+      });
+    }
     return { rows, first: false };
   });
+
   /** Results are numbered after the suggestions. */
   const offset = () => suggestions().rows.length;
   /** Adds a filter from the help to the box, its value selected to type over. */
@@ -412,6 +484,7 @@ export default function SearchPalette(props: { mode: "files" | "commands"; comma
     const h = res()?.results[i - offset()];
     if (!h) return;
     close();
+    rememberSearch(tabQuery());
     if (how === "tab") newTab(h.isDir ? h.path : parent(h.path) ?? h.path);
     else if (how === "reveal" || h.isDir) reveal(h);
     else openFile({ path: h.path, inArchive: false });
@@ -433,6 +506,7 @@ export default function SearchPalette(props: { mode: "files" | "commands"; comma
     else if (e.key === "PageDown") { e.preventDefault(); setPick((p) => Math.min(n - 1, p + 8)); }
     else if (e.key === "PageUp") { e.preventDefault(); setPick((p) => Math.max(0, p - 8)); }
     else if (e.key === "Tab" && !commandMode()) { e.preventDefault(); setScoped(!scoped()); }
+    else if (e.key === "Enter" && e.ctrlKey && e.shiftKey && !commandMode()) { e.preventDefault(); openAsTab(); }
     else if (e.key === "Enter") {
       e.preventDefault();
       activate(pick(), e.ctrlKey ? "tab" : e.altKey || e.shiftKey ? "reveal" : "open");
@@ -492,6 +566,13 @@ export default function SearchPalette(props: { mode: "files" | "commands"; comma
               onKeyDown={onKey}
             />
             <Show when={busy()}><LoaderCircle size={15} class="spin muted" /></Show>
+            <Show when={!commandMode() && tabQuery()}>
+              <button class="icon-btn tiny" classList={{ on: !!savedSearch(tabQuery()) }}
+                title={savedSearch(tabQuery()) ? "Saved in the sidebar (rename)" : "Save this search to the sidebar"}
+                onClick={() => { const q = tabQuery(); close(); promptSaveSearch(q); }}>
+                <Star size={15} fill={savedSearch(tabQuery()) ? "currentColor" : "none"} />
+              </button>
+            </Show>
             <Show when={!commandMode()}>
               <button class="icon-btn tiny palette-help-btn" classList={{ on: showHelp() }} title="File types and filters (?)"
                 onClick={() => { const open = showHelp(); if (text().trim() === "?") setText(""); setHelpOpen(!open); input.focus(); }}>
@@ -525,13 +606,24 @@ export default function SearchPalette(props: { mode: "files" | "commands"; comma
               <Show when={!showHelp()} fallback={<SearchHelp onType={pickType} onInsert={insertFilter} />}>
               <For each={suggestions().rows}>
                 {(s, i) => (
-                  <button class="palette-suggest" classList={{ active: i() === pick() }} data-i={i()}
-                    onMouseMove={() => setPick(i())} onClick={() => s.apply()}>
-                    <Dynamic component={s.icon} size={15} />
-                    <span class="palette-suggest-main">{s.main}</span>
-                    <span class="palette-suggest-exts">{s.detail}</span>
-                    <Show when={i() === pick()}><kbd>Tab</kbd></Show>
-                  </button>
+                  <>
+                    <Show when={s.heading}><div class="palette-heading">{s.heading}</div></Show>
+                    <button class="palette-suggest" classList={{ active: i() === pick() }} data-i={i()}
+                      onMouseMove={() => setPick(i())} onClick={() => s.apply()}>
+                      <Dynamic component={s.icon} size={15} />
+                      <span class="palette-suggest-main">{s.main}</span>
+                      <span class="palette-suggest-exts">{s.detail}</span>
+                      <For each={s.actions}>
+                        {(a) => (
+                          <span class="palette-suggest-act" role="button" title={a.title}
+                            onClick={(e) => { e.stopPropagation(); a.run(); input.focus(); }}>
+                            <Dynamic component={a.icon} size={13} />
+                          </span>
+                        )}
+                      </For>
+                      <Show when={i() === pick() && !s.actions}><kbd>Tab</kbd></Show>
+                    </button>
+                  </>
                 )}
               </For>
               <Show when={res()?.results.length} fallback={

@@ -4,7 +4,7 @@ import { listen } from "@tauri-apps/api/event";
 import { createSignal } from "solid-js";
 import { createStore, produce } from "solid-js/store";
 import { api } from "./api";
-import { isRecycle, isWsl, pathKey } from "./path";
+import { isVirtual, isWsl, pathKey } from "./path";
 import type { FolderSize } from "./types";
 
 export const [folderSizes, setFolderSizes] = createStore<Record<string, FolderSize>>({});
@@ -26,7 +26,7 @@ export const folderSize = (path: string): FolderSize | undefined => folderSizes[
 
 /** Network shares are slow to walk, so they aren't counted. (WSL folders are counted by
  *  Linux itself, which is fast.) */
-export const sizesApply = (dir: string) => !isRecycle(dir) && (isWsl(dir) || !dir.startsWith("\\\\"));
+export const sizesApply = (dir: string) => !isVirtual(dir) && (isWsl(dir) || !dir.startsWith("\\\\"));
 
 /** Why a WSL folder gets no size, if it doesn't: Linux's /proc and /sys describe the running
  *  system rather than hold files (/proc alone "contains" 128 TB), and /mnt/c is the Windows

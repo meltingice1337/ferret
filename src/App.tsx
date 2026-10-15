@@ -19,8 +19,8 @@ import {
   copyPaths, copyToClipboard, deleteItems, emptyBin, newFile, newFolder, openInVscode, openTerminal, paste, redo, redoLabel,
   startRename, targetsOf, undo, undoLabel,
 } from "./lib/ops";
-import { adminWindow, applyAppearance, elevateWindow, isFavorite, navigate, openNewWindow, persistSettings, places, resetView, setSettings } from "./lib/state";
-import { basename, isRecycle, RECYCLE } from "./lib/path";
+import { adminWindow, applyAppearance, elevateWindow, searchTitle, isFavorite, navigate, openNewWindow, persistSettings, places, resetView, setSettings } from "./lib/state";
+import { basename, isRecycle, isSearch, RECYCLE } from "./lib/path";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import {
   activeTab, boot, closeTab, cycleTab, dismissToast, goBack, goForward, goUp, newTab,
@@ -107,6 +107,7 @@ const keyboardMenu = () => openKeyboardMenu(activeTab());
 function windowTitle(path: string) {
   const drive = /^([a-z]):\\?$/i.exec(path);
   const folder = isRecycle(path) ? "Recycle Bin"
+    : isSearch(path) ? searchTitle(path)
     : drive ? `${places().drives.find((d) => d.path[0].toUpperCase() === drive[1].toUpperCase())?.label || "Local Disk"} (${drive[1].toUpperCase()}:)`
     : basename(path) || path;
   const marks = [import.meta.env.DEV && "Dev", adminWindow() && "Administrator"].filter(Boolean);
@@ -173,7 +174,6 @@ export default function App() {
         }
         if (e.key === "Enter" && !inField) { e.preventDefault(); const tg = targetsOf(t); return setUi("properties", tg.length ? tg.map((x) => x.path) : [t.p]); }
       }
-      if (e.key === "F5") { e.preventDefault(); return refresh(t); }
 
       // ---- file actions (not while typing) ----
       if (!inField) {
@@ -271,12 +271,23 @@ export default function App() {
       else if (e.shiftKey && (here === first || here === d)) { e.preventDefault(); last.focus(); }
       else if (!e.shiftKey && here === last) { e.preventDefault(); first.focus(); }
     };
+    // F5 / Ctrl+R (with Shift or Ctrl too) would reload the whole window and land it on the
+    // home folder: they refresh the current folder instead, whatever has focus.
+    const noReload = (e: KeyboardEvent) => {
+      if (e.key !== "F5" && !((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "r")) return;
+      e.preventDefault();
+      e.stopPropagation();
+      if (e.repeat || !ready() || ui.menu || (modalOpen() && !ui.palette)) return;
+      refresh(activeTab());
+    };
+    window.addEventListener("keydown", noReload, true);
     window.addEventListener("keydown", trapTab, true);
     window.addEventListener("keydown", onHold, true);
     window.addEventListener("keydown", onKey);
     window.addEventListener("mouseup", onMouse);
     window.addEventListener("contextmenu", noMenu);
     onCleanup(() => {
+      window.removeEventListener("keydown", noReload, true);
       window.removeEventListener("keydown", trapTab, true);
       window.removeEventListener("keydown", onKey);
       window.removeEventListener("keydown", onHold, true);

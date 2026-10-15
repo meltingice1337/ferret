@@ -5,7 +5,7 @@ import { api } from "./api";
 import { invalidateFolderSizes } from "./foldersizes";
 import { onColor } from "./format";
 import { log } from "./log";
-import { basename, isArchiveName, isRecycle, parent, pathKey, samePath } from "./path";
+import { basename, isArchiveName, isRecycle, isSearch, isVirtual, parent, pathKey, samePath, searchQuery } from "./path";
 import type {
   Entry, Favorite, LaunchTarget, Places, ProfileName, Recent, ResolvedView, Session, Settings, ViewSettings, ViewSource,
 } from "./types";
@@ -22,6 +22,7 @@ export const [settings, setSettings] = createStore<Settings>({
   doubleClickOpen: true, rememberPerFolder: true, inheritToSubfolders: false, restoreSession: true,
   hiddenPlaces: [], hiddenSections: [],
   columnWidths: { modified: 150, type: 140, size: 90 }, hiddenColumns: [], folderSizes: true,
+  searchHistory: [], savedSearches: [],
   globalView: { ...DEFAULT_VIEW },
   profiles: {
     media: { enabled: true, view: {} },
@@ -403,7 +404,7 @@ const visits = new Map<number, { path: string; timer: number; counted: boolean }
 function noteVisit(tab: Tab, path: string) {
   const prev = visits.get(tab.id);
   if (prev) clearTimeout(prev.timer);
-  if (isRecycle(path) || adminWindow()) return visits.delete(tab.id);
+  if (isVirtual(path) || adminWindow()) return visits.delete(tab.id);
   const visit = { path, counted: false, timer: 0 };
   visit.timer = window.setTimeout(() => {
     if (document.visibilityState === "visible") countVisit(tab);
@@ -600,7 +601,7 @@ function syncWatchers() {
   watchTimer = window.setTimeout(() => {
     // Each tab folder plus its parent: a folder deleted/renamed from outside only shows up
     // as an event in its parent.
-    const all = tabs().flatMap((t) => [t.p, parent(t.p)]).filter((p): p is string => !!p);
+    const all = tabs().filter((t) => !isSearch(t.p)).flatMap((t) => [t.p, parent(t.p)]).filter((p): p is string => !!p);
     const paths = [...new Map(all.map((p) => [pathKey(p), p])).values()];
     api.watchDirs(paths).catch(() => {});
   }, 200);
@@ -735,6 +736,59 @@ export function persistSettings() {
   }, 250);
 }
 
+// ---------- search history and saved searches ----------
+
+const HISTORY_MAX = 15;
+const sameQuery = (a: string, b: string) => a.trim().toLowerCase() === b.trim().toLowerCase();
+
+/** Remembers a Ctrl+K query that led somewhere (newest first, no repeats). */
+export function rememberSearch(query: string) {
+  const q = query.trim();
+  if (!q || adminWindow()) return;
+  setSettings("searchHistory", (h) => [q, ...h.filter((x) => !sameQuery(x, q))].slice(0, HISTORY_MAX));
+  persistSettings();
+}
+
+export function forgetSearch(query: string) {
+  setSettings("searchHistory", (h) => h.filter((x) => !sameQuery(x, query)));
+  persistSettings();
+}
+
+export const savedSearch = (query: string) => settings.savedSearches.find((s) => sameQuery(s.query, query));
+
+/** Pins a search to the sidebar (renaming it if it's already there). */
+export function saveSearch(name: string, query: string) {
+  const q = query.trim();
+  const n = name.trim() || q;
+  setSettings("savedSearches", (list) => savedSearch(q)
+    ? list.map((s) => (sameQuery(s.query, q) ? { ...s, name: n } : s))
+    : [...list, { name: n, query: q }]);
+  persistSettings();
+}
+
+export function removeSavedSearch(query: string) {
+  setSettings("savedSearches", (list) => list.filter((s) => !sameQuery(s.query, query)));
+  persistSettings();
+}
+
+/** Asks for a name, then pins the search. */
+export async function promptSaveSearch(query: string) {
+  const q = query.trim();
+  if (!q) return;
+  const existing = savedSearch(q);
+  const name = await ask({
+    title: existing ? "Rename saved search" : "Save search",
+    message: `“${q}” goes in the sidebar under Searches. It opens as a tab that always lists the current matches.`,
+    input: existing?.name ?? q, confirmLabel: existing ? "Rename" : "Save",
+  });
+  if (name === null) return;
+  saveSearch(name, q);
+  if (!existing) toast(`Saved “${name.trim() || q}” to the sidebar`);
+}
+
+/** What a search tab is called: its saved name, or the query. */
+export const searchTitle = (p: string) => savedSearch(searchQuery(p))?.name ?? `“${searchQuery(p)}”`;
+
 // ---------- appearance ----------
 
 const darkQuery = window.matchMedia("(prefers-color-scheme: dark)");
@@ -819,7 +873,7 @@ export async function boot() {
   // Folders deleted from outside on shares/WSL may not raise watcher events: check the open one.
   setInterval(() => {
     const t = activeTab();
-    if (!t || t.loading[0]() || document.hidden) return;
+    if (!t || t.loading[0]() || document.hidden || isVirtual(t.p)) return;
     api.resolveInput(t.p).then((r) => { if (r.kind === "missing") reload(t); }).catch(() => {});
   }, 4000);
 
