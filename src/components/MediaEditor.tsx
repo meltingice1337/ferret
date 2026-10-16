@@ -5,7 +5,7 @@
 
 import {
   AlertTriangle, ChevronLeft, ChevronRight, Clapperboard, ImageDown, Loader2, Pause, Play, RotateCcw, Sparkles, Volume2, VolumeX, X,
-} from "lucide-solid";
+} from "../lib/icons";
 import { createEffect, createMemo, createResource, createSignal, For, on, onCleanup, onMount, Show, type JSX } from "solid-js";
 import { createStore } from "solid-js/store";
 import { listen } from "@tauri-apps/api/event";

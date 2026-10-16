@@ -1,4 +1,4 @@
-import { ArchiveRestore, Check, Copy, FileArchive, FilePlus, Minimize2, MoveRight, PackageOpen, Pencil, RotateCw, Trash2, TriangleAlert, X } from "lucide-solid";
+import { ArchiveRestore, Check, Copy, FileArchive, FilePlus, Minimize2, MoveRight, PackageOpen, Pencil, RotateCw, Trash2, TriangleAlert, X } from "../lib/icons";
 import { For, Show } from "solid-js";
 import { Dynamic } from "solid-js/web";
 import { api } from "../lib/api";

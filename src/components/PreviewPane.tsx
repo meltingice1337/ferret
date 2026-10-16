@@ -1,4 +1,4 @@
-import { ChevronLeft, ChevronRight, ExternalLink, Maximize2, X } from "lucide-solid";
+import { Check, ChevronLeft, ChevronRight, Copy, ExternalLink, Maximize2, X } from "../lib/icons";
 import { createEffect, createMemo, createSignal, For, on, onCleanup, onMount, Show } from "solid-js";
 import { Portal } from "solid-js/web";
 import { formatDate, formatSize, kindOf, typeLabel } from "../lib/format";
@@ -43,10 +43,38 @@ function folderEntry(path: string): Entry {
   return { name: isRecycle(path) ? "Recycle Bin" : basename(path), path, isDir: true, isSymlink: false, hidden: false, size: 0, modified: null, created: null, ext: "", inArchive: false };
 }
 
+/** The details' path: copied on click, with "Copied" shown by the pointer for a moment. */
+function CopyPath(props: { path: string }) {
+  const [copied, setCopied] = createSignal<{ x: number; y: number; ok: boolean } | null>(null);
+  let timer: number | undefined;
+  onCleanup(() => clearTimeout(timer));
+  // Another item: nothing left over from copying the last one.
+  createEffect(on(() => props.path, () => { clearTimeout(timer); setCopied(null); }, { defer: true }));
+  const copy = (e: MouseEvent) => {
+    // Kept inside the window (the pane sits at its right edge).
+    const at = { x: Math.min(Math.max(e.clientX, 50), window.innerWidth - 50), y: e.clientY - 10 };
+    navigator.clipboard.writeText(props.path).then(() => true, () => false).then((ok) => {
+      setCopied({ ...at, ok });
+      clearTimeout(timer);
+      timer = window.setTimeout(() => setCopied(null), 1200);
+    });
+  };
+  return (
+    <dd class="pv-path" classList={{ copied: !!copied()?.ok }} title="Click to copy" onClick={copy}>
+      {props.path.split("\\").map((seg, i) => <>{i > 0 && "\\"}{i > 0 && <wbr />}{seg}</>)}
+      <span class="pv-copy-ico" aria-hidden="true">{copied()?.ok ? <Check size={12} /> : <Copy size={12} />}</span>
+      {/* A new bubble per click, so its animation starts over. */}
+      <Show when={copied()} keyed>
+        {(c) => <Portal><div class="pv-copied" role="status" style={{ left: `${c.x}px`, top: `${c.y}px` }}>{c.ok ? "Copied" : "Couldn't copy"}</div></Portal>}
+      </Show>
+    </dd>
+  );
+}
+
 function MetaList(props: { entry: Entry; extra: Meta[] }) {
   // Recycle Bin items: where they came from and when they were deleted.
   const original = () => props.entry.origin && `${props.entry.origin.replace(/\\$/, "")}\\${props.entry.name}`;
-  const rows = () => props.entry.origin ? [
+  const rows = (): Meta[] => props.entry.origin ? [
     { label: "Type", value: typeLabel(props.entry) },
     { label: "Size", value: `${formatSize(props.entry.size)}${props.entry.size >= 1024 ? ` (${props.entry.size.toLocaleString()} bytes)` : ""}` },
     ...props.extra,
@@ -61,13 +89,12 @@ function MetaList(props: { entry: Entry; extra: Meta[] }) {
   ];
   return (
     <dl class="pv-meta">
-      <For each={rows()}>{(r) => <><dt>{r.label}</dt><dd>{r.value || " "}</dd></>}</For>
+      {/* A row kept from the previous item shows a placeholder until its value arrives. */}
+      <For each={rows()}>{(r) => <><dt>{r.label}</dt><dd classList={{ "pv-wait": !!r.pending }}>{r.pending ? " " : r.value || " "}</dd></>}</For>
       {/* The Recycle Bin itself has no real path worth showing. */}
       <Show when={!isRecycle(props.entry.path)}>
         <dt>{original() ? "From" : "Path"}</dt>
-        <dd class="pv-path" title="Click to copy" onClick={() => navigator.clipboard.writeText(original() || props.entry.path)}>
-          {(original() || props.entry.path).split("\\").map((seg, i) => <>{i > 0 && "\\"}{i > 0 && <wbr />}{seg}</>)}
-        </dd>
+        <CopyPath path={original() || props.entry.path} />
       </Show>
     </dl>
   );

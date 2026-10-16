@@ -1,4 +1,4 @@
-import { ArchiveRestore, ArrowDown, ArrowUp, ChevronDown, ChevronRight, LoaderCircle, Pencil, Play, Search, Star, Trash2 } from "lucide-solid";
+import { ArchiveRestore, ArrowDown, ArrowUp, ChevronDown, ChevronRight, LoaderCircle, Pencil, Play, Search, Star, Trash2 } from "../lib/icons";
 import { batch, createComputed, createEffect, createMemo, createResource, createSignal, For, Match, on, onCleanup, onMount, Show, Switch, untrack } from "solid-js";
 import { Portal } from "solid-js/web";
 import FileIcon from "./FileIcon";

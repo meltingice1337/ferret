@@ -1,4 +1,4 @@
-import { ArrowLeft, ArrowRight, ArrowUp, ChevronRight, Folder, FolderOpen, ListFilter, PanelLeft, RotateCw, Search, Shapes, Star, X } from "lucide-solid";
+import { ArrowLeft, ArrowRight, ArrowUp, ChevronRight, Folder, FolderOpen, ListFilter, PanelLeft, RotateCw, Search, Shapes, Star, X } from "../lib/icons";
 import { createEffect, createMemo, createSignal, For, on, Show } from "solid-js";
 import { api } from "../lib/api";
 import { isRecycle, isWsl, parent, segments } from "../lib/path";

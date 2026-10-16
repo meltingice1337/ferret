@@ -1,5 +1,5 @@
 import { getCurrentWindow } from "@tauri-apps/api/window";
-import { ChevronDown, Copy, Minus, Plus, Search, ShieldAlert, Square, Trash2, X } from "lucide-solid";
+import { ChevronDown, Copy, Minus, Plus, Search, ShieldAlert, Square, Trash2, X } from "../lib/icons";
 import { createEffect, createSignal, For, on, onCleanup, onMount, Show } from "solid-js";
 import FileIcon from "./FileIcon";
 import { placeMenu } from "./menus";

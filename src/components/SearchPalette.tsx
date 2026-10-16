@@ -1,7 +1,7 @@
 // Ctrl+K: instant whole-disk search. Ctrl+Shift+P (or ">" prefix): command palette.
 
 import { invoke } from "@tauri-apps/api/core";
-import { AppWindow, CalendarClock, CircleHelp, Command, Copy, ExternalLink, FolderOpen, FolderSearch, HardDrive, Hash, History, Info, LoaderCircle, Ruler, Search, Shapes, ShieldCheck, SquareTerminal, Star, X } from "lucide-solid";
+import { AppWindow, CalendarClock, CircleHelp, Command, Copy, ExternalLink, FolderOpen, FolderSearch, HardDrive, Hash, History, Info, LoaderCircle, Ruler, Search, Shapes, ShieldCheck, SquareTerminal, Star, X } from "../lib/icons";
 import { createEffect, createMemo, createSignal, For, on, onCleanup, onMount, Show, type JSX } from "solid-js";
 import { Dynamic, Portal } from "solid-js/web";
 import FileIcon from "./FileIcon";

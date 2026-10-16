@@ -3,7 +3,7 @@ import {
   FolderOutput, FolderPlus, Info, Layers, LayoutGrid, List, MousePointerClick, PackageOpen, Pencil, Redo2, RotateCw,
   Scissors, SquareTerminal, Star, Trash2, Undo2, ExternalLink, MoreHorizontal, Hash, PanelRight, BookmarkPlus,
   ArchiveRestore, Blocks, FolderSearch, ShieldAlert, SquareArrowOutUpRight, Clapperboard, ImageDown,
-} from "lucide-solid";
+} from "../lib/icons";
 import { api } from "../lib/api";
 import { kindOf } from "../lib/format";
 import { basename, isRecycle, isWsl, parent, pathKey } from "../lib/path";

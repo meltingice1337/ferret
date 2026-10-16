@@ -27,6 +27,8 @@ async function clickRow(t, name, mods = []) {
 }
 const go = (t, path) => t.c.eval(`${T}.state.navigate(${tab}, ${JSON.stringify(path)})`);
 const rows = (t) => t.c.eval(`[...document.querySelectorAll(".files .row .name")].map((e) => e.textContent)`);
+/** Whether the preview shows the item named `name` (its path ends the details). */
+const previewShows = (name) => `(document.querySelector(".pv-meta .pv-path")?.textContent ?? "").includes(${JSON.stringify("\\" + name)})`;
 const modalText = (t) => t.c.eval(`document.querySelector(".modal")?.innerText ?? ""`);
 
 export const tests = [
@@ -68,6 +70,47 @@ export const tests = [
       await t.c.waitFor(`document.querySelector(".pv-body h1")?.textContent.includes("E2E title")`, { what: "the rendered Markdown heading" });
       await clickRow(t, "photo.png");
       await t.c.waitFor(`(() => { const i = document.querySelector(".pv-body img"); return i && i.complete && i.naturalWidth > 0; })()`, { what: "the picture decoded" });
+    },
+  },
+  {
+    name: "details show only the shown item's rows (zip, zip, then an exe)",
+    async run(t) {
+      await t.c.eval(`${T}.state.setUi("previewOpen", true)`);
+      await go(t, t.p("kinds"));
+      await t.c.waitFor(`[...document.querySelectorAll(".files .row .name")].some((e) => e.textContent === "one.zip")`, { what: "kinds listed" });
+      const details = `[...document.querySelectorAll(".pv-meta dt")].map((dt) => [dt.textContent, dt.nextElementSibling.textContent.trim(), dt.nextElementSibling.classList.contains("pv-wait")])`;
+      const contents = (want) => `${details}.some(([l, v, wait]) => l === "Contents" && v === ${JSON.stringify(want)} && !wait)`;
+      await clickRow(t, "one.zip");
+      await t.c.waitFor(contents("1 file, 0 folders"), { what: "the first zip's contents" });
+      // Another zip: the same rows, filled in with its own values.
+      await clickRow(t, "two.zip");
+      await t.c.waitFor(contents("2 files, 0 folders"), { what: "the second zip's contents" });
+      // An exe reports none of those rows: they go as soon as it's shown, not after a delay.
+      await clickRow(t, "app.exe");
+      await t.c.waitFor(previewShows("app.exe"), { what: "the exe in the preview" });
+      const rowsNow = await t.c.eval(details);
+      const stale = rowsNow.filter(([l]) => ["Format", "Contents", "Unpacked", "Saved"].includes(l));
+      assert(!stale.length, `the zip's rows are still shown for the exe: ${JSON.stringify(rowsNow)}`);
+    },
+  },
+  {
+    name: "clicking the path in the details copies it and says so",
+    async run(t) {
+      await t.c.eval(`${T}.state.setUi("previewOpen", true)`);
+      await go(t, t.p("docs"));
+      await clickRow(t, "notes.txt");
+      await t.c.waitFor(previewShows("notes.txt"), { what: "notes.txt in the preview" });
+      const at = await t.c.eval(`(() => { const b = document.querySelector(".pv-meta .pv-path").getBoundingClientRect(); return { x: b.left + 30, y: b.top + 8 }; })()`);
+      await t.c.send("Input.dispatchMouseEvent", { type: "mouseMoved", x: at.x, y: at.y });
+      await sleep(250);
+      const icon = await t.c.eval(`getComputedStyle(document.querySelector(".pv-copy-ico")).opacity`);
+      assert(icon === "1", `no copy icon on hover (opacity ${icon})`);
+      await t.c.send("Input.dispatchMouseEvent", { type: "mousePressed", x: at.x, y: at.y, button: "left", clickCount: 1 });
+      await t.c.send("Input.dispatchMouseEvent", { type: "mouseReleased", x: at.x, y: at.y, button: "left", clickCount: 1 });
+      await t.c.waitFor(`document.querySelector(".pv-copied")?.textContent === "Copied"`, { what: "“Copied” by the pointer" });
+      const copied = execSync(`powershell -NoProfile -Command "Get-Clipboard"`).toString().trim();
+      assert(copied === t.p("docs", "notes.txt"), `the clipboard has “${copied}”`);
+      await t.c.waitFor(`!document.querySelector(".pv-copied")`, { timeoutMs: 3000, what: "“Copied” to go away" });
     },
   },
   {
@@ -239,6 +282,10 @@ export function fixture(root, needle) {
     "docs/notes.txt": "hello from e2e\nsecond line",
     "docs/readme.md": "# E2E title\n\nSome *Markdown*.",
     "docs/photo.png": png(24, 16, [220, 40, 40]),
+    "kinds/one.zip": zip({ "a.txt": "a" }),
+    "kinds/two.zip": zip({ "a.txt": "a", "b.txt": "b" }),
+    // Never run: only its extension matters (an application, which has no detail rows).
+    "kinds/app.exe": Buffer.concat([Buffer.from("MZ"), Buffer.alloc(510)]),
     "sub/inner.txt": "inside",
     "rename-me.txt": "rename me",
     "delete-me.txt": "delete me",
@@ -246,6 +293,27 @@ export function fixture(root, needle) {
     [`${needle}.txt`]: "find me",
     ...Object.fromEntries(Array.from({ length: 300 }, (_, i) => [`bulk/file${i + 1}.txt`, "x"])),
   };
+}
+
+/** A zip of the given files, stored uncompressed. */
+function zip(files) {
+  const locals = [], central = [];
+  let offset = 0;
+  for (const [name, text] of Object.entries(files)) {
+    const n = Buffer.from(name), data = Buffer.from(text), crc = crc32(data);
+    const local = Buffer.alloc(30);
+    local.writeUInt32LE(0x04034b50, 0); local.writeUInt16LE(20, 4); local.writeUInt16LE(0x21, 12);
+    local.writeUInt32LE(crc, 14); local.writeUInt32LE(data.length, 18); local.writeUInt32LE(data.length, 22); local.writeUInt16LE(n.length, 26);
+    const dir = Buffer.alloc(46);
+    dir.writeUInt32LE(0x02014b50, 0); dir.writeUInt16LE(20, 4); dir.writeUInt16LE(20, 6); dir.writeUInt16LE(0x21, 14);
+    dir.writeUInt32LE(crc, 16); dir.writeUInt32LE(data.length, 20); dir.writeUInt32LE(data.length, 24); dir.writeUInt16LE(n.length, 28); dir.writeUInt32LE(offset, 42);
+    locals.push(local, n, data); central.push(dir, n);
+    offset += local.length + n.length + data.length;
+  }
+  const cd = Buffer.concat(central), end = Buffer.alloc(22);
+  const count = Object.keys(files).length;
+  end.writeUInt32LE(0x06054b50, 0); end.writeUInt16LE(count, 8); end.writeUInt16LE(count, 10); end.writeUInt32LE(cd.length, 12); end.writeUInt32LE(offset, 16);
+  return Buffer.concat([...locals, cd, end]);
 }
 
 /** A solid-color PNG (for the picture preview). */

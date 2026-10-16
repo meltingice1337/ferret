@@ -1,4 +1,4 @@
-import { ArrowDownUp, Eye, EyeOff, Layers, LayoutGrid, List, LoaderCircle, PanelRight } from "lucide-solid";
+import { ArrowDownUp, Eye, EyeOff, Layers, LayoutGrid, List, LoaderCircle, PanelRight } from "../lib/icons";
 import { createMemo, Show } from "solid-js";
 import { formatSize, plural } from "../lib/format";
 import { isRecycle, pathKey } from "../lib/path";

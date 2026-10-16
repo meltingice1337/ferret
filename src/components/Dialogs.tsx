@@ -1,4 +1,4 @@
-import { AlertTriangle, ExternalLink, FolderOpen, ShieldCheck, X } from "lucide-solid";
+import { AlertTriangle, ExternalLink, FolderOpen, ShieldCheck, X } from "../lib/icons";
 import { createMemo, createResource, createSignal, ErrorBoundary, For, onMount, Show, type JSX } from "solid-js";
 import { api } from "../lib/api";
 import { formatDate, formatSize, plural, typeLabel } from "../lib/format";

@@ -1,4 +1,4 @@
-import { Check, ChevronRight, LoaderCircle } from "lucide-solid";
+import { Check, ChevronRight, LoaderCircle } from "../lib/icons";
 import { createEffect, createSignal, For, on, onCleanup, Show } from "solid-js";
 import { Dynamic } from "solid-js/web";
 import { closeMenu, ui, type MenuItem } from "../lib/state";

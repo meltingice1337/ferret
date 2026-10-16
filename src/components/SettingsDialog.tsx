@@ -1,4 +1,4 @@
-import { Trash2, X } from "lucide-solid";
+import { Trash2, X } from "../lib/icons";
 import { createResource, createSignal, For, type JSX, Show } from "solid-js";
 import { api } from "../lib/api";
 import { formatDate } from "../lib/format";

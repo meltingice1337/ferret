@@ -1,5 +1,5 @@
 import { openUrl } from "@tauri-apps/plugin-opener";
-import { Download, ExternalLink, LoaderCircle, Sparkles, TriangleAlert, X } from "lucide-solid";
+import { Download, ExternalLink, LoaderCircle, Sparkles, TriangleAlert, X } from "../lib/icons";
 import { For, Show } from "solid-js";
 import { formatSize, plural } from "../lib/format";
 import { dismissUpdate, installUpdate, parseNotes, setUpdater, showWhatsNew, updateErrorText, updater } from "../lib/updater";

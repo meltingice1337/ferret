@@ -1,7 +1,7 @@
 import {
   ChevronDown, Clock, Download, EyeOff, FileText, FolderOpen, HardDrive, House, Image, Monitor, Music, Pencil,
   Inbox, Search, Settings as SettingsIcon, SlidersHorizontal, Star, Terminal, Trash2, Usb, Video, X,
-} from "lucide-solid";
+} from "../lib/icons";
 import { openSearchPalette } from "./SearchPalette";
 import { createEffect, createSignal, For, type JSX, onCleanup, Show } from "solid-js";
 import { Dynamic } from "solid-js/web";

@@ -1,7 +1,7 @@
 import {
   AppWindow, File, FileArchive, FileAudio, FileCode2, FileImage, FileJson, FileSpreadsheet,
   FileText, FileType, FileVideo, Folder, FolderSymlink,
-} from "lucide-solid";
+} from "../lib/icons";
 import { Dynamic } from "solid-js/web";
 import { kindOf, type Kind } from "../lib/format";
 import type { Entry } from "../lib/types";

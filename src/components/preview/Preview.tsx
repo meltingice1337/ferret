@@ -20,12 +20,19 @@ export default function Preview(props: { entry: Entry; large?: boolean; onMeta?:
   // shown loads the new contents (pictures swap in place, other previews are rebuilt).
   createComputed(() => !props.entry.isDir && !props.entry.inArchive && noteVersion(props.entry.path, props.entry.modified, props.entry.size));
   const [meta, setMeta] = createSignal<Meta[]>([]);
-  // While the next item loads, its details keep the previous rows (blank) so the list below
-  // doesn't jump; rows the new item doesn't report are dropped after a moment.
+  // While the next item loads, its details keep the previous rows (waiting for their value) so
+  // the list below doesn't jump, but only when the same kind of preview shows it (a zip after a
+  // zip): another kind reports other rows, so the old ones go at once. Rows the new item doesn't
+  // report are dropped after a moment.
   let dropTimer: number | undefined;
+  let view = viewOf(props.entry);
   createEffect(on(() => props.entry.path, () => {
-    setMeta((m) => m.map((x) => ({ ...x, value: "", pending: true })));
+    const next = viewOf(props.entry);
+    const same = next === view;
+    view = next;
     clearTimeout(dropTimer);
+    if (!same) return setMeta([]);
+    setMeta((m) => m.map((x) => ({ ...x, value: "", pending: true })));
     dropTimer = window.setTimeout(() => setMeta((m) => m.filter((x) => !x.pending)), 700);
   }, { defer: true }));
   onCleanup(() => clearTimeout(dropTimer));
@@ -59,39 +66,55 @@ export default function Preview(props: { entry: Entry; large?: boolean; onMeta?:
   );
 }
 
+/** Which preview shows an entry. Entries shown by the same one report the same detail rows. */
+function viewOf(e: Entry) {
+  const kind = kindOf(e);
+  if (e.isDir) return "folder";
+  if (kind === "image") return "image";
+  if (isArchive(e) && !e.inArchive) return "archive";
+  if (kind === "video" || kind === "audio" || kind === "pdf" || kind === "font") return kind;
+  if (e.ext === "csv" || e.ext === "tsv") return "csv";
+  if (e.ext === "json" || e.ext === "jsonc" || e.ext === "geojson") return "json";
+  if (e.ext === "md" || e.ext === "markdown") return "markdown";
+  if (TEXTISH.has(kind)) return "code";
+  if (/^(docx|docm|dotx)$/.test(e.ext)) return "docx";
+  if (SHELL_THUMB.has(kind)) return "shell";
+  return "other";
+}
+
 function View(props: { e: Entry; path: string; large?: boolean; setMeta: (m: Meta[]) => void }) {
   const e = () => props.e;
-  const kind = () => kindOf(e());
+  const view = () => viewOf(e());
   const path = () => props.path;
   const setMeta = props.setMeta;
   return (
     <Switch fallback={<FallbackView path={path()} entry={e()} large={props.large} setMeta={setMeta} />}>
-      <Match when={e().isDir}>
+      <Match when={view() === "folder"}>
         <FolderView path={path()} setMeta={setMeta} onOpen={(p) => navigate(activeTab(), p)} />
       </Match>
-      <Match when={isArchive(e()) && !e().inArchive}>
+      <Match when={view() === "archive"}>
         <ArchiveView entry={e()} setMeta={setMeta}
           onBrowse={() => navigate(activeTab(), e().path)}
           onExtract={() => extractSmart(e().path)} />
       </Match>
-      <Match when={kind() === "video"}><VideoView path={path()} setMeta={setMeta} large={props.large} /></Match>
-      <Match when={kind() === "audio"}><AudioView path={path()} setMeta={setMeta} large={props.large} /></Match>
-      <Match when={kind() === "pdf"}><PdfView path={path()} large={props.large} setMeta={setMeta} /></Match>
-      <Match when={kind() === "font"}><FontView path={path()} name={e().name} /></Match>
-      <Match when={e().ext === "csv" || e().ext === "tsv"}><CsvView path={path()} ext={e().ext} setMeta={setMeta} large={props.large} /></Match>
-      <Match when={e().ext === "json" || e().ext === "jsonc" || e().ext === "geojson"}>
+      <Match when={view() === "video"}><VideoView path={path()} setMeta={setMeta} large={props.large} /></Match>
+      <Match when={view() === "audio"}><AudioView path={path()} setMeta={setMeta} large={props.large} /></Match>
+      <Match when={view() === "pdf"}><PdfView path={path()} large={props.large} setMeta={setMeta} /></Match>
+      <Match when={view() === "font"}><FontView path={path()} name={e().name} /></Match>
+      <Match when={view() === "csv"}><CsvView path={path()} ext={e().ext} setMeta={setMeta} large={props.large} /></Match>
+      <Match when={view() === "json"}>
         <JsonView path={path()} name={e().name} ext={e().ext} setMeta={setMeta} large={props.large} />
       </Match>
-      <Match when={e().ext === "md" || e().ext === "markdown"}>
+      <Match when={view() === "markdown"}>
         <MarkdownView path={path()} name={e().name} ext={e().ext} setMeta={setMeta} large={props.large} />
       </Match>
-      <Match when={TEXTISH.has(kind())}>
+      <Match when={view() === "code"}>
         <CodeView path={path()} name={e().name} ext={e().ext} setMeta={setMeta} large={props.large} />
       </Match>
-      <Match when={/^(docx|docm|dotx)$/.test(e().ext)}>
+      <Match when={view() === "docx"}>
         <DocxView path={path()} entry={e()} setMeta={setMeta} large={props.large} />
       </Match>
-      <Match when={SHELL_THUMB.has(kind())}><ShellThumbView path={path()} entry={e()} large={props.large} /></Match>
+      <Match when={view() === "shell"}><ShellThumbView path={path()} entry={e()} large={props.large} /></Match>
     </Switch>
   );
 }

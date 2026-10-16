@@ -1,4 +1,4 @@
-import { AppWindow, Binary, ChevronDown, ChevronRight, FolderOpen, LoaderCircle, PackageOpen, Play } from "lucide-solid";
+import { AppWindow, Binary, ChevronDown, ChevronRight, FolderOpen, LoaderCircle, PackageOpen, Play } from "../../lib/icons";
 import { createEffect, createMemo, createResource, createSignal, For, Index, on, onCleanup, onMount, Show, type JSX } from "solid-js";
 import DOMPurify from "dompurify";
 import { marked } from "marked";
