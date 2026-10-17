@@ -253,6 +253,51 @@ export const tests = [
     },
   },
   {
+    name: "middle-click autoscroll: hold and move, or click and follow the mouse",
+    async run(t) {
+      const mouse = (type, x, y, extra = {}) => t.c.send("Input.dispatchMouseEvent", { type, x, y, ...extra });
+      const top = () => t.c.eval(`${T}.state.fileList().scrollTop`);
+      const marker = () => t.c.eval(`!!document.querySelector(".autoscroll-mark")`);
+      await go(t, t.p("bulk"));
+      await t.c.waitFor(`document.querySelectorAll(".files .row").length > 10`, { what: "the bulk folder" });
+      const at = await t.c.eval(`(() => { const b = ${T}.state.fileList().getBoundingClientRect(); return { x: b.left + 120, y: b.top + 80 }; })()`);
+      // Hold the wheel and move down: it scrolls, and stops once the wheel is released.
+      await mouse("mousePressed", at.x, at.y, { button: "middle", buttons: 4, clickCount: 1 });
+      assert(await marker(), "no autoscroll marker after pressing the wheel");
+      await mouse("mouseMoved", at.x, at.y + 160, { buttons: 4 });
+      await sleep(500);
+      await mouse("mouseReleased", at.x, at.y + 160, { button: "middle", buttons: 0, clickCount: 1 });
+      const held = await top();
+      assert(held > 150, `holding and moving scrolled only ${held}px`);
+      assert(!(await marker()), "the marker stayed after releasing the wheel");
+      await sleep(250);
+      assert((await top()) === held, "it kept scrolling after the wheel was released");
+      // A click of the wheel: it follows the mouse until the next click, which does nothing else.
+      await t.c.eval(`${T}.state.fileList().scrollTop = 0`);
+      const selected = await t.c.eval(`${tab}.selection[0]().join()`);
+      await mouse("mousePressed", at.x, at.y, { button: "middle", buttons: 4, clickCount: 1 });
+      await mouse("mouseReleased", at.x, at.y, { button: "middle", buttons: 0, clickCount: 1 });
+      await mouse("mouseMoved", at.x, at.y + 160, { buttons: 0 });
+      await sleep(500);
+      const followed = await top();
+      assert(followed > 150, `after a click of the wheel it scrolled only ${followed}px`);
+      await mouse("mousePressed", at.x, at.y + 160, { button: "left", buttons: 1, clickCount: 1 });
+      await mouse("mouseReleased", at.x, at.y + 160, { button: "left", buttons: 0, clickCount: 1 });
+      assert(!(await marker()), "a click didn't stop autoscroll");
+      assert((await t.c.eval(`${tab}.selection[0]().join()`)) === selected, "the click that stopped autoscroll also selected a file");
+      // A folder still opens in a new tab on a middle-click.
+      await go(t, t.root);
+      await t.c.waitFor(`[...document.querySelectorAll(".files .row .name")].some((e) => e.textContent === "docs")`, { what: "the fixture folder" });
+      const tabs = await t.c.eval(`${T}.state.tabs().length`);
+      const docs = await t.c.eval(`(() => { const el = [...document.querySelectorAll(".files .row .name")].find((e) => e.textContent === "docs"); const b = el.getBoundingClientRect(); return { x: b.left + 20, y: b.top + b.height / 2 }; })()`);
+      await mouse("mousePressed", docs.x, docs.y, { button: "middle", buttons: 4, clickCount: 1 });
+      await mouse("mouseReleased", docs.x, docs.y, { button: "middle", buttons: 0, clickCount: 1 });
+      await t.c.waitFor(`${T}.state.tabs().length === ${tabs + 1}`, { what: "docs in a new tab" });
+      assert(!(await marker()), "a middle-click on a folder started autoscroll");
+      await t.c.eval(`${T}.state.closeTab(${T}.state.tabs()[${tabs}].id)`);
+    },
+  },
+  {
     name: "Shift+Delete deletes for good and leaves the Recycle Bin alone",
     async run(t) {
       await go(t, t.root);

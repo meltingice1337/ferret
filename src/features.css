@@ -173,6 +173,25 @@ body.reordering, body.reordering * { cursor: grabbing !important; }
 .pane.idle .row.selected :is(.ficon, .c-date, .c-type, .c-size) { color: var(--fg-3); opacity: 1; }
 .pane.idle .cell.selected { border-color: var(--accent-line); }
 .tab-split { display: inline-flex; flex: none; color: var(--fg-3); }
+
+/* Middle-click autoscroll (lib/autoscroll.ts): a marker where it started, and a cursor showing
+   which way it's going. */
+.autoscroll-mark {
+  position: fixed; z-index: 1000; width: 32px; height: 32px; margin: -16px 0 0 -16px; border-radius: 50%;
+  display: grid; place-items: center; pointer-events: none; color: var(--fg-2);
+  background: var(--raised); border: 1px solid var(--line-2); box-shadow: 0 2px 10px rgba(0, 0, 0, 0.35);
+}
+:root[data-autoscroll], :root[data-autoscroll] * { cursor: all-scroll !important; user-select: none; }
+:root[data-autoscroll="ns"], :root[data-autoscroll="ns"] * { cursor: ns-resize !important; }
+:root[data-autoscroll="ew"], :root[data-autoscroll="ew"] * { cursor: ew-resize !important; }
+:root[data-autoscroll="n"], :root[data-autoscroll="n"] * { cursor: n-resize !important; }
+:root[data-autoscroll="s"], :root[data-autoscroll="s"] * { cursor: s-resize !important; }
+:root[data-autoscroll="e"], :root[data-autoscroll="e"] * { cursor: e-resize !important; }
+:root[data-autoscroll="w"], :root[data-autoscroll="w"] * { cursor: w-resize !important; }
+:root[data-autoscroll="ne"], :root[data-autoscroll="ne"] * { cursor: ne-resize !important; }
+:root[data-autoscroll="nw"], :root[data-autoscroll="nw"] * { cursor: nw-resize !important; }
+:root[data-autoscroll="se"], :root[data-autoscroll="se"] * { cursor: se-resize !important; }
+:root[data-autoscroll="sw"], :root[data-autoscroll="sw"] * { cursor: sw-resize !important; }
 .preview { flex: none; display: flex; flex-direction: column; position: relative; min-width: 0; overflow: hidden; border-left: 1px solid var(--line); }
 /* Inside the preview's left edge (the preview clips anything outside it), above its content. */
 .preview-resizer { position: absolute; left: 0; top: 0; bottom: 0; width: 8px; cursor: col-resize; z-index: 20; }

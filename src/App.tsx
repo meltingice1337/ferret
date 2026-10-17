@@ -15,6 +15,7 @@ import StatusBar from "./components/StatusBar";
 import TitleBar from "./components/TitleBar";
 import Toolbar from "./components/Toolbar";
 import "./lib/drag";
+import "./lib/autoscroll";
 import {
   copyPaths, copyToClipboard, deleteItems, emptyBin, newFile, newFolder, openInVscode, openTerminal, paste, redo, redoLabel,
   startRename, targetsOf, toOtherPane, undo, undoLabel,

@@ -285,7 +285,8 @@ export default function FileView(props: { tab: Tab }) {
 
   const onItemDown = (ev: MouseEvent, e: Entry) => {
     if (t.renaming[0]() === e.path) return;
-    if (ev.button === 1) { ev.preventDefault(); if (e.isDir) openEntry(t, e, true); return; }
+    // Middle-click: a folder opens in a new tab; on a file it starts autoscroll (lib/autoscroll.ts).
+    if (ev.button === 1) { if (e.isDir) { ev.preventDefault(); openEntry(t, e, true); } return; }
     if (ev.button === 2) { if (!isSel(e.path)) selectOnly(e); return; }
     if (ev.button !== 0) return;
     scroller.focus({ preventScroll: true });
