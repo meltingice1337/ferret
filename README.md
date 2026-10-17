@@ -17,7 +17,7 @@
 </p>
 
 <p align="center">
-  <img src="docs/hero.png" alt="Ferret showing a project folder with the README previewed in the side pane">
+  <img src="docs/hero.png" alt="Ferret in split view: a project folder next to its srccomponents folder, with Panes.tsx previewed with syntax highlighting">
 </p>
 
 ---
@@ -29,9 +29,11 @@ Fuzzy search over every file on every drive, ranked by name match and how often 
 Filters: `ext:pdf,docx` · `type:folder` · `size:>100mb` · `modified:<7d` · `dm:2026-03-04` · `in:"C:\Program Files"` · `!node_modules\` · globs like `*.rs`.
 Filters are suggested as you type (`Tab` completes them). Running WSL distros are searchable too: each is listed from inside Linux and refreshed every 15 minutes, and a stopped distro is never started just to be indexed.
 Search inside files with `content:"some text"`: it reads the files in the open folder (or the one named with `in:`), and each result shows the line with the text. The other filters narrow which files are read; binary files and `node_modules` are skipped.
+Recent searches come back when you open `Ctrl+K`, and any search can be saved to the sidebar (☆). `Ctrl+Shift+Enter` opens every match as a tab that lists them like a folder and stays current.
 
-**👁 Previews — `Alt+P`**
+**👁 Previews — `Alt+P`, or `Space` for Quick Look**
 Images, video, audio, PDF, Word (`.docx`), Markdown, CSV, fonts, SVG and syntax-highlighted code. A hex view for everything else, plus version and CPU architecture details for `.exe` and `.dll` files.
+A file changed while it's shown (saved from an editor, say) is shown again as it is now. Click the path in the details to copy it.
 
 **🗜 Archives as folders**
 Browse, preview and extract `zip`, `7z`, `rar` and `tar` (`.gz`, `.xz`, `.zst`, `.bz2`) archives as if they were folders, or compress files into one.
@@ -47,12 +49,17 @@ Right-click → **Compress video…** / **Compress picture…** opens an editor 
 **🪟 Feels like Windows, only faster**
 - The real Explorer context menu, including third-party entries (7-Zip, Git, VS Code, PowerToys…)
 - Properties and Open with dialogs, and a clipboard that works with Explorer
-- Copy and move in the background with progress and conflict handling, plus undo/redo
+- Copy, move and delete in the background with progress and conflict handling, plus undo/redo. Deleting thousands of items keeps the window responsive, a file that's in use asks **Try again / Skip / Skip all** instead of stopping everything, and emptying the Recycle Bin shows its progress and can be canceled
+- Asks before a rename changes a file's extension
 - Recycle Bin you can browse and restore from
 - Asks for admin rights only when a protected folder needs it, and any window can restart as administrator with its tabs intact
 - Drag files to and from other apps, including switching apps with `Alt+Tab` mid-drag
+- Middle-click autoscroll, like Explorer: press the mouse wheel and move away from that point to scroll (hold it, or click once to follow the mouse until the next click)
 - Windows 11-style menus, and each window is named after its folder in the taskbar and `Alt+Tab`, like Explorer
-- Optional: make Ferret the default file manager (Win+E, folder double-clicks), with a one-click switch back. Apps' "Show in folder" opens Ferret too, with the file selected when the app passes it to Explorer: a small background helper swaps in Ferret before Explorer's window appears, and Control Panel and other non-folder windows stay in Explorer
+- Optional: make Ferret the default file manager (Win+E, folder double-clicks), with a one-click switch back. Apps' "Show in folder" opens Ferret too, with the file selected when the app passes it to Explorer: a small background helper swaps in Ferret before Explorer's window appears, and Control Panel and other non-folder windows stay in Explorer. Uninstalling Ferret gives folders back to Explorer
+
+**◫ Split view — `Ctrl+\`**
+Two folders side by side in one tab, each with its own history and selection. `Tab` switches between them, and the toolbar, preview and shortcuts follow the one you're in. Copy or move to the other pane from **Copy to ▸** / **Move to ▸**, the command palette, or by dragging across. Split tabs come back after a restart.
 
 **🗂 Built for keyboards and many tabs**
 Tabs (`Ctrl+T`, `Ctrl+Shift+T`), a command palette (`Ctrl+Shift+P`), folder filter (`Ctrl+F`), editable path bar (`Ctrl+L`), favorites (`Ctrl+D`), and open in terminal (`` Ctrl+` ``) or VS Code.
@@ -65,10 +72,20 @@ Recent folders are ranked by how often and how recently you use them. A folder c
 WSL distros, network (UNC) paths and all drives in the sidebar. Folders refresh live when their contents change.
 
 **🎨 Make it yours**
-Dark, light or system theme, with a Mica, Acrylic or solid backdrop. Pick any accent color and a comfortable or compact layout.
+Dark, light or system theme, with a Mica, Acrylic or solid backdrop. Pick any accent color and a comfortable or compact layout. Short, Fluent-style animations, which you can turn off in Settings (and which stay off when Windows' animation effects are off).
 
 **🔄 Stays up to date**
 Updates come from GitHub Releases: Ferret shows what's new, then updates and restarts in one click. If something goes wrong, Settings → **Open logs** has the app's log files.
+
+---
+
+## Demo
+
+Code previews, filtering a folder, a Word document, `Ctrl+K` (names, then text inside files) and split view, in 30 seconds:
+
+<p align="center">
+  <img src="docs/demo.gif" alt="A 30-second tour of Ferret: code previews with syntax highlighting, filtering a folder as you type, a Word document rendered in the preview, Ctrl+K finding a file by name and then text inside files, and split view with a photo dragged from one pane to the other">
+</p>
 
 ---
 
