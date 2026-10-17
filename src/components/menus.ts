@@ -1,14 +1,14 @@
 import {
-  AppWindow, ArrowDownUp, ClipboardPaste, Code2, Copy, CopyPlus, Eye, FileArchive, FilePlus, FolderInput, FolderOpen,
+  Columns2, AppWindow, ArrowDownUp, ClipboardPaste, Code2, Copy, CopyPlus, Eye, FileArchive, FilePlus, FolderInput, FolderOpen,
   FolderOutput, FolderPlus, Info, Layers, LayoutGrid, List, MousePointerClick, PackageOpen, Pencil, Redo2, RotateCw,
   Scissors, SquareTerminal, Star, Trash2, Undo2, ExternalLink, MoreHorizontal, Hash, PanelRight, BookmarkPlus,
   ArchiveRestore, Blocks, FolderSearch, ShieldAlert, SquareArrowOutUpRight, Clapperboard, ImageDown,
 } from "../lib/icons";
 import { api } from "../lib/api";
 import { kindOf } from "../lib/format";
-import { basename, isRecycle, isWsl, parent, pathKey } from "../lib/path";
+import { isVirtual, basename, isRecycle, isWsl, parent, pathKey } from "../lib/path";
 import {
-  favorites, isFavorite, recents, reload, resetView, saveViewForFolder, setUi,
+  fileList, favorites, isFavorite, recents, reload, resetView, saveViewForFolder, setUi,
   toggleFavorite, ui, updateView, type MenuItem, type Tab,
 } from "../lib/state";
 import {
@@ -16,7 +16,7 @@ import {
   NEW_FILE_TYPES, openFile, openInVscode, openTerminal, paste, purgeFromBin, realPath, redo, redoLabel, restoreFromBin,
   showNativeMenu, startRename, targetsOf, transferTo, transferWithPicker, undo, undoLabel, visibleEntries, zipNameFor,
 } from "../lib/ops";
-import { adminWindow, elevateWindow, goTo, openEntry, openMenu, openNewWindow, places, toast } from "../lib/state";
+import { adminWindow, elevateWindow, goTo, openEntry, openMenu, openNewWindow, otherPane, places, toast } from "../lib/state";
 import type { Entry, GroupBy, ShellMenuItem, SortBy } from "../lib/types";
 
 export const SORT_LABELS: Record<SortBy, string> = {
@@ -58,6 +58,12 @@ function destinations(op: "copy" | "move", paths: string[]): MenuItem[] {
     seen.add(k);
     items.push({ label, icon, action: () => transferTo(op, paths, p) });
   };
+  // Split view: the other pane's folder first.
+  const other = otherPane();
+  if (other && !isVirtual(other.p)) {
+    add(other.p, `Other pane · ${basename(other.p) || other.p}`, Columns2);
+    if (items.length) items.push({ separator: true });
+  }
   for (const f of favorites().filter((f) => f.isDir)) add(f.path, f.name, Star);
   for (const r of recents().slice(0, 5)) add(r.path, basename(r.path), FolderOpen);
   if (items.length) items.push({ separator: true });
@@ -407,7 +413,7 @@ export function openKeyboardMenu(t: Tab) {
     openMenu(r.left + 40, r.bottom, itemMenu(t, cur, targets, r.left + 40, r.bottom));
     if (!targets.some((x) => x.inArchive)) addShellEntries(t, targets.map((x) => x.path), false);
   } else {
-    const f = document.querySelector<HTMLElement>(".files")!.getBoundingClientRect();
+    const f = fileList()!.getBoundingClientRect();
     openMenu(f.left + 60, f.top + 40, backgroundMenu(t, f.left + 60, f.top + 40));
     addShellEntries(t, [], true);
   }

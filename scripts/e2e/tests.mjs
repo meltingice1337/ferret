@@ -214,6 +214,45 @@ export const tests = [
     },
   },
   {
+    name: "split view: two folders, Tab switches, copy to the other pane",
+    async run(t) {
+      const paneNames = `[...document.querySelectorAll(".pane-name")].map((e) => e.textContent)`;
+      const inUse = `[...document.querySelectorAll(".pane")].findIndex((e) => e.classList.contains("in-use"))`;
+      const tabCount = await t.c.eval(`${T}.state.tabs().length`);
+      await go(t, t.root);
+      await t.c.waitFor(`[...document.querySelectorAll(".files .row .name")].some((e) => e.textContent === "split-me.txt")`, { what: "the fixture folder" });
+      await t.c.eval(`${T}.state.fileList()?.focus()`);
+      // Ctrl+\ opens a second pane on the same folder, and it gets the keyboard.
+      await t.c.key("\\", ["Control"]);
+      await t.c.waitFor(`document.querySelectorAll(".pane").length === 2 && ${inUse} === 1`, { what: "a second pane, in use" });
+      // The second pane goes elsewhere; the first stays.
+      await go(t, t.p("docs"));
+      await t.c.waitFor(`${paneNames}[1] === "docs"`, { what: "the second pane in docs" });
+      assert((await t.c.eval(paneNames))[0] !== "docs", "the first pane moved too");
+      // Tab gives the keyboard (and the toolbar) to the first pane.
+      await t.c.key("Tab");
+      await t.c.waitFor(`${inUse} === 0 && ${tab}.p === ${JSON.stringify(t.root)}`, { what: "the first pane in use" });
+      // Copy a file across with the command palette's "Copy to the other pane".
+      await clickRow(t, "split-me.txt");
+      await t.c.key("p", ["Control", "Shift"]);
+      await t.c.waitFor(`document.querySelector(".palette input")`, { what: "the command palette" });
+      await t.c.type("copy to the other pane");
+      await t.c.waitFor(`document.querySelector(".palette-item.cmd.active")?.textContent.includes("Copy to the other pane")`, { what: "the command" });
+      await t.c.key("Enter");
+      const start = Date.now();
+      while (!existsSync(t.p("docs", "split-me.txt")) && Date.now() - start < 8000) await sleep(150);
+      assert(existsSync(t.p("docs", "split-me.txt")), "the file wasn't copied into the other pane's folder");
+      assert(existsSync(t.p("split-me.txt")), "the original is gone (it should have been copied)");
+      await t.c.waitFor(`[...document.querySelectorAll(".pane:nth-child(2) .files .row .name")].some((e) => e.textContent === "split-me.txt")`, { what: "the copy listed in the other pane" });
+      // Ctrl+W in the second pane closes that pane, not the tab.
+      await t.c.key("Tab");
+      await t.c.waitFor(`${inUse} === 1`, { what: "the second pane in use again" });
+      await t.c.key("w", ["Control"]);
+      await t.c.waitFor(`document.querySelectorAll(".pane").length === 1`, { what: "split view closed" });
+      assert((await t.c.eval(`${T}.state.tabs().length`)) === tabCount, "Ctrl+W closed the tab instead of the pane");
+    },
+  },
+  {
     name: "Shift+Delete deletes for good and leaves the Recycle Bin alone",
     async run(t) {
       await go(t, t.root);
@@ -357,6 +396,7 @@ export function fixture(root, needle) {
     "code/lines.rs": "fn main() {\n\n    let x = 1; // one\n}\n",
     "sub/inner.txt": "inside",
     "rename-me.txt": "rename me",
+    "split-me.txt": "copied across in split view",
     "delete-me.txt": "delete me",
     "recycle-me.txt": "recycle me",
     [`${needle}.txt`]: "find me",

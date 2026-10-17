@@ -267,7 +267,8 @@ export interface FolderView {
 }
 
 export interface Session {
-  tabs: { path: string }[];
+  /** `split`: the folder of the tab's second pane (split view); `splitFocused`: it had the keyboard. */
+  tabs: { path: string; split?: string; splitFocused?: boolean }[];
   active: number;
   sidebarWidth?: number;
   collapsedSections?: string[];

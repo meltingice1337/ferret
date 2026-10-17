@@ -3,7 +3,7 @@ import { createEffect, createMemo, createSignal, For, on, Show } from "solid-js"
 import { api } from "../lib/api";
 import { isRecycle, isWsl, parent, segments } from "../lib/path";
 import {
-  activeTab, goBack, goForward, goUp, isFavorite, navigate, openMenu, refresh, setUi, sidebarDocked, toast,
+  fileList, activeTab, goBack, goForward, goUp, isFavorite, navigate, openMenu, refresh, setUi, sidebarDocked, toast,
   toggleFavorite, ui, winWidth,
 } from "../lib/state";
 import FileIcon from "./FileIcon";
@@ -165,7 +165,7 @@ function PathEditor() {
 
   const close = () => {
     setUi("editingPath", false);
-    requestAnimationFrame(() => { if (!ui.editingPath) document.querySelector<HTMLElement>(".files")?.focus({ preventScroll: true }); });
+    requestAnimationFrame(() => { if (!ui.editingPath) fileList()?.focus({ preventScroll: true }); });
   };
 
   const suggest = (value: string) => {
@@ -299,8 +299,8 @@ function FilterBox() {
           onInput={(e) => tab().filter[1](e.currentTarget.value)}
           onBlur={() => !tab().filter[0]() && setUi("filterOpen", false)}
           onKeyDown={(e) => {
-            if (e.key === "Escape") { e.preventDefault(); close(); document.querySelector<HTMLElement>(".files")?.focus(); }
-            if (e.key === "Enter" || e.key === "ArrowDown") { e.preventDefault(); document.querySelector<HTMLElement>(".files")?.focus(); }
+            if (e.key === "Escape") { e.preventDefault(); close(); fileList()?.focus(); }
+            if (e.key === "Enter" || e.key === "ArrowDown") { e.preventDefault(); fileList()?.focus(); }
             e.stopPropagation();
           }} />
         <button class="icon-btn tiny" classList={{ on: typeTokens(tab().filter[0]()).length > 0 }} title="Show only a type of file"

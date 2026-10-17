@@ -189,7 +189,7 @@ export function releaseKeys(discard = false) {
     const keys = held;
     held = [];
     if (!keys.length) return;
-    const files = document.querySelector<HTMLElement>(".files");
+    const files = fileList();
     if (!files) return;
     files.focus({ preventScroll: true });
     for (const k of keys) files.dispatchEvent(new KeyboardEvent("keydown", { ...k, bubbles: true, cancelable: true }));
@@ -298,13 +298,74 @@ export class Tab {
   ordered = createSignal<Entry[]>([]);
   /** Path being renamed inline. */
   renaming = createSignal<string | null>(null);
+  /** Split view: the second pane, a Tab of its own (not in the tab strip). */
+  split = createSignal<Tab | null>(null);
+  /** The second pane has the keyboard (the toolbar, preview and commands follow it). */
+  splitFocused = createSignal(false);
 
   get p() { return this.path[0](); }
 }
 
 export const [tabs, setTabs] = createSignal<Tab[]>([]);
 export const [activeId, setActiveId] = createSignal(0);
-export const activeTab = () => tabs().find((t) => t.id === activeId()) ?? tabs()[0];
+/** The tab selected in the tab strip. */
+export const stripTab = () => tabs().find((t) => t.id === activeId()) ?? tabs()[0];
+/** The pane in use in a tab: the tab itself, or its second pane while that has the focus. */
+export const paneOf = (t: Tab) => (t.splitFocused[0]() && t.split[0]()) || t;
+/** The pane being worked in. Everything that acts on "the current folder" follows it: the
+ *  toolbar, keys, preview, Ctrl+K, the window title. */
+export const activeTab = () => { const t = stripTab(); return t && paneOf(t); };
+/** Every folder on screen or in a tab, second panes included (refreshing, watching). */
+export const allPanes = () => tabs().flatMap((t) => { const s = t.split[0](); return s ? [t, s] : [t]; });
+/** The tab whose second pane `pane` is. */
+const ownerOf = (pane: Tab) => tabs().find((t) => t.split[0]() === pane);
+/** The other pane of a split tab (where "Copy to other pane" goes), if it's split. */
+export function otherPane(): Tab | null {
+  const t = stripTab();
+  const s = t?.split[0]();
+  return s ? (t.splitFocused[0]() ? t : s) : null;
+}
+/** The focused pane's file list. */
+export const fileList = () =>
+  document.querySelector<HTMLElement>(`.fileview[data-tab="${activeTab()?.id}"] .files`) ?? document.querySelector<HTMLElement>(".files");
+const focusList = () => requestAnimationFrame(() => fileList()?.focus({ preventScroll: true }));
+
+/** Opens a second pane next to the tab, at the same folder (Ctrl+\), or closes it. */
+export async function toggleSplit(t = stripTab()) {
+  if (!t) return;
+  if (t.split[0]()) return closeSplit(t);
+  const pane = new Tab();
+  pane.path[1](t.p);
+  pane.loading[1](true);
+  t.split[1](pane);
+  t.splitFocused[1](true);
+  await navigate(pane, t.p);
+  syncWatchers();
+  persistSession();
+  focusList();
+}
+
+export function closeSplit(t = stripTab()) {
+  if (!t?.split[0]()) return;
+  batch(() => { t.splitFocused[1](false); t.split[1](null); });
+  syncWatchers();
+  persistSession();
+  focusList();
+}
+
+/** Gives the keyboard to the other pane (Tab). */
+export function switchPane(t = stripTab()) {
+  if (!t?.split[0]()) return;
+  t.splitFocused[1](!t.splitFocused[0]());
+  focusList();
+}
+
+/** A pane got the focus (a click in it): the toolbar, preview and keys follow it. */
+export function focusPane(pane: Tab) {
+  const owner = ownerOf(pane);
+  if (owner) owner.splitFocused[1](true);
+  else if (pane.split[0]()) pane.splitFocused[1](false);
+}
 
 function applyResolved(tab: Tab, r: ResolvedView) {
   tab.view[1]({ ...DEFAULT_VIEW, ...r.view });
@@ -523,6 +584,9 @@ export function reopenClosedTab() {
 }
 
 export function closeTab(id: number) {
+  // Ctrl+W in a second pane closes that pane.
+  const owner = tabs().find((t) => t.split[0]()?.id === id);
+  if (owner) return closeSplit(owner);
   const list = tabs();
   if (list.length <= 1) return;
   const idx = list.findIndex((t) => t.id === id);
@@ -601,7 +665,7 @@ function syncWatchers() {
   watchTimer = window.setTimeout(() => {
     // Each tab folder plus its parent: a folder deleted/renamed from outside only shows up
     // as an event in its parent.
-    const all = tabs().filter((t) => !isSearch(t.p)).flatMap((t) => [t.p, parent(t.p)]).filter((p): p is string => !!p);
+    const all = allPanes().filter((t) => !isSearch(t.p)).flatMap((t) => [t.p, parent(t.p)]).filter((p): p is string => !!p);
     const paths = [...new Map(all.map((p) => [pathKey(p), p])).values()];
     api.watchDirs(paths).catch(() => {});
   }, 200);
@@ -622,7 +686,7 @@ listen<string[]>("fs-changed", (ev) => {
     clearTimeout(pendingReload.get(k));
     pendingReload.set(k, window.setTimeout(() => {
       pendingReload.delete(k);
-      for (const t of tabs()) if (pathKey(t.p) === k) reload(t);
+      for (const t of allPanes()) if (pathKey(t.p) === k) reload(t);
     }, busy ? 1000 : 180));
   }
 });
@@ -685,7 +749,7 @@ export async function resetView(tab: Tab) {
 
 /** Re-resolves the view in every tab (after settings / overrides change). */
 export function reresolveAll() {
-  for (const t of tabs()) reload(t, true);
+  for (const t of allPanes()) reload(t, true);
 }
 
 export function sortBy(tab: Tab, key: ViewSettings["sortBy"]) {
@@ -724,7 +788,7 @@ export function saveSessionNow(): Promise<void> {
   if (!ready() || adminWindow()) return Promise.resolve();
   const list = tabs();
   const session: Session = {
-    tabs: list.map((t) => ({ path: t.p })),
+    tabs: list.map((t) => ({ path: t.p, ...(t.split[0]() ? { split: t.split[0]()!.p, splitFocused: t.splitFocused[0]() } : {}) })),
     active: Math.max(0, list.findIndex((t) => t.id === activeId())),
     sidebarWidth: ui.sidebarWidth,
     collapsedSections: [...ui.collapsedSections],
@@ -843,7 +907,7 @@ export async function boot() {
   // Only the first window restores the last session; later ones open what they were
   // launched for, or the home folder.
   const fromSession = !launch.length && info.firstWindow && !info.elevated && settings.restoreSession && !!b.session?.tabs?.length;
-  const wanted: { path: string; select?: string | null }[] = launch.length
+  const wanted: { path: string; select?: string | null; split?: string; splitFocused?: boolean }[] = launch.length
     ? launch.map((t) => ({ path: t.path || b.places.home, select: t.select }))
     : fromSession ? b.session!.tabs : [{ path: b.places.home }];
   const first = launch.length ? Math.max(0, launch.findIndex((t) => t.active)) : fromSession ? b.session!.active ?? 0 : 0;
@@ -854,6 +918,13 @@ export async function boot() {
     if (await navigate(tab, t.path, { select: t.select ?? null })) {
       opened.push(tab);
       if (i === first) shown = tab;
+      if (t.split) {
+        const pane = new Tab();
+        if (await navigate(pane, t.split)) {
+          tab.split[1](pane);
+          tab.splitFocused[1](!!t.splitFocused);
+        }
+      }
     }
   }
   if (!opened.length) {

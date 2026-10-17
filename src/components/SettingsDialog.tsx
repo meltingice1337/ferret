@@ -300,6 +300,7 @@ const KEYS: [string, string][] = [
   ["Alt+← → ↑", "Back / forward / up"], ["Backspace", "Up"], ["F5", "Refresh"],
   // Tabs and windows
   ["Ctrl+T / Ctrl+W", "New / close tab"], ["Ctrl+Shift+T", "Reopen closed tab"], ["Ctrl+Tab", "Next tab"],
+  ["Ctrl+\\", "Split view (two folders side by side)"], ["Tab", "Other pane (in split view)"],
   ["Ctrl+N", "New window"],
   // Files
   ["Space", "Quick Look"], ["Alt+P", "Preview pane"], ["F2", "Rename"], ["Ctrl+Shift+N", "New folder"],

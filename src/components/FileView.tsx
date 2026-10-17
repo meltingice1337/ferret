@@ -14,7 +14,7 @@ import { isRecycle, isSearch, isWithin, pathKey, samePath, searchQuery } from ".
 import { enter } from "../lib/motion";
 import { openSearchPalette } from "./SearchPalette";
 import { folderSizes, requestFolderSizes, sizeOrder, sizesApply, sizesEpoch, uncounted } from "../lib/foldersizes";
-import { ask, goUp, holdKeys, jobsRunning, promptSaveSearch, savedSearch, openEntry, openMenu, persistSettings, releaseKeys, reload, setSettings, setUi, settings, sortBy, takeTypeAhead, toast, ui, updateView, type Tab } from "../lib/state";
+import { activeTab, ask, fileList, focusPane, goUp, holdKeys, jobsRunning, promptSaveSearch, savedSearch, openEntry, openMenu, persistSettings, releaseKeys, reload, setSettings, setUi, settings, sortBy, takeTypeAhead, toast, ui, updateView, type Tab } from "../lib/state";
 import type { Entry, ListColumn, SortBy } from "../lib/types";
 
 export { GROUP_LABELS, SORT_LABELS } from "./menus";
@@ -399,6 +399,8 @@ export default function FileView(props: { tab: Tab }) {
   /** Takes the keyboard after a folder loads, unless Ctrl+K, a dialog or a menu opened over
    *  it meanwhile (typing there must not jump around the list). */
   const takeFocus = () => {
+    // In split view only the pane in use takes it (both lists load at once).
+    if (t !== activeTab()) return;
     if (!document.activeElement?.closest(".palette, .modal, .menu, .ql")) scroller.focus({ preventScroll: true });
   };
   createEffect(on(() => t.reveal[0](), (_, prev) => {
@@ -628,7 +630,8 @@ export default function FileView(props: { tab: Tab }) {
   };
 
   return (
-    <div class="fileview" classList={{ grid: view().mode === "grid", bin: bin() }}>
+    // A click or the keyboard in this view makes it the pane in use (split view).
+    <div class="fileview" classList={{ grid: view().mode === "grid", bin: bin() }} data-tab={t.id} onFocusIn={() => focusPane(t)}>
       <Show when={bin()}><BinBar tab={t} /></Show>
       <Show when={found()}><SearchBar tab={t} /></Show>
       <Show when={view().mode === "list"}>
@@ -781,7 +784,7 @@ function RenameInput(props: { tab: Tab; entry: Entry; grid?: boolean }) {
   let busy = false;
   let closed = false;
   const [error, setError] = createSignal<string | null>(null);
-  const focusList = () => requestAnimationFrame(() => document.querySelector<HTMLElement>(".files")?.focus({ preventScroll: true }));
+  const focusList = () => requestAnimationFrame(() => fileList()?.focus({ preventScroll: true }));
   const close = () => {
     closed = true;
     if (props.tab.renaming[0]() === props.entry.path) props.tab.renaming[1](null);

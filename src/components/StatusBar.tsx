@@ -1,9 +1,9 @@
-import { ArrowDownUp, Eye, EyeOff, Layers, LayoutGrid, List, LoaderCircle, PanelRight } from "../lib/icons";
+import { ArrowDownUp, Columns2, Eye, EyeOff, Layers, LayoutGrid, List, LoaderCircle, PanelRight } from "../lib/icons";
 import { createMemo, Show } from "solid-js";
 import { formatSize, plural } from "../lib/format";
 import { isRecycle, pathKey } from "../lib/path";
 import {
-  activeTab, openMenu, persistSession, previewSpace, saveViewForFolder, setUi, settings, ui, updateView,
+  stripTab, toggleSplit, activeTab, openMenu, persistSession, previewSpace, saveViewForFolder, setUi, settings, ui, updateView,
 } from "../lib/state";
 import type { Entry, GroupBy, SortBy } from "../lib/types";
 import { folderSizes } from "../lib/foldersizes";
@@ -77,6 +77,10 @@ export default function StatusBar() {
             title="Icon size (Ctrl+wheel)"
             onInput={(e) => updateView(t(), { iconSize: +e.currentTarget.value })} />
         </Show>
+        <button class="sb-btn icon" classList={{ on: !!stripTab()?.split[0]() }} title={stripTab()?.split[0]() ? "Close split view (Ctrl+\\)" : "Split view: two folders side by side (Ctrl+\\)"}
+          onClick={() => toggleSplit()}>
+          <Columns2 size={14} />
+        </button>
         <button class="sb-btn icon" classList={{ on: ui.previewOpen && previewSpace() > 0 }} disabled={!previewSpace()}
           title={previewSpace() ? "Preview pane (Alt+P)" : "Window too narrow for the preview pane: use Quick Look (Space)"}
           onClick={() => { setUi("previewOpen", !ui.previewOpen); persistSession(); }}>

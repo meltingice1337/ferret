@@ -1,7 +1,7 @@
 import { createEffect, For, on, onCleanup, onMount, Show } from "solid-js";
 import ContextMenu from "./components/ContextMenu";
 import { AskDialog, BatchRenameDialog, ConflictDialog, PropertiesDialog } from "./components/Dialogs";
-import FileView from "./components/FileView";
+import Panes from "./components/Panes";
 import { DragGhost, JobsPanel } from "./components/Jobs";
 import MediaEditor, { closeMediaEditor } from "./components/MediaEditor";
 import UpdateCard, { WhatsNewDialog } from "./components/UpdateCard";
@@ -17,9 +17,9 @@ import Toolbar from "./components/Toolbar";
 import "./lib/drag";
 import {
   copyPaths, copyToClipboard, deleteItems, emptyBin, newFile, newFolder, openInVscode, openTerminal, paste, redo, redoLabel,
-  startRename, targetsOf, undo, undoLabel,
+  startRename, targetsOf, toOtherPane, undo, undoLabel,
 } from "./lib/ops";
-import { adminWindow, applyAppearance, elevateWindow, searchTitle, settings, isFavorite, navigate, openNewWindow, persistSettings, places, resetView, setSettings } from "./lib/state";
+import { fileList, otherPane, stripTab, switchPane, toggleSplit, adminWindow, applyAppearance, elevateWindow, searchTitle, settings, isFavorite, navigate, openNewWindow, persistSettings, places, resetView, setSettings } from "./lib/state";
 import { basename, isRecycle, isSearch, RECYCLE } from "./lib/path";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import {
@@ -40,6 +40,12 @@ function paletteCommands(): PaletteCommand[] {
     cmd("Search everywhere", () => setUi("palette", "files"), "Ctrl+K"),
     cmd("New tab", () => newTab(t.p), "Ctrl+T"),
     cmd("Close tab", () => closeTab(t.id), "Ctrl+W"),
+    cmd(stripTab().split[0]() ? "Close split view" : "Split view (two folders side by side)", () => toggleSplit(), "Ctrl+\\"),
+    ...(otherPane() ? [
+      cmd("Switch pane", () => switchPane(), "Tab"),
+      cmd("Copy to the other pane", () => toOtherPane("copy"), undefined, otherPane()!.p),
+      cmd("Move to the other pane", () => toOtherPane("move"), undefined, otherPane()!.p),
+    ] : []),
     cmd("Reopen closed tab", () => reopenClosedTab(), "Ctrl+Shift+T"),
     cmd("New folder", () => newFolder(t), "Ctrl+Shift+N"),
     cmd("New text document", () => newFile(t, "New Text Document.txt")),
@@ -131,7 +137,7 @@ export default function App() {
   createEffect(on(() => modalOpen() || !!ui.menu, (open, wasOpen) => {
     if (wasOpen && !open) requestAnimationFrame(() => {
       const a = document.activeElement;
-      if (!a || a === document.body) document.querySelector<HTMLElement>(".files")?.focus({ preventScroll: true });
+      if (!a || a === document.body) fileList()?.focus({ preventScroll: true });
     });
   }));
 
@@ -167,7 +173,7 @@ export default function App() {
       // Focus fell back to <body> (e.g. after closing the path bar): hand list keys to the file list.
       if (target === document.body && !modalOpen() && !e.ctrlKey && !e.altKey &&
           e.key !== "/" && (e.key.startsWith("Arrow") || ["Home", "End", "PageUp", "PageDown", "Enter", " ", "Backspace"].includes(e.key) || e.key.length === 1)) {
-        const files = document.querySelector<HTMLElement>(".files");
+        const files = fileList();
         if (files) {
           e.preventDefault();
           files.focus({ preventScroll: true });
@@ -198,6 +204,9 @@ export default function App() {
         if (e.key === "Enter" && !inField) { e.preventDefault(); const tg = targetsOf(t); return setUi("properties", tg.length ? tg.map((x) => x.path) : [t.p]); }
       }
 
+      // Split view: Tab gives the keyboard to the other pane.
+      if (e.key === "Tab" && !ctrl && !e.altKey && !inField && otherPane()) { e.preventDefault(); return switchPane(); }
+
       // ---- file actions (not while typing) ----
       if (!inField) {
         const paths = () => targetsOf(t).map((x) => x.path);
@@ -218,6 +227,7 @@ export default function App() {
       if (k === "t") { e.preventDefault(); return newTab(t.p); }
       if (k === "n" && !e.shiftKey) { e.preventDefault(); return openNewWindow(); }
       if (k === "w") { e.preventDefault(); return closeTab(t.id); }
+      if (e.code === "Backslash" || e.key === "\\") { e.preventDefault(); return toggleSplit(); }
       if (k === "l") {
         e.preventDefault();
         // Like a browser's address bar: the whole path is selected, even if the editor is already open.
@@ -334,8 +344,8 @@ export default function App() {
           <TitleBar />
           <Toolbar />
           <div class="content">
-            <Show when={activeTab()} keyed>
-              {(t) => <FileView tab={t} />}
+            <Show when={stripTab()} keyed>
+              {(t) => <Panes tab={t} />}
             </Show>
             <Show when={ui.previewOpen && previewSpace() > 0}><PreviewPane /></Show>
           </div>

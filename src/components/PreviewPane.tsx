@@ -4,7 +4,7 @@ import { Portal } from "solid-js/web";
 import { formatDate, formatSize, kindOf, typeLabel } from "../lib/format";
 import { openFile } from "../lib/ops";
 import { basename, isRecycle, pathKey } from "../lib/path";
-import { activeTab, openEntry, persistSession, previewSpace, setUi, ui } from "../lib/state";
+import { fileList, activeTab, openEntry, persistSession, previewSpace, setUi, ui } from "../lib/state";
 import type { Entry } from "../lib/types";
 import { Thumb } from "./FileView";
 import Preview from "./preview/Preview";
@@ -185,7 +185,7 @@ export function QuickLook() {
 
   const close = () => {
     setUi("quickLook", false);
-    requestAnimationFrame(() => document.querySelector<HTMLElement>(".files")?.focus());
+    requestAnimationFrame(() => fileList()?.focus());
   };
 
   onMount(() => {

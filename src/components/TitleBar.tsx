@@ -1,12 +1,12 @@
 import { getCurrentWindow } from "@tauri-apps/api/window";
-import { ChevronDown, Copy, Minus, Plus, Search, ShieldAlert, Square, Trash2, X } from "../lib/icons";
+import { ChevronDown, Columns2, Copy, Minus, Plus, Search, ShieldAlert, Square, Trash2, X } from "../lib/icons";
 import { createEffect, createSignal, For, on, onCleanup, onMount, Show } from "solid-js";
 import FileIcon from "./FileIcon";
 import { placeMenu } from "./menus";
 import { beginReorder } from "../lib/drag";
 import { basename, isRecycle, isSearch, parent } from "../lib/path";
 import {
-  activeId, adminWindow, closedTabs, closeTab, goTo, moveTab, newTab, openMenu, persistSession, reload, reopenClosedTab, searchTitle, setActiveId,
+  fileList, paneOf, activeId, adminWindow, closedTabs, closeTab, goTo, moveTab, newTab, openMenu, persistSession, reload, reopenClosedTab, searchTitle, setActiveId,
   tabs, type MenuItem,
 } from "../lib/state";
 
@@ -65,26 +65,28 @@ export default function TitleBar() {
               <div
                 class="tab"
                 classList={{ active: tab.id === activeId() }}
-                title={tab.p}
+                title={paneOf(tab).p}
                 data-index={i()}
                 data-tab-id={tab.id}
-                data-drop={isSearch(tab.p) ? undefined : tab.p}
+                data-drop={isSearch(paneOf(tab).p) ? undefined : paneOf(tab).p}
                 onMouseDown={(e) => {
                   if (e.button === 1) { e.preventDefault(); closeTab(tab.id); return; }
                   if (e.button !== 0) return;
                   setActiveId(tab.id);
                   persistSession();
-                  requestAnimationFrame(() => document.querySelector<HTMLElement>(".files")?.focus({ preventScroll: true }));
+                  requestAnimationFrame(() => fileList()?.focus({ preventScroll: true }));
                   beginReorder(e, ".tab", i(), (from, to) => moveTab(tabs()[from].id, to));
                 }}
                 onContextMenu={(e) => tabMenu(e, tab.id, tab.p)}
               >
-                <Show when={!isRecycle(tab.p)} fallback={<Trash2 size={14} class="tab-bin" />}>
-                  <Show when={!isSearch(tab.p)} fallback={<Search size={14} class="tab-bin" />}>
+                {/* A split tab is named after the pane in use. */}
+                <Show when={!isRecycle(paneOf(tab).p)} fallback={<Trash2 size={14} class="tab-bin" />}>
+                  <Show when={!isSearch(paneOf(tab).p)} fallback={<Search size={14} class="tab-bin" />}>
                     <FileIcon entry={{ isDir: true, ext: "", isSymlink: false }} size={14} />
                   </Show>
                 </Show>
-                <span class="tab-label">{isSearch(tab.p) ? searchTitle(tab.p) : basename(tab.p) || "…"}</span>
+                <span class="tab-label">{isSearch(paneOf(tab).p) ? searchTitle(paneOf(tab).p) : basename(paneOf(tab).p) || "…"}</span>
+                <Show when={tab.split[0]()}><span class="tab-split" title="Split view"><Columns2 size={12} /></span></Show>
                 <button class="tab-close" title="Close tab (Ctrl+W)"
                   onMouseDown={(e) => e.stopPropagation()}
                   onClick={() => closeTab(tab.id)}><X size={13} /></button>

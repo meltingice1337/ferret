@@ -9,10 +9,10 @@ import { api } from "./api";
 import { entryFilter } from "./filter";
 import { invalidateFolderSizes } from "./foldersizes";
 import { plural } from "./format";
-import { basename, inRecycleBin, isArchiveName, isRecycle, isSearch, isWithin, parent, pathKey, samePath } from "./path";
+import { isVirtual, basename, inRecycleBin, isArchiveName, isRecycle, isSearch, isWithin, parent, pathKey, samePath } from "./path";
 import {
-  setJobsRunning,
-  activeTab, ask, ASK_ALT, beginTypeAhead, elevateWindow, friendly, navigate, places, refreshRecycleInfo, reload, setUi, tabs,
+  otherPane, setJobsRunning,
+  activeTab, allPanes, ask, ASK_ALT, beginTypeAhead, elevateWindow, friendly, navigate, places, refreshRecycleInfo, reload, setUi,
   toast, ui, type Tab,
 } from "./state";
 import { formatSize } from "./format";
@@ -84,9 +84,9 @@ function touch(...paths: (string | null | undefined)[]) {
 /** Re-lists every open tab (watchers catch most changes; this covers WSL/network) and marks
  *  changed folder sizes out of date. `everywhere`: the change's place isn't known (undo/redo). */
 function refreshAffected(everywhere = false) {
-  for (const t of tabs()) reload(t);
+  for (const t of allPanes()) reload(t);
   refreshRecycleInfo();
-  if (everywhere) invalidateFolderSizes(tabs().map((t) => t.p), true);
+  if (everywhere) invalidateFolderSizes(allPanes().map((t) => t.p), true);
   else invalidateFolderSizes([...touched]);
   touched.clear();
 }
@@ -351,6 +351,16 @@ export const isCut = (path: string) => !!ui.clipboard?.cut && ui.clipboard.paths
 
 function askConflict(conflicts: import("./types").Conflict[], op: "copy" | "move", dest: string): Promise<Policy | null> {
   return new Promise((resolve) => setUi("conflict", { conflicts, op, dest, resolve }));
+}
+
+/** Split view: copies or moves the selection into the other pane's folder. */
+export function toOtherPane(op: "copy" | "move", t = activeTab()) {
+  const dest = otherPane();
+  const paths = targetsOf(t).map((x) => x.path);
+  if (!dest || !paths.length) return;
+  if (isVirtual(dest.p)) return toast("The other pane doesn't show a folder");
+  if (samePath(dest.p, t.p)) return toast("Both panes show the same folder");
+  return transferTo(op, paths, dest.p);
 }
 
 export async function transferTo(op: "copy" | "move", sources: string[], dest: string): Promise<void> {
