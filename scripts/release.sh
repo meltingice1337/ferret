@@ -121,16 +121,16 @@ if [[ $skip -eq 1 ]]; then
   echo "${dim}Skipping checks (--skip-checks).${reset}"
 else
   step "Type-checking the frontend (tsc)"
-  npx tsc --noEmit -p . || fail "type check failed (fix it, or use --skip-checks)"
+  yarn tsc --noEmit -p . || fail "type check failed (fix it, or use --skip-checks)"
   step "Running the unit tests (vitest)"
-  npm test --silent || fail "unit tests failed (fix them, or use --skip-checks)"
+  yarn test || fail "unit tests failed (fix them, or use --skip-checks)"
   step "Running the Rust tests (cargo test)"
   (cd src-tauri && cargo test --release --quiet) || fail "tests failed (fix them, or use --skip-checks)"
   if [[ $skip_e2e -eq 1 ]]; then
     echo "${dim}Skipping the end-to-end tests (--skip-e2e).${reset}"
   else
     step "Running the end-to-end tests"
-    npm run test:e2e --silent || fail "end-to-end tests failed (see e2e-artifacts/; fix them, or use --skip-e2e)"
+    yarn test:e2e || fail "end-to-end tests failed (see e2e-artifacts/; fix them, or use --skip-e2e)"
   fi
   echo "${green}Checks passed.${reset}"
 fi
@@ -144,7 +144,7 @@ export TAURI_SIGNING_PRIVATE_KEY_PASSWORD="${TAURI_SIGNING_PRIVATE_KEY_PASSWORD:
 
 # ---- version bump (tauri.conf.json, Cargo.toml, package.json) ----
 step "Setting version $version"
-bumped=(src-tauri/tauri.conf.json src-tauri/Cargo.toml src-tauri/Cargo.lock package.json package-lock.json)
+bumped=(src-tauri/tauri.conf.json src-tauri/Cargo.toml src-tauri/Cargo.lock package.json)
 revert() { git checkout -- "${bumped[@]}" 2>/dev/null || true; }
 VERSION="$version" node -e '
   const fs = require("fs");
@@ -154,11 +154,10 @@ VERSION="$version" node -e '
     fs.writeFileSync(f, s.replace(/"version":\s*"[^"]+"/, `"version": "${process.env.VERSION}"`));
   }'
 sed -i "0,/^version = \"[^\"]*\"/s//version = \"$version\"/" src-tauri/Cargo.toml
-npm version "$version" --no-git-tag-version --allow-same-version >/dev/null
 
 # ---- build + sign ----
-step "Building (npm run tauri build)"
-if ! npm run tauri build; then
+step "Building (yarn tauri build)"
+if ! yarn tauri build; then
   revert
   fail "build failed (version bump reverted)"
 fi

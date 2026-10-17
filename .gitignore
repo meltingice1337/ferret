@@ -6,3 +6,8 @@ src-tauri/gen
 .vite
 dist-e2e
 e2e-artifacts
+# Yarn's local state (yarn.lock and .yarnrc.yml are committed; patches or plugins would be too)
+.yarn/*
+!.yarn/patches
+!.yarn/plugins
+!.yarn/releases

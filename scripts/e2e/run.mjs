@@ -1,4 +1,4 @@
-// End-to-end tests against the real app (`npm run test:e2e`). Windows only.
+// End-to-end tests against the real app (`yarn test:e2e`). Windows only.
 //
 // Builds a separate test copy of Ferret (identifier com.ferret.e2e, the frontend built in
 // "e2e" mode and baked in, in its own target folder so a dev build isn't rebuilt), starts it on
@@ -7,10 +7,10 @@
 // settings, favorites and dev data are never touched. One test recycles a file and restores it,
 // so the Recycle Bin ends where it started.
 //
-//   npm run test:e2e                 build, then run
-//   npm run test:e2e -- --no-build   reuse the last test build
-//   npm run test:e2e -- --keep       keep the fixture and the window open afterwards
-//   npm run test:e2e -- --only rename   run tests whose name contains "rename"
+//   yarn test:e2e                 build, then run
+//   yarn test:e2e --no-build      reuse the last test build
+//   yarn test:e2e --keep          keep the fixture and the window open afterwards
+//   yarn test:e2e --only rename   run tests whose name contains "rename"
 import { spawn, execSync } from "node:child_process";
 import { existsSync, mkdirSync, rmSync, writeFileSync, copyFileSync } from "node:fs";
 import { homedir } from "node:os";
@@ -38,7 +38,7 @@ function sh(cmd, opts = {}) {
 
 // ---- build the test copy ----
 if (!flag("--no-build")) {
-  sh("npx vite build --mode e2e --outDir dist-e2e --emptyOutDir --logLevel warn", { cwd: repo });
+  sh("yarn vite build --mode e2e --outDir dist-e2e --emptyOutDir --logLevel warn", { cwd: repo });
   sh("cargo build --features tauri/custom-protocol --quiet", {
     cwd: tauriDir,
     env: {

@@ -90,12 +90,13 @@ ferret-indexer --install | --uninstall | --status | --query <text> | --console |
 
 ## Development
 
-**Requirements:** Windows 10/11, [Rust](https://rustup.rs), Node.js 20+, and WebView2 (included with Windows 11).
+**Requirements:** Windows 10/11, [Rust](https://rustup.rs), Node.js 22.12 or newer (an LTS version, like 24 or 26) with Yarn 4, and WebView2 (included with Windows 11). Yarn comes through Corepack: `npm install -g corepack` then `corepack enable`, and the project picks its own Yarn version (`packageManager` in `package.json`).
 
 ```powershell
-npm install
-npm run app:dev        # run the app with hot reload
-npm run tauri build    # release build + installer
+yarn                  # install
+yarn app:dev          # run the app with hot reload
+yarn tauri build      # release build + installer
+yarn test             # unit tests (yarn test:e2e for the end-to-end run)
 ```
 
 `app:dev` runs a development build under its own app identity (`com.ferret.dev`), with its own settings, a "Ferret (Dev)" window title and an icon with a DEV badge. It can run next to the installed app without the two being mixed up. Releases are published with `scripts/release.sh`.

@@ -1,5 +1,5 @@
 // Drives the running Ferret dev build over the WebView2 DevTools protocol.
-// The app must be running via `npm run tauri dev` with FERRET_DEVTOOLS=1 (debug builds then listen on :9333).
+// The app must be running via `yarn app:dev` with FERRET_DEVTOOLS=1 (debug builds then listen on :9333).
 //
 //   node scripts/ui.mjs shot out.png [selector]     screenshot (page or element)
 //   node scripts/ui.mjs click "<selector>" [right|double|middle] [ctrl|shift|alt]
@@ -29,7 +29,7 @@ async function page() {
       if (url.includes("localhost:1420") || url.includes("tauri.localhost")) return p;
     }
   }
-  throw new Error("Ferret page not found. Is `npm run tauri dev` running?");
+  throw new Error("Ferret page not found. Is `yarn app:dev` running?");
 }
 
 function splitArgs(s) {
