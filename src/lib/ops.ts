@@ -9,7 +9,7 @@ import { api } from "./api";
 import { entryFilter } from "./filter";
 import { invalidateFolderSizes } from "./foldersizes";
 import { plural } from "./format";
-import { basename, inRecycleBin, isRecycle, isSearch, isWithin, parent, pathKey, samePath } from "./path";
+import { basename, inRecycleBin, isArchiveName, isRecycle, isSearch, isWithin, parent, pathKey, samePath } from "./path";
 import {
   setJobsRunning,
   activeTab, ask, ASK_ALT, beginTypeAhead, elevateWindow, friendly, navigate, places, refreshRecycleInfo, reload, setUi, tabs,
@@ -758,6 +758,10 @@ export async function realPath(e: Pick<Entry, "path" | "inArchive">): Promise<st
 }
 
 export async function openFile(e: Pick<Entry, "path" | "inArchive">) {
+  // Archives open as folders (the preview's Open button, Ctrl+K): their default app is
+  // Explorer's zip folder, which with Ferret as the default file manager becomes a new Ferret
+  // window after a slow detour through Explorer.
+  if (isArchiveName(e.path)) return void navigate(activeTab(), e.path);
   const p = await realPath(e);
   if (p) api.openPath(p).catch((err) => toast(String(err), "error"));
 }

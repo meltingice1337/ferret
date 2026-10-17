@@ -9,7 +9,7 @@ import { typeIcon } from "./typeIcons";
 import { didYouMean, extPreview, FILE_TYPES, findType, FOLDERS, KIND_EXTS, knownType, typeTokens, withoutTypes } from "../lib/filetypes";
 import "../palette.css";
 import { formatDate, formatSize, KIND_LABEL, kindOf } from "../lib/format";
-import { basename, isVirtual, parent, searchPath } from "../lib/path";
+import { basename, isArchiveName, isVirtual, parent, searchPath } from "../lib/path";
 import {
   activeTab, forgetSearch, navigate, newTab, openMenu, promptSaveSearch, recents, rememberSearch, removeSavedSearch, savedSearch,
   setUi, settings, toast, ui,
@@ -518,8 +518,12 @@ export default function SearchPalette(props: { mode: "files" | "commands"; comma
     if (!h) return;
     close();
     rememberSearch(tabQuery());
-    if (how === "tab") newTab(h.isDir ? h.path : parent(h.path) ?? h.path);
+    // Archives open as folders, like in the list: Windows would hand a zip to Explorer (and,
+    // with Ferret as the default file manager, on to a new Ferret window, slowly).
+    const archive = !h.isDir && isArchiveName(h.path);
+    if (how === "tab") newTab(h.isDir || archive ? h.path : parent(h.path) ?? h.path);
     else if (how === "reveal" || h.isDir) reveal(h);
+    else if (archive) navigate(activeTab(), h.path);
     else openFile({ path: h.path, inArchive: false });
   };
 
