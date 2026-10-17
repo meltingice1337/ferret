@@ -10,7 +10,7 @@ import { fsTick, isDark } from "../../lib/state";
 import { enter } from "../../lib/motion";
 import type { Entry } from "../../lib/types";
 import FileIcon from "../FileIcon";
-import { highlight, langFor } from "./highlight";
+import { highlight, langFor, prepare } from "./highlight";
 import { useThumbPath } from "../FileView";
 import PdfPages from "./PdfPages";
 
@@ -45,10 +45,21 @@ const prettyLang = (id: string) =>
 const asRows = (html: string) =>
   html.replace(/<\/span>\n<span class="line">/g, '</span><span class="line">').replace(/<span class="line"><\/span>/g, '<span class="line"><br></span>');
 
+/** How long the colors may take before the text shows plain meanwhile (a big file). */
+const PLAIN_AFTER = 200;
+
 export function CodeView(props: { path: string; name: string; ext: string; setMeta: SetMeta; large?: boolean; text?: string }) {
+  const lang = () => langFor(props.name, props.ext);
+  // The language loads while the file is read, not after.
+  prepare(lang());
   const [data] = createResource(() => props.path, async (p) => (props.text !== undefined ? { text: props.text, truncated: false, binary: false, encoding: "UTF-8", size: props.text.length } : api.readText(p, props.large ? 4 * 1024 * 1024 : 1024 * 1024)));
   const [html, setHtml] = createSignal<string | null>(null);
+  // The text shows plain only when the colors are slow, so it doesn't flash plain first.
+  const [late, setLate] = createSignal(false);
   const [wrap, setWrap] = createSignal(false);
+  let lateTimer: number | undefined;
+  let runs = 0;
+  onCleanup(() => clearTimeout(lateTimer));
 
   createEffect(() => {
     const d = data();
@@ -58,11 +69,18 @@ export function CodeView(props: { path: string; name: string; ext: string; setMe
     props.setMeta([
       { label: "Lines", value: `${lines.toLocaleString()}${d.truncated ? "+" : ""}` },
       { label: "Encoding", value: d.encoding },
-      { label: "Language", value: languageName(props.ext) || prettyLang(langFor(props.name, props.ext)) },
+      { label: "Language", value: languageName(props.ext) || prettyLang(lang()) },
     ]);
     const src = body.length > MAX_HIGHLIGHT ? body.slice(0, MAX_HIGHLIGHT) : body;
+    const run = ++runs;
     setHtml(null);
-    highlight(src, langFor(props.name, props.ext), isDark()).then((h) => setHtml(asRows(h))).catch(() => setHtml(null));
+    setLate(false);
+    clearTimeout(lateTimer);
+    lateTimer = window.setTimeout(() => setLate(true), PLAIN_AFTER);
+    highlight(src, lang(), isDark()).then(
+      (h) => { if (run === runs) { clearTimeout(lateTimer); setHtml(asRows(h)); } },
+      () => { if (run === runs) setLate(true); },
+    );
   });
 
   return (
@@ -72,7 +90,7 @@ export function CodeView(props: { path: string; name: string; ext: string; setMe
         <Show when={!d().binary} fallback={<HexView path={props.path} />}>
           <div class="pv-code" classList={{ wrap: wrap() }}>
             <button class="pv-chip pv-wrap" onClick={() => setWrap(!wrap())}>{wrap() ? "No wrap" : "Wrap"}</button>
-            <Show when={html()} fallback={<pre class="shiki plain"><code>{d().text.slice(0, MAX_HIGHLIGHT)}</code></pre>}>
+            <Show when={html()} fallback={<Show when={late()}><pre class="shiki plain"><code>{d().text.slice(0, MAX_HIGHLIGHT)}</code></pre></Show>}>
               <div innerHTML={html()!} />
             </Show>
             <Show when={d().truncated || d().text.length > MAX_HIGHLIGHT}>

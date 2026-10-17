@@ -33,20 +33,29 @@ export function langFor(name: string, ext: string): string {
 
 let highlighter: Promise<HighlighterGeneric<any, any>> | null = null;
 let bundled: Record<string, unknown> | null = null;
+/** Languages being loaded (or loaded): the name to highlight with ("text" if it failed). */
+const languages = new Map<string, Promise<string>>();
 
-export async function highlight(code: string, lang: string, dark: boolean): Promise<string> {
+/** Shiki (engine and themes) and `lang`, loaded once. */
+async function load(lang: string) {
   const shiki = await import("shiki");
   bundled ??= shiki.bundledLanguages as Record<string, unknown>;
   highlighter ??= shiki.createHighlighter({ themes: ["github-dark-default", "github-light-default"], langs: [] });
   const h = await highlighter;
-  let l = lang;
-  if (l !== "text" && !(l in bundled)) l = "text";
-  if (l !== "text" && !h.getLoadedLanguages().includes(l)) {
-    try {
-      await h.loadLanguage(l as any);
-    } catch {
-      l = "text";
-    }
+  if (lang === "text" || !(lang in bundled)) return { h, l: "text" };
+  if (!languages.has(lang)) {
+    languages.set(lang, h.loadLanguage(lang as any).then(() => lang, () => "text"));
   }
+  return { h, l: await languages.get(lang)! };
+}
+
+/** Starts loading Shiki and `lang` without highlighting anything: for a file still being read,
+ *  or ahead of the first code preview (then only its language is left to load). */
+export function prepare(lang = "text") {
+  load(lang).catch(() => {});
+}
+
+export async function highlight(code: string, lang: string, dark: boolean): Promise<string> {
+  const { h, l } = await load(lang);
   return h.codeToHtml(code, { lang: l, theme: dark ? "github-dark-default" : "github-light-default" });
 }

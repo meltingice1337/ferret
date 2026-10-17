@@ -5,6 +5,7 @@ import { extractSmart, realPath } from "../../lib/ops";
 import { activeTab, friendly, navigate } from "../../lib/state";
 import type { Entry } from "../../lib/types";
 import { isArchive } from "../menus";
+import { prepare } from "./highlight";
 import {
   ArchiveView, AudioView, CodeView, CsvView, DocxView, ErrorNote, FolderView, FontView, ImageView, JsonView,
   MarkdownView, NoPreview, PdfView, ShellThumbView, VideoView, type Meta,
@@ -14,8 +15,16 @@ const TEXTISH = new Set(["code", "text", "data"]);
 const SHELL_THUMB = new Set(["doc", "sheet", "exe"]);
 const IMAGE_SHELL_ONLY = new Set(["heic", "heif", "tif", "tiff", "raw", "cr2", "nef", "arw", "dng", "psd"]);
 
+/** Shiki loads at the first idle moment after a preview shows, so even the first code file
+ *  only waits for its language. */
+let warmed = false;
+
 /** Picks the right renderer for an entry. `large` = Quick Look. */
 export default function Preview(props: { entry: Entry; large?: boolean; onMeta?: (m: Meta[]) => void; onSwap?: (image: boolean) => void }) {
+  if (!warmed) {
+    warmed = true;
+    requestIdleCallback(() => prepare(), { timeout: 3000 });
+  }
   // Before anything renders: file URLs carry the file's version, so an edit made while it's
   // shown loads the new contents (pictures swap in place, other previews are rebuilt).
   createComputed(() => !props.entry.isDir && !props.entry.inArchive && noteVersion(props.entry.path, props.entry.modified, props.entry.size));

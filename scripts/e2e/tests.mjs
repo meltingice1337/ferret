@@ -78,10 +78,18 @@ export const tests = [
     async run(t) {
       await t.c.eval(`${T}.state.setUi("previewOpen", true)`);
       await go(t, t.p("code"));
+      // A language not loaded yet: the code must appear colored, never plain first.
+      await t.c.eval(`(() => {
+        const seen = window.__e2ePlain = { plain: false };
+        window.__e2ePlainObs = new MutationObserver(() => { if (document.querySelector(".pv-body pre.plain")) seen.plain = true; });
+        window.__e2ePlainObs.observe(document.body, { subtree: true, childList: true });
+      })()`);
       await clickRow(t, "lines.rs");
       // Colored tokens: Shiki's spans with their own colors (plain text has none).
       const colored = (sel) => `(() => { const s = [...document.querySelectorAll(${JSON.stringify(sel)} + " pre.shiki:not(.plain) span[style*='color']")]; return new Set(s.map((e) => e.style.color)).size; })()`;
       await t.c.waitFor(`${colored(".pv-body")} >= 3`, { timeoutMs: 10000, what: "colored code in the preview" });
+      const flashed = await t.c.eval(`(() => { window.__e2ePlainObs.disconnect(); return window.__e2ePlain.plain; })()`);
+      assert(!flashed, "the code showed plain for a moment before its colors");
       // Selecting (and so copying) all of it gives the file's lines, without the line numbers.
       const selected = await t.c.eval(`(() => {
         const r = document.createRange(); r.selectNodeContents(document.querySelector(".pv-body pre.shiki code"));
