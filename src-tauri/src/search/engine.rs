@@ -22,6 +22,24 @@ pub struct Hit {
     pub score: f32,
     /// UTF-16 offsets into `name` to highlight.
     pub matches: Vec<u32>,
+    /// Searches inside files (`content:`): where the text is (content.rs).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub line: Option<LineMatch>,
+}
+
+/// The first line of a file that has the text searched for.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct LineMatch {
+    /// 1-based.
+    pub line: u32,
+    /// The line, or the part of it around the match ("…" where it was cut).
+    pub text: String,
+    /// UTF-16 offsets of the match in `text`.
+    pub start: u32,
+    pub end: u32,
+    /// Matches in the whole file (counting stops at a few thousand).
+    pub count: u32,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, Default)]
@@ -31,10 +49,16 @@ pub struct SearchResults {
     /// Matches before `limit` was applied.
     pub total: u64,
     pub took_us: u64,
-    /// "service" | "walk" | "none"
+    /// "service" | "walk" | "content" | "none"
     pub source: String,
     /// The index is still being built (results may be incomplete).
     pub partial: bool,
+    /// Searches inside files: they stop at `limit` files, so there may be more than `total`.
+    #[serde(default)]
+    pub more: bool,
+    /// Searches inside files: how many files were read.
+    #[serde(default)]
+    pub scanned: u64,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, Default)]
@@ -196,6 +220,7 @@ impl Engine {
                     modified: mtime.map(|m| m as i64 * 1000),
                     score: h.score as f32,
                     matches: query::highlight(ix, h.idx, &q, h.fuzzy),
+                    line: None,
                 }
             })
             .collect();
@@ -205,6 +230,7 @@ impl Engine {
             took_us: t0.elapsed().as_micros() as u64,
             source: String::new(),
             partial: partial || out.truncated,
+            ..Default::default()
         }
     }
 }

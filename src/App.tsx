@@ -114,6 +114,18 @@ function windowTitle(path: string) {
   return `${folder} - Ferret${marks.length ? ` (${marks.join(", ")})` : ""}`;
 }
 
+/** The splash (index.html) fades into the app once it's ready, or when starting failed (so the
+ *  error shows). In dev, `?splash` in the address keeps it on screen to look at. */
+function hideSplash() {
+  const el = document.getElementById("splash");
+  if (!el || (import.meta.env.DEV && new URLSearchParams(location.search).has("splash"))) return;
+  if (document.documentElement.dataset.motion === "off" || matchMedia("(prefers-reduced-motion: reduce)").matches) return el.remove();
+  el.classList.add("out");
+  // Its own fade, not one of its children's animations ending.
+  el.addEventListener("animationend", (e) => { if (e.target === el) el.remove(); });
+  setTimeout(() => el.remove(), 800);
+}
+
 export default function App() {
   // Return keyboard focus to the file list whenever a dialog or menu closes.
   createEffect(on(() => modalOpen() || !!ui.menu, (open, wasOpen) => {
@@ -124,7 +136,15 @@ export default function App() {
   }));
 
   // Settings → Animations (the CSS entrances follow it; lib/motion.ts reads the setting itself).
-  createEffect(() => { document.documentElement.dataset.motion = settings.animations === false ? "off" : "on"; });
+  // Until the settings are loaded, the splash keeps the one from the last run (public/splash.js).
+  createEffect(() => { if (ready()) document.documentElement.dataset.motion = settings.animations === false ? "off" : "on"; });
+  createEffect(() => { if (ready()) hideSplash(); });
+  // For the next start's splash, which shows before the settings load (public/splash.js).
+  createEffect(() => {
+    if (!ready()) return;
+    const look = { theme: settings.theme, accent: settings.accent, motion: settings.animations !== false };
+    try { localStorage.setItem("ferret:appearance", JSON.stringify(look)); } catch { /* the splash keeps the defaults */ }
+  });
 
   // Like Explorer, the window (taskbar, Alt+Tab) is named after the folder it shows.
   createEffect(() => {
@@ -134,7 +154,7 @@ export default function App() {
   });
 
   onMount(() => {
-    boot().catch((e) => toast(`Startup failed: ${e}`, "error"));
+    boot().catch((e) => { hideSplash(); toast(`Startup failed: ${e}`, "error"); });
     startUpdater();
 
     const onKey = (e: KeyboardEvent) => {
@@ -302,7 +322,7 @@ export default function App() {
   return (
     // The gaps around the panels move the window (double-click maximizes).
     <div class="app" data-tauri-drag-region style={{ "--sidebar-w": `${sidebarDocked() ? ui.sidebarWidth : 0}px` }}>
-      <Show when={ready()} fallback={<div class="splash"><img class="splash-logo" src="/ferret-256.png" alt="" /><div class="splash-mark">ferret</div></div>}>
+      <Show when={ready()}>
         {/* Narrow windows: the sidebar slides over a dimmed list (clicking it closes the sidebar). */}
         <Show when={!sidebarDocked() && ui.sidebarOverlay}><div class="scrim" /></Show>
         <Show when={sidebarDocked() || ui.sidebarOverlay}>

@@ -104,10 +104,6 @@ input::selection, textarea::selection { background: color-mix(in oklab, var(--ac
 }
 :root[data-backdrop="solid"] .panel { background: color-mix(in oklab, var(--panel-solid) 88%, transparent); }
 
-.splash { flex: 1; display: grid; place-items: center; }
-.splash-mark { font-size: 28px; font-weight: 600; letter-spacing: -0.02em; color: var(--accent-text); opacity: 0.8; animation: pulse 1.2s ease-in-out infinite alternate; }
-@keyframes pulse { from { opacity: 0.35; } to { opacity: 0.9; } }
-
 /* ---------- icons ---------- */
 .ficon { display: inline-flex; flex: none; color: var(--fg-2); }
 .ficon.k-folder { color: color-mix(in oklab, var(--accent) 70%, #ffd2e4); }

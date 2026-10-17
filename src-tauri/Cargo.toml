@@ -48,6 +48,9 @@ rayon = "1.10"
 memchr = "2.7"
 nucleo-matcher = "0.3"
 parking_lot = "0.12"
+# content: searches (search/content.rs); both were already in the build through other crates
+regex = "1"
+walkdir = "2"
 # --- end search ---
 # --- self-update (GitHub Releases) ---
 tauri-plugin-updater = "2"

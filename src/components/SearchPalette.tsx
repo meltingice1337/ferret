@@ -1,7 +1,7 @@
 // Ctrl+K: instant whole-disk search. Ctrl+Shift+P (or ">" prefix): command palette.
 
 import { invoke } from "@tauri-apps/api/core";
-import { AppWindow, CalendarClock, CircleHelp, Command, Copy, ExternalLink, FolderOpen, FolderSearch, HardDrive, Hash, History, Info, LoaderCircle, Ruler, Search, Shapes, ShieldCheck, SquareTerminal, Star, X } from "../lib/icons";
+import { AppWindow, CalendarClock, CircleHelp, Command, Copy, ExternalLink, FolderOpen, FolderSearch, HardDrive, Hash, History, Info, LoaderCircle, Ruler, Search, Shapes, ShieldCheck, SquareTerminal, Star, TextSearch, X } from "../lib/icons";
 import { createEffect, createMemo, createSignal, For, on, onCleanup, onMount, Show, type JSX } from "solid-js";
 import { Dynamic, Portal } from "solid-js/web";
 import FileIcon from "./FileIcon";
@@ -9,7 +9,7 @@ import { typeIcon } from "./typeIcons";
 import { didYouMean, extPreview, FILE_TYPES, findType, FOLDERS, KIND_EXTS, knownType, typeTokens, withoutTypes } from "../lib/filetypes";
 import "../palette.css";
 import { formatDate, formatSize, KIND_LABEL, kindOf } from "../lib/format";
-import { basename, parent, searchPath } from "../lib/path";
+import { basename, isVirtual, parent, searchPath } from "../lib/path";
 import {
   activeTab, forgetSearch, navigate, newTab, openMenu, promptSaveSearch, recents, rememberSearch, removeSavedSearch, savedSearch,
   setUi, settings, toast, ui,
@@ -25,15 +25,27 @@ export interface Hit {
   modified?: number | null;
   score: number;
   matches: number[];
+  /** Searches inside files: the first line with the text (UTF-16 offsets of the match). */
+  line?: { line: number; text: string; start: number; end: number; count: number } | null;
 }
 
 interface SearchResults {
   results: Hit[];
   total: number;
   tookUs: number;
-  source: "service" | "walk" | "none";
+  source: "service" | "walk" | "content" | "none";
   partial: boolean;
+  /** Searches inside files stop at the limit: there may be more than `total`. */
+  more?: boolean;
+  /** Searches inside files: how many files were read. */
+  scanned?: number;
 }
+
+/** `content:"…"` with something to find: a search inside files (search/content.rs). */
+const CONTENT = /(?:^|\s)content:(?:"[^"]+|[^\s"]+)/i;
+const IN_FILTER = /(?:^|\s)(?:in|scope):\S/i;
+/** The text a search inside files looks for, as typed. */
+const contentText = (q: string) => /(?:^|\s)content:(?:"([^"]*)"?|(\S+))/i.exec(q)?.slice(1).find((x) => x != null) ?? "";
 
 interface SearchStatus {
   source: string;
@@ -106,6 +118,7 @@ const FILTERS: { token: string; value: string; text: string }[] = [
   { token: "size:>100mb", value: ">100mb", text: "Bigger than 100 MB. Also <1mb, 1mb..1gb, empty" },
   { token: "modified:<7d", value: "<7d", text: "Changed in the last 7 days. Also today, >1y, 2026-01-01..2026-03-31" },
   { token: "in:C:\\dev", value: "C:\\dev", text: "Only inside this folder" },
+  { token: 'content:"some text"', value: "some text", text: "Files with this text inside (in this folder, or in:)" },
   { token: "!node_modules", value: "node_modules", text: "Leave out names with this" },
   { token: "!C:\\Windows", value: "C:\\Windows", text: "Leave out a folder" },
   { token: '"two words"', value: "two words", text: "These words together" },
@@ -140,6 +153,7 @@ const FILTER_KEYS = [
   { key: "size", icon: Ruler, text: "Bigger or smaller than" },
   { key: "modified", icon: CalendarClock, text: "When it last changed" },
   { key: "in", icon: FolderSearch, text: "Only inside a folder" },
+  { key: "content", icon: TextSearch, text: "Text inside files, in this folder" },
 ];
 const SIZES: [string, string][] = [
   [">100mb", "Bigger than 100 MB"], [">1gb", "Bigger than 1 GB"], ["<1mb", "Smaller than 1 MB"],
@@ -313,9 +327,19 @@ export default function SearchPalette(props: { mode: "files" | "commands"; comma
     setHelpOpen(false);
     queueMicrotask(() => { input.focus(); input.setSelectionRange(next.length, next.length); });
   };
+  // ---- searches inside files: they need a folder, the one open unless an `in:` names one ----
+  const contentSearch = () => !commandMode() && CONTENT.test(fullQuery());
+  /** The folder a search inside files reads: "This folder", or the open one when there's no `in:`. */
+  const contentFolder = () => (contentSearch() && (scoped() || !IN_FILTER.test(fullQuery())) ? activeTab().p : null);
+  const searchFolder = () => (scoped() ? activeTab().p : contentFolder());
+
   // ---- search history and saved searches ----
-  /** The search as a tab sees it: "This folder" becomes an `in:` filter. */
-  const tabQuery = () => (scoped() ? `${fullQuery()} in:"${activeTab().p}"` : fullQuery()).trim();
+  /** The search as a tab sees it: "This folder" (or the folder a search inside files reads)
+   *  becomes an `in:` filter. */
+  const tabQuery = () => {
+    const dir = searchFolder();
+    return (dir && !isVirtual(dir) ? `${fullQuery()} in:"${dir}"` : fullQuery()).trim();
+  };
   const openAsTab = () => {
     const q = tabQuery();
     if (!q) return;
@@ -388,7 +412,7 @@ export default function SearchPalette(props: { mode: "files" | "commands"; comma
     if (r?.results.length) {
       rows.push({
         icon: FolderSearch,
-        main: <>Open all {r.total > 2000 ? "2,000+" : r.total.toLocaleString()} matches in a tab</>,
+        main: r.more ? <>Open every match in a tab</> : <>Open all {r.total > 2000 ? "2,000+" : r.total.toLocaleString()} matches in a tab</>,
         detail: "Ctrl+Shift+Enter",
         apply: openAsTab,
       });
@@ -413,7 +437,10 @@ export default function SearchPalette(props: { mode: "files" | "commands"; comma
 
   // ---- file search: always run the latest query, one request at a time ----
   let inflight = false;
+  /** The request running reads files (it can take a while: a newer query stops it). */
+  let inflightContent = false;
   let queued: string | null = null;
+  onCleanup(() => { if (inflightContent) invoke("search_cancel").catch(() => {}); });
   const frecency = () => {
     const now = Date.now();
     const out: Record<string, number> = {};
@@ -421,16 +448,22 @@ export default function SearchPalette(props: { mode: "files" | "commands"; comma
     return out;
   };
   const run = async (q: string) => {
-    if (inflight) { queued = q; return; }
+    if (inflight) {
+      if (inflightContent && queued === null) invoke("search_cancel").catch(() => {});
+      queued = q;
+      return;
+    }
     inflight = true;
+    inflightContent = CONTENT.test(q);
     setBusy(true);
     try {
-      const r = await invoke<SearchResults>("search_query", { query: q, limit: 60, scope: scoped() ? activeTab().p : null, frecency: frecency() });
+      const r = await invoke<SearchResults>("search_query", { query: q, limit: 60, scope: searchFolder(), frecency: frecency() });
       if (q === fullQuery() && !commandMode()) setRes(r);
     } catch (e) {
       toast(`Search failed: ${e}`, "error");
     } finally {
       inflight = false;
+      inflightContent = false;
       setBusy(false);
       if (queued !== null) { const next = queued; queued = null; if (next === fullQuery()) run(next); }
     }
@@ -578,8 +611,11 @@ export default function SearchPalette(props: { mode: "files" | "commands"; comma
                 onClick={() => { const open = showHelp(); if (text().trim() === "?") setText(""); setHelpOpen(!open); input.focus(); }}>
                 <CircleHelp size={15} />
               </button>
-              <button class="palette-scope" classList={{ on: scoped() }} title="Toggle scope (Tab)" onClick={() => { setScoped(!scoped()); input.focus(); }}>
-                {scoped() ? <><FolderSearch size={13} /> This folder</> : <><HardDrive size={13} /> Everywhere</>}
+              <button class="palette-scope" classList={{ on: scoped() || !!contentFolder() }} disabled={!!contentFolder()}
+                title={contentFolder() ? "Searches inside files read this folder (or the one named with in:)" : "Toggle scope (Tab)"}
+                onClick={() => { setScoped(!scoped()); input.focus(); }}>
+                {/* A search inside files reads the open folder even when "Everywhere" is picked. */}
+                {scoped() || contentFolder() ? <><FolderSearch size={13} /> This folder</> : <><HardDrive size={13} /> Everywhere</>}
               </button>
             </Show>
             <button class="icon-btn tiny" title="Close (Esc)" onClick={close}><X size={14} /></button>
@@ -629,7 +665,11 @@ export default function SearchPalette(props: { mode: "files" | "commands"; comma
               <Show when={res()?.results.length} fallback={
                 <div class="palette-empty">
                   <Show when={fullQuery()} fallback={<span>Type to search {indexed() ? `${indexed().toLocaleString()} indexed items` : "your drives"}, or pick a type above. <code>?</code> shows every filter · <code>&gt;</code> for commands</span>}>
-                    <span>{status()?.building ? "Still indexing, so more results will appear…"
+                    <span>{contentSearch() ? (
+                      busy() ? `Reading the files in ${basename(searchFolder() ?? "") || "this folder"}…`
+                      : searchFolder() && isVirtual(searchFolder()!) ? <>Searching inside files needs a folder: open one, or add <code>in:C:\folder</code></>
+                      : `No file in ${basename(searchFolder() ?? "") || "the folder"} contains “${contentText(fullQuery())}”`)
+                      : status()?.building ? "Still indexing, so more results will appear…"
                       : !query() && typeChip() ? `No ${files(findType(typeChip()!)?.label ?? "files")} found`
                       : `Nothing matches “${query()}”${typeChip() ? ` in ${files(findType(typeChip()!)?.label ?? "")}` : ""}`}</span>
                   </Show>
@@ -637,7 +677,7 @@ export default function SearchPalette(props: { mode: "files" | "commands"; comma
               }>
                 <For each={res()!.results}>
                   {(h, i) => { const n = () => i() + offset(); return (
-                    <div class="palette-item file" role="option" aria-selected={n() === pick()} classList={{ active: n() === pick() }} data-i={n()}
+                    <div class="palette-item file" role="option" aria-selected={n() === pick()} classList={{ active: n() === pick(), "has-line": !!h.line }} data-i={n()}
                       onMouseMove={() => setPick(n())}
                       onClick={(e) => activate(n(), e.ctrlKey ? "tab" : e.altKey ? "reveal" : "open")}
                       onAuxClick={(e) => e.button === 1 && activate(n(), "tab")}
@@ -667,6 +707,16 @@ export default function SearchPalette(props: { mode: "files" | "commands"; comma
                         onClick={(e) => { e.stopPropagation(); activate(n(), "reveal"); }}>
                         <FolderOpen size={14} /><span>{h.isDir ? "Open" : "Show in folder"}</span>
                       </button>
+                      {/* Searches inside files: the line with the text, under the name. */}
+                      <Show when={h.line}>
+                        {(m) => (
+                          <span class="palette-line" title={m().count > 1 ? `${m().count.toLocaleString()} matches in this file` : undefined}>
+                            <span class="palette-line-no">{m().line}</span>
+                            <span class="palette-line-text">{m().text.slice(0, m().start)}<mark>{m().text.slice(m().start, m().end)}</mark>{m().text.slice(m().end)}</span>
+                            <Show when={m().count > 1}><span class="palette-line-more">+{(m().count - 1).toLocaleString()}</span></Show>
+                          </span>
+                        )}
+                      </Show>
                     </div>
                   ); }}
                 </For>
@@ -691,7 +741,9 @@ export default function SearchPalette(props: { mode: "files" | "commands"; comma
             <Show when={!commandMode()} fallback={<span>↑↓ choose · Enter run · Esc close</span>}>
               <span>
                 <Show when={res()} fallback={<>↑↓ choose · Enter open · <b>Alt+Enter show in folder</b> · Ctrl+Enter new tab · ? filters · Tab scope</>}>
-                  {(r) => <>{r().total.toLocaleString()} matches · {(r().tookUs / 1000).toFixed(r().tookUs < 10_000 ? 1 : 0)} ms{r().partial ? " · indexing" : ""}</>}
+                  {(r) => r().source === "content"
+                    ? <>{r().total.toLocaleString()}{r().more ? "+" : ""} {r().total === 1 && !r().more ? "file has" : "files have"} it · {(r().scanned ?? 0).toLocaleString()} files read ·{(r().tookUs / 1000).toFixed(r().tookUs < 10_000 ? 1 : 0)} ms</>
+                    : <>{r().total.toLocaleString()} matches · {(r().tookUs / 1000).toFixed(r().tookUs < 10_000 ? 1 : 0)} ms{r().partial ? " · indexing" : ""}</>}
                 </Show>
               </span>
               <span class="palette-status">

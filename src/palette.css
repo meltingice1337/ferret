@@ -54,6 +54,14 @@
 .palette-install:hover { background: var(--accent-soft); }
 
 .palette-item.file { grid-template-columns: 20px minmax(120px, auto) 1fr auto auto; cursor: default; }
+/* Searches inside files: the line with the text, under the name (and how many more matches). */
+.palette-item.file.has-line { height: auto; min-height: 36px; padding: 6px 10px; row-gap: 2px; }
+.palette-line { grid-column: 2 / -1; display: flex; align-items: baseline; gap: 8px; min-width: 0; font-size: 11.5px; color: var(--fg-3); }
+.palette-line-no { flex: none; min-width: 2.2em; text-align: right; font-variant-numeric: tabular-nums; }
+.palette-line-text { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: pre; font-family: var(--mono); color: var(--fg-2); }
+.palette-line-text mark { background: var(--accent-soft); color: var(--fg); border-radius: 3px; }
+.palette-item.active .palette-line-text mark { background: var(--accent); color: var(--on-accent); }
+.palette-line-more { flex: none; padding: 0 5px; border-radius: 4px; background: var(--hover); font-variant-numeric: tabular-nums; }
 .palette-reveal {
   display: inline-flex; align-items: center; gap: 5px; height: 24px; padding: 0 8px; border-radius: 6px;
   font-size: 11.5px; color: var(--fg-2); background: var(--hover); border: 1px solid var(--line); opacity: 0; white-space: nowrap;

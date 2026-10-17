@@ -451,8 +451,6 @@ body.reordering, body.reordering * { cursor: grabbing !important; }
 
 .pv-meta .pv-path { overflow-wrap: anywhere; word-break: normal; white-space: normal; }
 
-.splash { display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 14px; }
-.splash-logo { width: 96px; height: 96px; filter: drop-shadow(0 10px 30px color-mix(in oklab, var(--accent) 45%, transparent)); animation: pulse 1.2s ease-in-out infinite alternate; }
 .card.about { display: flex; align-items: center; gap: 14px; }
 .card.about h3 { margin: 0; }
 .card.about .about-text { flex: 1; min-width: 0; }

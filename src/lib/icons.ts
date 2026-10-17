@@ -100,6 +100,7 @@ export { default as SquareArrowOutUpRight } from "lucide-solid/icons/square-arro
 export { default as SquareTerminal } from "lucide-solid/icons/square-terminal";
 export { default as Star } from "lucide-solid/icons/star";
 export { default as Terminal } from "lucide-solid/icons/terminal";
+export { default as TextSearch } from "lucide-solid/icons/text-search";
 export { default as Trash2 } from "lucide-solid/icons/trash";
 export { default as TriangleAlert } from "lucide-solid/icons/triangle-alert";
 export { default as Type } from "lucide-solid/icons/type";

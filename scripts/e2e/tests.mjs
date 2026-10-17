@@ -37,6 +37,7 @@ export const tests = [
     async run(t) {
       await t.c.waitFor(`${T} && ${tab}?.p === ${JSON.stringify(t.root)}`, { what: "the fixture folder as the open tab" });
       await t.c.waitFor(`document.querySelectorAll(".files .row").length >= 5`, { what: "the list" });
+      await t.c.waitFor(`!document.getElementById("splash")`, { what: "the splash to fade out" });
       const names = await rows(t);
       for (const n of ["docs", "sub", "bulk", "rename-me.txt"]) assert(names.includes(n), `“${n}” isn't listed (got ${names.join(", ")})`);
     },
@@ -258,6 +259,34 @@ export const tests = [
     },
   },
   {
+    name: "Ctrl+K content: finds text inside the open folder's files",
+    async run(t) {
+      await go(t, t.p("grep"));
+      await t.c.waitFor(`[...document.querySelectorAll(".files .row .name")].some((e) => e.textContent === "notes.md")`, { what: "grep listed" });
+      await t.c.eval(`document.querySelector(".files")?.focus()`);
+      await t.c.key("k", ["Control"]);
+      await t.c.waitFor(`document.querySelector(".palette input")`, { what: "the search box" });
+      await t.c.type('content:"zebra-quokka"');
+      const found = `[...document.querySelectorAll(".palette-item.has-line")].map((e) => [e.querySelector(".palette-name").textContent, e.querySelector(".palette-line-no").textContent, e.querySelector(".palette-line-text mark").textContent, e.querySelector(".palette-line-more")?.textContent ?? ""])`;
+      try {
+        await t.c.waitFor(`${found}.length === 2`, { what: "the two files with the text" });
+        const rows = await t.c.eval(found);
+        // Folder order; the match keeps the file's own case; binary files and node_modules are skipped.
+        assert(JSON.stringify(rows) === JSON.stringify([["code.ts", "2", "ZEBRA-QUOKKA", "+1"], ["notes.md", "2", "zebra-quokka", ""]]), `results: ${JSON.stringify(rows)}`);
+        const foot = await t.c.eval(`document.querySelector(".palette-foot").innerText`);
+        assert(/2 files have it/.test(foot), `footer: ${foot}`);
+        // Every match as a tab: the search keeps the folder it read.
+        await t.c.key("Enter", ["Control", "Shift"]);
+        await t.c.waitFor(`${tab}.p.startsWith("search:") && ${tab}.entries[0]().length === 2`, { what: "the matches in a search tab" });
+        const q = await t.c.eval(`${tab}.p`);
+        assert(q.includes("in:") && q.includes("grep"), `the tab's search is “${q}”`);
+        await t.c.eval(`${T}.state.closeTab(${tab}.id)`);
+      } finally {
+        if (await t.c.eval(`!!document.querySelector(".palette")`)) await t.c.key("Escape");
+      }
+    },
+  },
+  {
     name: "Settings open (Ctrl+,) and close (Esc)",
     async run(t) {
       await t.c.eval(`document.querySelector(".files")?.focus()`);
@@ -286,6 +315,12 @@ export function fixture(root, needle) {
     "kinds/two.zip": zip({ "a.txt": "a", "b.txt": "b" }),
     // Never run: only its extension matters (an application, which has no detail rows).
     "kinds/app.exe": Buffer.concat([Buffer.from("MZ"), Buffer.alloc(510)]),
+    // Searching inside files: two have the text, a binary file and node_modules are skipped.
+    "grep/notes.md": "first line\nThe phrase zebra-quokka lives here\n",
+    "grep/deep/code.ts": "const a = 1;\n// ZEBRA-QUOKKA, then zebra-quokka again\n",
+    "grep/blob.bin": Buffer.concat([Buffer.from("zebra-quokka"), Buffer.alloc(16)]),
+    "grep/node_modules/pkg/x.js": "zebra-quokka",
+    "grep/other.txt": "nothing here",
     "sub/inner.txt": "inside",
     "rename-me.txt": "rename me",
     "delete-me.txt": "delete me",

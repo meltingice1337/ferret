@@ -54,7 +54,7 @@ pub enum Cmp {
 
 impl Cmp {
     #[inline]
-    fn test<T: PartialOrd>(self, a: T, b: T) -> bool {
+    pub(crate) fn test<T: PartialOrd>(self, a: T, b: T) -> bool {
         match self {
             Cmp::Lt => a < b,
             Cmp::Le => a <= b,
@@ -498,7 +498,7 @@ fn best_class(name: &[u8], orig: &[u8], t: &[u8], f: &Finder) -> Option<(i32, us
     Some((SUBSTR, p))
 }
 
-fn glob_match(p: &[u8], s: &[u8]) -> bool {
+pub(crate) fn glob_match(p: &[u8], s: &[u8]) -> bool {
     let (mut pi, mut si) = (0usize, 0usize);
     let (mut star_p, mut star_s) = (usize::MAX, 0usize);
     while si < s.len() {

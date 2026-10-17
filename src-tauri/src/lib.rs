@@ -209,6 +209,7 @@ pub fn run() {
             // search (whole-disk index)
             search::search_query,
             search::search_status,
+            search::search_cancel,
             search::search_install_service,
             search::search_service_outdated,
             // Recycle Bin and Windows integration

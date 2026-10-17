@@ -28,6 +28,7 @@
 Fuzzy search over every file on every drive, ranked by name match and how often you open things.
 Filters: `ext:pdf,docx` · `type:folder` · `size:>100mb` · `modified:<7d` · `dm:2026-03-04` · `in:"C:\Program Files"` · `!node_modules\` · globs like `*.rs`.
 Filters are suggested as you type (`Tab` completes them). Running WSL distros are searchable too: each is listed from inside Linux and refreshed every 15 minutes, and a stopped distro is never started just to be indexed.
+Search inside files with `content:"some text"`: it reads the files in the open folder (or the one named with `in:`), and each result shows the line with the text. The other filters narrow which files are read; binary files and `node_modules` are skipped.
 
 **👁 Previews — `Alt+P`**
 Images, video, audio, PDF, Word (`.docx`), Markdown, CSV, fonts, SVG and syntax-highlighted code. A hex view for everything else, plus version and CPU architecture details for `.exe` and `.dll` files.

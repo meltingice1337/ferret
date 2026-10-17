@@ -396,9 +396,14 @@ export default function FileView(props: { tab: Tab }) {
     });
   }, { defer: true }));
 
+  /** Takes the keyboard after a folder loads, unless Ctrl+K, a dialog or a menu opened over
+   *  it meanwhile (typing there must not jump around the list). */
+  const takeFocus = () => {
+    if (!document.activeElement?.closest(".palette, .modal, .menu, .ql")) scroller.focus({ preventScroll: true });
+  };
   createEffect(on(() => t.reveal[0](), (_, prev) => {
     if (prev !== undefined && !t.cursor[0]()) scroller.scrollTop = 0;
-    requestAnimationFrame(() => { revealCursor(); if (!t.renaming[0]()) scroller.focus({ preventScroll: true }); });
+    requestAnimationFrame(() => { revealCursor(); if (!t.renaming[0]()) takeFocus(); });
   }, { defer: true }));
 
   onMount(() => {
@@ -411,7 +416,7 @@ export default function FileView(props: { tab: Tab }) {
     onCleanup(() => ro.disconnect());
     scroller.scrollTop = scrollMemory.get(t.id) ?? 0;
     setScrollTop(scroller.scrollTop);
-    scroller.focus({ preventScroll: true });
+    takeFocus();
   });
   onCleanup(() => scrollMemory.set(t.id, scroller.scrollTop));
 

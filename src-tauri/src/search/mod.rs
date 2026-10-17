@@ -7,12 +7,14 @@
 //! * `mft`    – admin provider: MFT enumeration + USN journal tailing
 //! * `ipc`    – named-pipe protocol (`\\.\pipe\ferret-index`)
 //! * `service`– `ferret-indexer` Windows service + CLI
+//! * `content`– `content:"text"`: reads the files under a folder (in the app, never the service)
 //!
 //! Tauri commands (JS: `invoke('search_query', { query, limit, scope, frecency })`,
 //! `invoke('search_status')`, `invoke('search_install_service')`) prefer the
 //! FerretIndexer service when its pipe is reachable and otherwise fall back to
 //! the in-process walk provider, which starts lazily in the background.
 
+pub mod content;
 pub mod engine;
 pub mod filetypes;
 pub mod index;
@@ -240,6 +242,15 @@ pub async fn search_query(
     scope: Option<String>,
     frecency: Option<HashMap<String, f32>>,
 ) -> Result<SearchResults, String> {
+    // `content:` reads the files under the palette's folder instead (content.rs).
+    let (rest, needles) = content::split(&query);
+    if !needles.is_empty() {
+        let rest = filetypes::expand(&rest);
+        let limit = limit.unwrap_or(engine::DEFAULT_LIMIT).min(engine::MAX_LIMIT) as usize;
+        return tauri::async_runtime::spawn_blocking(move || content::search(&rest, &needles, scope.as_deref(), limit, true))
+            .await
+            .map_err(|e| e.to_string());
+    }
     let query = filetypes::expand(&query);
     let req = SearchRequest { query, limit: limit.unwrap_or(engine::DEFAULT_LIMIT), scope, frecency };
     tauri::async_runtime::spawn_blocking(move || run_query(req)).await.map_err(|e| e.to_string())
@@ -258,8 +269,12 @@ pub fn search_query_of(path: &str) -> Option<&str> {
 /// The matches of `query` as folder entries, each with the folder it's in as `origin`.
 /// Items that vanished since they were indexed are left out.
 pub fn list_matches(query: &str) -> Vec<crate::listing::Entry> {
-    let req = SearchRequest { query: filetypes::expand(query), limit: TAB_LIMIT, scope: None, frecency: None };
-    let hits = run_query(req).results;
+    let (rest, needles) = content::split(query);
+    let hits = if needles.is_empty() {
+        run_query(SearchRequest { query: filetypes::expand(query), limit: TAB_LIMIT, scope: None, frecency: None }).results
+    } else {
+        content::search(&filetypes::expand(&rest), &needles, None, TAB_LIMIT as usize, false).results
+    };
     hits.par_iter()
         .filter_map(|h| {
             let mut e = crate::listing::entry_for(&h.path)?;
@@ -267,6 +282,12 @@ pub fn list_matches(query: &str) -> Vec<crate::listing::Entry> {
             Some(e)
         })
         .collect()
+}
+
+/// Stops a search inside files that the palette started (something newer was typed).
+#[tauri::command]
+pub fn search_cancel() {
+    content::cancel();
 }
 
 #[tauri::command]
