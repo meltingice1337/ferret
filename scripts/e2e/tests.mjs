@@ -74,6 +74,28 @@ export const tests = [
     },
   },
   {
+    name: "code is highlighted in the preview and in Quick Look",
+    async run(t) {
+      await t.c.eval(`${T}.state.setUi("previewOpen", true)`);
+      await go(t, t.p("code"));
+      await clickRow(t, "lines.rs");
+      // Colored tokens: Shiki's spans with their own colors (plain text has none).
+      const colored = (sel) => `(() => { const s = [...document.querySelectorAll(${JSON.stringify(sel)} + " pre.shiki:not(.plain) span[style*='color']")]; return new Set(s.map((e) => e.style.color)).size; })()`;
+      await t.c.waitFor(`${colored(".pv-body")} >= 3`, { timeoutMs: 10000, what: "colored code in the preview" });
+      // Selecting (and so copying) all of it gives the file's lines, without the line numbers.
+      const selected = await t.c.eval(`(() => {
+        const r = document.createRange(); r.selectNodeContents(document.querySelector(".pv-body pre.shiki code"));
+        const s = getSelection(); s.removeAllRanges(); s.addRange(r);
+        const text = s.toString(); s.removeAllRanges(); return text;
+      })()`);
+      assert(selected === "fn main() {\n\n    let x = 1; // one\n}", `selected text: ${JSON.stringify(selected)}`);
+      await t.c.key(" ");
+      await t.c.waitFor(`${colored(".ql")} >= 3`, { timeoutMs: 10000, what: "colored code in Quick Look" });
+      await t.c.key("Escape");
+      await t.c.waitFor(`!document.querySelector(".ql")`, { what: "Quick Look to close" });
+    },
+  },
+  {
     name: "details show only the shown item's rows (zip, zip, then an exe)",
     async run(t) {
       await t.c.eval(`${T}.state.setUi("previewOpen", true)`);
@@ -301,6 +323,8 @@ export const tests = [
     async run(t) {
       const errs = t.c.errors.filter((e) => !/favicon/.test(e));
       assert(!errs.length, `${errs.length} error(s): ${errs.slice(0, 3).join(" || ")}`);
+      const csp = await t.c.eval(`${T}.csp`);
+      assert(!csp.length, `the security policy (CSP) refused ${csp.length} thing(s): ${csp.slice(0, 3).join(" || ")}`);
     },
   },
 ];
@@ -321,6 +345,8 @@ export function fixture(root, needle) {
     "grep/blob.bin": Buffer.concat([Buffer.from("zebra-quokka"), Buffer.alloc(16)]),
     "grep/node_modules/pkg/x.js": "zebra-quokka",
     "grep/other.txt": "nothing here",
+    // Highlighting, and selecting code with an empty line in it.
+    "code/lines.rs": "fn main() {\n\n    let x = 1; // one\n}\n",
     "sub/inner.txt": "inside",
     "rename-me.txt": "rename me",
     "delete-me.txt": "delete me",

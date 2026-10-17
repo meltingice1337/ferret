@@ -201,12 +201,15 @@ body.reordering, body.reordering * { cursor: grabbing !important; }
 /* code */
 .pv-code { flex: 1; min-height: 0; overflow: auto; position: relative; font-family: var(--mono); font-size: 12px; user-select: text; }
 .pv-code pre.shiki { margin: 0; padding: 10px 0; background: transparent !important; counter-reset: line; min-width: max-content; }
-.pv-code.wrap pre.shiki { min-width: 0; white-space: pre-wrap; word-break: break-all; }
+/* Wrapped at spaces; a word longer than the line is split. */
+.pv-code.wrap pre.shiki { min-width: 0; white-space: pre-wrap; overflow-wrap: anywhere; }
 .pv-code pre.plain { padding: 10px 14px; color: var(--fg-2); white-space: pre; margin: 0; }
-.pv-code.wrap pre.plain { white-space: pre-wrap; }
-.pv-code .line { display: inline-block; padding-right: 16px; }
+.pv-code.wrap pre.plain { white-space: pre-wrap; overflow-wrap: anywhere; }
+/* Each line a row: its number in the gutter, text after it (wrapped lines stay indented past
+   the numbers, and selecting never takes the numbers or draws boxes between lines). */
+.pv-code .line { display: block; position: relative; min-height: 1lh; padding: 0 16px 0 calc(3.4em + 12px); }
 .pv-code .line::before {
-  counter-increment: line; content: counter(line); display: inline-block; width: 3.4em; margin-right: 12px;
+  counter-increment: line; content: counter(line); position: absolute; left: 0; width: 3.4em;
   text-align: right; color: var(--fg-3); opacity: 0.6; user-select: none;
 }
 .pv-code code { font-family: inherit; }

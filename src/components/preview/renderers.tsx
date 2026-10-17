@@ -38,6 +38,13 @@ const prettyLang = (id: string) =>
   ({ text: "Plain text", txt: "Plain text", yaml: "YAML", yml: "YAML", json: "JSON", toml: "TOML", xml: "XML", ini: "INI", md: "Markdown" } as Record<string, string>)[id]
   ?? id.charAt(0).toUpperCase() + id.slice(1);
 
+/** Shiki puts a newline between its line spans. The code view shows each line as a row of its
+ *  own (number in a gutter, wrapped text indented past it), where those newlines would be
+ *  selectable on their own and draw stray boxes. Copying still gives one line per row; an empty
+ *  row gets a <br>, or copying would leave the blank line out. */
+const asRows = (html: string) =>
+  html.replace(/<\/span>\n<span class="line">/g, '</span><span class="line">').replace(/<span class="line"><\/span>/g, '<span class="line"><br></span>');
+
 export function CodeView(props: { path: string; name: string; ext: string; setMeta: SetMeta; large?: boolean; text?: string }) {
   const [data] = createResource(() => props.path, async (p) => (props.text !== undefined ? { text: props.text, truncated: false, binary: false, encoding: "UTF-8", size: props.text.length } : api.readText(p, props.large ? 4 * 1024 * 1024 : 1024 * 1024)));
   const [html, setHtml] = createSignal<string | null>(null);
@@ -55,7 +62,7 @@ export function CodeView(props: { path: string; name: string; ext: string; setMe
     ]);
     const src = body.length > MAX_HIGHLIGHT ? body.slice(0, MAX_HIGHLIGHT) : body;
     setHtml(null);
-    highlight(src, langFor(props.name, props.ext), isDark()).then(setHtml).catch(() => setHtml(null));
+    highlight(src, langFor(props.name, props.ext), isDark()).then((h) => setHtml(asRows(h))).catch(() => setHtml(null));
   });
 
   return (

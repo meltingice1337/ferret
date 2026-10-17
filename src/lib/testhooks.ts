@@ -6,5 +6,9 @@ import * as ops from "./ops";
 import * as state from "./state";
 
 if (import.meta.env.DEV || import.meta.env.MODE === "e2e") {
-  (window as any).__ferretTest = { api: api.api, ops, state };
+  // Things the page's security policy (CSP) refused: they fail silently (no error is thrown),
+  // like code highlighting's colors once an inline <style> crept into index.html.
+  const csp: string[] = [];
+  document.addEventListener("securitypolicyviolation", (e) => csp.push(`${e.violatedDirective}: ${e.blockedURI || "inline"}`));
+  (window as any).__ferretTest = { api: api.api, ops, state, csp };
 }

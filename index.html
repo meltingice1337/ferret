@@ -6,79 +6,7 @@
     <title>Ferret</title>
     <!-- The last run's theme and accent, before anything paints. -->
     <script src="/splash.js"></script>
-    <style>
-      /* The splash: drawn by the page itself, so it shows as soon as the window does (the app's
-         code loads behind it), then fades into the app (App.tsx). Its own colors, since the
-         app's styles aren't loaded yet. */
-      #splash {
-        --sp-accent: var(--accent, #e2457f);
-        --sp-bg: #1c131c;
-        --sp-fg: #f4eef3;
-        --sp-line: rgba(255, 255, 255, 0.07);
-        position: fixed; inset: 8px; z-index: 10000; border-radius: 12px; border: 1px solid var(--sp-line);
-        display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 22px;
-        background:
-          radial-gradient(55% 45% at 50% 44%, color-mix(in oklab, var(--sp-accent) 14%, transparent), transparent 72%),
-          radial-gradient(120% 90% at 100% 0%, color-mix(in oklab, var(--sp-accent) 20%, transparent), transparent 60%),
-          radial-gradient(90% 80% at 0% 100%, color-mix(in oklab, var(--sp-accent) 10%, transparent), transparent 70%),
-          var(--sp-bg);
-        color: var(--sp-fg);
-        font-family: "Segoe UI Variable Display", "Segoe UI", system-ui, sans-serif;
-        user-select: none; cursor: default;
-      }
-      :root[data-theme="light"] #splash { --sp-bg: #fbf7fa; --sp-fg: #23171f; --sp-line: rgba(30, 10, 25, 0.08); }
-      #splash.out { pointer-events: none; animation: sp-out 0.28s ease-in forwards; }
-
-      .sp-stage { position: relative; width: 124px; height: 124px; }
-      /* A soft accent light behind the logo, breathing slowly. */
-      .sp-glow {
-        position: absolute; inset: -58%; border-radius: 50%;
-        background: radial-gradient(circle, color-mix(in oklab, var(--sp-accent) 50%, transparent) 0%, transparent 60%);
-        animation: sp-glow-in 0.9s ease-out 0.1s both, sp-breathe 2.8s ease-in-out 1s infinite alternate;
-      }
-      .sp-float { position: absolute; inset: 0; animation: sp-float 3.2s ease-in-out 0.9s infinite alternate; }
-      .sp-logo { position: absolute; inset: 0; animation: sp-rise 0.75s cubic-bezier(0.16, 1, 0.3, 1) both; }
-      .sp-logo img { width: 100%; height: 100%; display: block; filter: drop-shadow(0 12px 22px rgba(0, 0, 0, 0.35)); -webkit-user-drag: none; }
-      /* A light sheen that sweeps across the logo itself (masked by its shape). */
-      .sp-sheen {
-        position: absolute; inset: 0;
-        -webkit-mask: url(/ferret-256.png) center / contain no-repeat; mask: url(/ferret-256.png) center / contain no-repeat;
-        background: linear-gradient(112deg, transparent 38%, rgba(255, 255, 255, 0.7) 50%, transparent 62%) no-repeat;
-        background-size: 260% 100%; background-position: 160% 0; mix-blend-mode: overlay;
-        animation: sp-sheen 3.4s ease-in-out 0.85s infinite;
-      }
-      .sp-name { display: flex; font-size: 30px; font-weight: 600; letter-spacing: -0.01em; line-height: 1; }
-      .sp-name span { display: inline-block; animation: sp-letter 0.55s cubic-bezier(0.16, 1, 0.3, 1) both; animation-delay: calc(0.28s + var(--i) * 45ms); }
-      /* Only when starting takes a while: a slim bar shows it's still going. */
-      .sp-bar {
-        width: 132px; height: 3px; border-radius: 3px; overflow: hidden;
-        background: color-mix(in oklab, var(--sp-fg) 10%, transparent);
-        animation: sp-fade 0.35s ease 0.65s both;
-      }
-      .sp-bar i {
-        display: block; width: 45%; height: 100%; border-radius: inherit;
-        background: linear-gradient(90deg, transparent, var(--sp-accent), transparent);
-        animation: sp-slide 1.15s ease-in-out infinite;
-      }
-
-      @keyframes sp-rise { from { opacity: 0; transform: translateY(18px) scale(0.82); filter: blur(8px); } }
-      @keyframes sp-glow-in { from { opacity: 0; transform: scale(0.6); } }
-      @keyframes sp-breathe { from { opacity: 0.7; transform: scale(0.94); } to { opacity: 1; transform: scale(1.06); } }
-      @keyframes sp-float { to { transform: translateY(-4px); } }
-      @keyframes sp-sheen { 0% { background-position: 160% 0; } 45%, 100% { background-position: -60% 0; } }
-      @keyframes sp-letter { from { opacity: 0; transform: translateY(8px); filter: blur(3px); } }
-      @keyframes sp-fade { from { opacity: 0; } }
-      @keyframes sp-slide { from { transform: translateX(-110%); } to { transform: translateX(230%); } }
-      @keyframes sp-out { to { opacity: 0; transform: scale(1.015); } }
-
-      /* Settings → Animations off, or Windows' animation effects off: a still splash. */
-      :root[data-motion="off"] #splash, :root[data-motion="off"] #splash * { animation: none !important; }
-      :root[data-motion="off"] .sp-bar, :root[data-motion="off"] .sp-sheen { display: none; }
-      @media (prefers-reduced-motion: reduce) {
-        #splash, #splash * { animation: none !important; }
-        .sp-bar, .sp-sheen { display: none; }
-      }
-    </style>
+    <link rel="stylesheet" href="/splash.css" />
   </head>
   <body>
     <div id="splash" aria-hidden="true" data-tauri-drag-region>
@@ -88,7 +16,7 @@
           <div class="sp-logo"><img src="/ferret-256.png" alt="" draggable="false" /><div class="sp-sheen"></div></div>
         </div>
       </div>
-      <div class="sp-name" data-tauri-drag-region><span style="--i: 0">F</span><span style="--i: 1">e</span><span style="--i: 2">r</span><span style="--i: 3">r</span><span style="--i: 4">e</span><span style="--i: 5">t</span></div>
+      <div class="sp-name" data-tauri-drag-region><span>F</span><span>e</span><span>r</span><span>r</span><span>e</span><span>t</span></div>
       <div class="sp-bar"><i></i></div>
     </div>
     <div id="root"></div>
