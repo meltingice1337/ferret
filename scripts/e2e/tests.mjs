@@ -43,6 +43,17 @@ export const tests = [
     },
   },
   {
+    name: "the window appears once the app is drawn",
+    async run(t) {
+      // It starts hidden; the page shows it with the folder already in it (showApp in App.tsx).
+      await t.c.waitFor(`!!window.__ferretStartup?.shown`, { what: "the page to show the window" });
+      const s = await t.c.eval(`window.__ferretStartup`);
+      assert(s.shown >= s.ready, `shown ${s.shown} ms after the page began loading, before the app was ready (${s.ready} ms)`);
+      const visible = await t.c.eval(`window.__TAURI_INTERNALS__.invoke("plugin:window|is_visible", { label: "main" })`);
+      assert(visible === true, `the window isn't visible (${visible})`);
+    },
+  },
+  {
     name: "names the window after the folder",
     async run(t) {
       const title = await t.c.eval(`window.__TAURI_INTERNALS__.invoke("plugin:window|title", { label: "main" })`);

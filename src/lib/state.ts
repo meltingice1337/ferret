@@ -881,15 +881,24 @@ darkQuery.addEventListener("change", () => settings.theme === "auto" && applyApp
 
 // ---------- boot ----------
 
+/** How long starting took, step by step (ms since the page began loading): logged once
+ *  ("startup: …"), and kept for the end-to-end tests. */
+const startup: Record<string, number> = {};
+export const stamp = (step: string) => { startup[step] = Math.round(performance.now()); };
+
 export async function boot() {
   // Dev-only handle for debugging / UI tests.
   if (import.meta.env.DEV) (window as any).__ferret = { tabs, activeTab, ui, settings };
-  const b = await api.bootstrap();
-  const info = await api.windowInfo().catch(() => ({ elevated: false, firstWindow: true }));
+  stamp("code");
+  const [b, info, launch] = await Promise.all([
+    api.bootstrap(),
+    api.windowInfo().catch(() => ({ elevated: false, firstWindow: true })),
+    // What this window was opened for: command line, Win+E / a folder double-click, or the
+    // tabs of a window that restarted itself as administrator.
+    api.launchTargets().catch(() => [] as LaunchTarget[]),
+  ]);
+  stamp("settings");
   setAdminWindow(info.elevated);
-  // What this window was opened for: command line, Win+E / a folder double-click, or the
-  // tabs of a window that restarted itself as administrator.
-  const launch = await api.launchTargets().catch(() => [] as LaunchTarget[]);
   batch(() => {
     setSettings(b.settings);
     setPlaces({ ...b.places, recycle: { items: 0, bytes: 0 } });
@@ -903,6 +912,7 @@ export async function boot() {
     if (b.session?.sidebarHidden) setUi("sidebarHidden", true);
   });
   await applyAppearance();
+  stamp("appearance");
 
   // Only the first window restores the last session; later ones open what they were
   // launched for, or the home folder.
@@ -911,31 +921,69 @@ export async function boot() {
     ? launch.map((t) => ({ path: t.path || b.places.home, select: t.select }))
     : fromSession ? b.session!.tabs : [{ path: b.places.home }];
   const first = launch.length ? Math.max(0, launch.findIndex((t) => t.active)) : fromSession ? b.session!.active ?? 0 : 0;
-  const opened: Tab[] = [];
-  let shown: Tab | undefined;
-  for (const [i, t] of wanted.entries()) {
+  // Every tab is in the strip from the start, with its folder named, but only the one shown
+  // (and its second pane) is opened before the window appears; the others open right after.
+  const restored = wanted.map((t) => {
     const tab = new Tab();
-    if (await navigate(tab, t.path, { select: t.select ?? null })) {
-      opened.push(tab);
-      if (i === first) shown = tab;
-      if (t.split) {
-        const pane = new Tab();
-        if (await navigate(pane, t.split)) {
-          tab.split[1](pane);
-          tab.splitFocused[1](!!t.splitFocused);
-        }
-      }
+    tab.path[1](t.path);
+    tab.loading[1](true);
+    if (t.split) {
+      const pane = new Tab();
+      pane.path[1](t.split);
+      pane.loading[1](true);
+      tab.split[1](pane);
+      tab.splitFocused[1](!!t.splitFocused);
     }
+    return tab;
+  });
+  /** Opens a restored tab's folders: false when its own can't be opened. A second pane that
+   *  can't be opened is closed. */
+  const open = async (tab: Tab, i: number) => {
+    const pane = tab.split[0]();
+    const [ok, paneOk] = await Promise.all([
+      navigate(tab, wanted[i].path, { select: wanted[i].select ?? null }),
+      !pane || navigate(pane, pane.p),
+    ]);
+    if (!paneOk && tab.split[0]() === pane && !pane!.history[0]().length) batch(() => { tab.splitFocused[1](false); tab.split[1](null); });
+    return ok;
+  };
+  // The tab to show, or the first that opens if its folder is gone, as if it had never been there.
+  const order = [...new Set([first, ...wanted.keys()])].filter((i) => i < wanted.length);
+  const gone = new Set<Tab>();
+  let shown: Tab | undefined;
+  for (const i of order) {
+    if (await open(restored[i], i)) { shown = restored[i]; break; }
+    gone.add(restored[i]);
   }
-  if (!opened.length) {
-    const tab = new Tab();
-    await navigate(tab, b.places.home);
-    opened.push(tab);
+  if (!shown) {
+    shown = new Tab();
+    await navigate(shown, b.places.home);
   }
+  const opened = restored.includes(shown) ? restored.filter((t) => !gone.has(t)) : [shown];
   setTabs(opened);
-  setActiveId((shown ?? opened[0]).id);
+  setActiveId(shown.id);
+  stamp("ready");
   setReady(true);
   syncWatchers();
+  const s = startup;
+  log.info(`startup: page and code ${s.code} ms, settings and window ${s.settings - s.code} ms, appearance ${s.appearance - s.settings} ms, ` +
+    `shown tab ${s.ready - s.appearance} ms; ready ${s.ready} ms after the page began loading`);
+  if (import.meta.env.DEV || import.meta.env.MODE === "e2e") (window as any).__ferretStartup = startup;
+
+  // The other tabs, one at a time. One whose folder is gone is closed, unless it's been
+  // used in the meantime (shown, or another folder opened in it).
+  void (async () => {
+    for (const tab of opened) {
+      if (tab === shown || !tabs().includes(tab)) continue;
+      if (await open(tab, restored.indexOf(tab)) || tab.history[0]().length || !tabs().includes(tab)) continue;
+      if (stripTab() === tab || tabs().length <= 1) await navigate(tab, b.places.home);
+      else {
+        setTabs(tabs().filter((t) => t !== tab));
+        persistSession();
+      }
+    }
+    stamp("tabs");
+  })();
 
   // Other Ferret windows share settings, favorites and recents: pick up their changes.
   window.addEventListener("focus", async () => {

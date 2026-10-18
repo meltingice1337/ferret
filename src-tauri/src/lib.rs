@@ -28,6 +28,7 @@ use commands::AppState;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    integration::STARTED.get_or_init(std::time::Instant::now);
     // The background Explorer redirect (redirect.rs) is this exe without a window.
     if std::env::args().any(|a| a == redirect::ARG) {
         return redirect::run();
@@ -61,8 +62,6 @@ pub fn run() {
     // started from one) uses its own WebView2 profile: a profile can't be shared across
     // privilege levels.
     let admin = integration::admin_mode();
-    // Debug builds only: the end-to-end tests start Ferret with FERRET_E2E=1.
-    let e2e = cfg!(debug_assertions) && std::env::var_os("FERRET_E2E").is_some();
     if admin {
         if let Some(dir) = dirs::data_local_dir() {
             unsafe { std::env::set_var("WEBVIEW2_USER_DATA_FOLDER", dir.join(&id).join("EBWebView-admin")) };
@@ -95,7 +94,8 @@ pub fn run() {
                 db: Mutex::new(conn),
                 watcher: Mutex::new(watch::DirWatcher::new(app.handle().clone())),
             });
-            // The window starts hidden so a restarted window appears right where the old one was.
+            // The window starts hidden so a restarted window appears right where the old one
+            // was, and so it first appears with the app drawn (integration::reveal).
             if let Some(window) = app.get_webview_window("main") {
                 shell::set_big_icon(&window);
                 // Development builds say so in the taskbar, so they can't be mistaken for the installed app.
@@ -109,27 +109,25 @@ pub fn run() {
                     let _ = window.set_title(title);
                 }
                 integration::apply_placement(&window);
-                if e2e {
-                    // End-to-end test run (scripts/e2e): a real, rendering window, but off-screen,
-                    // out of the taskbar and never activated, so it doesn't disturb the desktop.
+                if integration::e2e() {
                     let _ = window.set_skip_taskbar(true);
                     let _ = window.set_position(tauri::PhysicalPosition::new(-32000, -32000));
-                    #[cfg(windows)]
-                    if let Ok(hwnd) = window.hwnd() {
-                        use windows::Win32::UI::WindowsAndMessaging::{ShowWindow, SW_SHOWNOACTIVATE};
-                        unsafe {
-                            let _ = ShowWindow(windows::Win32::Foundation::HWND(hwnd.0 as *mut _), SW_SHOWNOACTIVATE);
-                        }
-                    }
-                } else {
-                    let _ = window.show();
-                    let _ = window.set_focus();
                 }
+                std::thread::spawn(move || {
+                    std::thread::sleep(integration::SHOW_AFTER);
+                    if !integration::reveal(&window) {
+                        log::warn!("the page didn't show the window within {:?}", integration::SHOW_AFTER);
+                    }
+                });
             }
-            if !admin {
-                integration::refresh_registration(&app.state::<AppState>());
-            }
-            shellmenu::warm_up();
+            // Off the main thread: until the window is up, it serves the page its files and calls.
+            let handle = app.handle().clone();
+            std::thread::spawn(move || {
+                if !admin {
+                    integration::refresh_registration(&handle.state::<AppState>());
+                }
+                shellmenu::warm_up();
+            });
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -220,6 +218,7 @@ pub fn run() {
             integration::set_default_manager,
             integration::open_in_explorer,
             integration::window_info,
+            integration::show_window,
             integration::new_window,
             integration::restart_elevated,
         ])

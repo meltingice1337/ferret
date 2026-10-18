@@ -14,6 +14,7 @@ import Sidebar from "./components/Sidebar";
 import StatusBar from "./components/StatusBar";
 import TitleBar from "./components/TitleBar";
 import Toolbar from "./components/Toolbar";
+import { api } from "./lib/api";
 import "./lib/drag";
 import "./lib/autoscroll";
 import {
@@ -25,7 +26,7 @@ import { basename, isRecycle, isSearch, RECYCLE } from "./lib/path";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import {
   activeTab, boot, closeTab, cycleTab, dismissToast, goBack, goForward, goUp, newTab,
-  persistSession, previewSpace, ready, sidebarDocked, refresh, reopenClosedTab, setUi, toast, toggleFavorite, ui, updateView,
+  persistSession, previewSpace, ready, sidebarDocked, refresh, reopenClosedTab, setUi, stamp, toast, toggleFavorite, ui, updateView,
 } from "./lib/state";
 import type { GroupBy } from "./lib/types";
 import { feedTypeAhead, keysHeld, queueKey, winWidth } from "./lib/state";
@@ -121,11 +122,35 @@ function windowTitle(path: string) {
   return `${folder} - Ferret${marks.length ? ` (${marks.join(", ")})` : ""}`;
 }
 
-/** The splash (index.html) fades into the app once it's ready, or when starting failed (so the
- *  error shows). In dev, `?splash` in the address keeps it on screen to look at. */
-function hideSplash() {
+/** How long after the page starts loading a start counts as slow, and shows the splash first
+ *  (the same in public/splash.js). */
+const SPLASH_AFTER_MS = 400;
+
+/** The app is ready (or starting failed, so the error shows): the window, hidden until now,
+ *  appears with the app drawn, so a normal start never shows the splash (index.html). A slow
+ *  start shows the window with the splash (public/splash.js, or here), which fades into the
+ *  app. In dev, `?splash` in the address keeps the splash on screen to look at. */
+function showApp() {
   const el = document.getElementById("splash");
-  if (!el || (import.meta.env.DEV && new URLSearchParams(location.search).has("splash"))) return;
+  const show = () => { stamp("shown"); api.showWindow().catch(() => {}); };
+  if (!el || (import.meta.env.DEV && new URLSearchParams(location.search).has("splash"))) return show();
+  if (!el.dataset.shown && performance.now() < SPLASH_AFTER_MS) {
+    el.remove();
+    // After a frame with the app in it, so the window doesn't first appear empty, and with
+    // nothing still easing in (the file list's fade): Windows animates the window itself.
+    let done = false;
+    const once = () => { if (!done) { done = true; show(); } };
+    requestAnimationFrame(() => {
+      for (const a of document.getAnimations()) try { a.finish(); } catch { /* an endless one (a spinner) */ }
+      requestAnimationFrame(once);
+    });
+    setTimeout(once, 100);
+    return;
+  }
+  // Slow: the window may still hold the splash's last frame (the app's first frame takes a
+  // moment longer when it's a big folder), so it appears with the splash and fades into the app.
+  if (el.dataset.shown) stamp("shown");
+  else { el.dataset.shown = "1"; show(); }
   if (document.documentElement.dataset.motion === "off" || matchMedia("(prefers-reduced-motion: reduce)").matches) return el.remove();
   el.classList.add("out");
   // Its own fade, not one of its children's animations ending.
@@ -145,7 +170,7 @@ export default function App() {
   // Settings → Animations (the CSS entrances follow it; lib/motion.ts reads the setting itself).
   // Until the settings are loaded, the splash keeps the one from the last run (public/splash.js).
   createEffect(() => { if (ready()) document.documentElement.dataset.motion = settings.animations === false ? "off" : "on"; });
-  createEffect(() => { if (ready()) hideSplash(); });
+  createEffect(() => { if (ready()) showApp(); });
   // For the next start's splash, which shows before the settings load (public/splash.js).
   createEffect(() => {
     if (!ready()) return;
@@ -161,7 +186,7 @@ export default function App() {
   });
 
   onMount(() => {
-    boot().catch((e) => { hideSplash(); toast(`Startup failed: ${e}`, "error"); });
+    boot().catch((e) => { showApp(); toast(`Startup failed: ${e}`, "error"); });
     startUpdater();
 
     const onKey = (e: KeyboardEvent) => {

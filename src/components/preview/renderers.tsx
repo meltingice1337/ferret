@@ -1,7 +1,5 @@
 import { AppWindow, Binary, ChevronDown, ChevronRight, FolderOpen, LoaderCircle, PackageOpen, Play } from "../../lib/icons";
 import { createEffect, createMemo, createResource, createSignal, For, Index, on, onCleanup, onMount, Show, type JSX } from "solid-js";
-import DOMPurify from "dompurify";
-import { marked } from "marked";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { api, fileUrl, thumbUrl } from "../../lib/api";
 import { formatDate, formatSize, languageName, plural, typeLabel } from "../../lib/format";
@@ -179,16 +177,21 @@ function JsonNode(props: { k: string | null; value: unknown; depth: number; last
 
 // ---------- markdown ----------
 
+/** The Markdown parser and HTML sanitizer, loaded with the first Markdown file shown (not at startup). */
+const markdownLibs = () => Promise.all([import("marked"), import("dompurify")]);
+
 export function MarkdownView(props: { path: string; name: string; ext: string; setMeta: SetMeta; large?: boolean }) {
-  const [data] = createResource(() => props.path, (p) => api.readText(p, 2 * 1024 * 1024));
+  const [data] = createResource(() => props.path, async (p) => {
+    const [d, [{ marked }, { default: DOMPurify }]] = await Promise.all([api.readText(p, 2 * 1024 * 1024), markdownLibs()]);
+    return { ...d, html: DOMPurify.sanitize(marked.parse(d.text, { async: false }) as string) };
+  });
   const [source, setSource] = createSignal(false);
   const empty = () => data()?.size === 0;
   const html = createMemo(() => {
     const d = data();
     if (!d) return "";
-    const clean = DOMPurify.sanitize(marked.parse(d.text, { async: false }) as string);
     // Relative images resolve against the markdown file's folder.
-    const doc = new DOMParser().parseFromString(clean, "text/html");
+    const doc = new DOMParser().parseFromString(d.html, "text/html");
     const dir = parent(props.path) ?? "";
     doc.querySelectorAll("img").forEach((img) => {
       const src = img.getAttribute("src") ?? "";

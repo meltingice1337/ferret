@@ -420,6 +420,49 @@ pub fn init_window_registry(identifier: &str) {
     });
 }
 
+/// The window starts hidden and appears once the page has drawn the app (`show_window`),
+/// so a normal start shows neither an empty window nor the splash. A slow start (a busy
+/// disk, a folder on a network share, the dev server) shows it sooner, with the splash
+/// (public/splash.js). This is the last resort for a page that never asks.
+pub const SHOW_AFTER: std::time::Duration = std::time::Duration::from_secs(3);
+static SHOWN: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+/// When this process started (`run`), for the startup log.
+pub static STARTED: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
+
+/// End-to-end test run (scripts/e2e): a real, rendering window, but off-screen, out of the
+/// taskbar and never activated, so it doesn't disturb the desktop. Debug builds only.
+pub fn e2e() -> bool {
+    cfg!(debug_assertions) && std::env::var_os("FERRET_E2E").is_some()
+}
+
+/// Shows the window, once. True when it was already on screen.
+pub fn reveal(window: &tauri::WebviewWindow) -> bool {
+    if SHOWN.swap(true, std::sync::atomic::Ordering::SeqCst) {
+        return true;
+    }
+    if e2e() {
+        #[cfg(windows)]
+        if let Ok(hwnd) = window.hwnd() {
+            use windows::Win32::UI::WindowsAndMessaging::{ShowWindow, SW_SHOWNOACTIVATE};
+            unsafe {
+                let _ = ShowWindow(windows::Win32::Foundation::HWND(hwnd.0 as *mut _), SW_SHOWNOACTIVATE);
+            }
+        }
+    } else {
+        let _ = window.show();
+        let _ = window.set_focus();
+    }
+    if let Some(t) = STARTED.get() {
+        log::info!("window shown {} ms after start", t.elapsed().as_millis());
+    }
+    false
+}
+
+#[tauri::command]
+pub fn show_window(window: tauri::WebviewWindow) -> bool {
+    reveal(&window)
+}
+
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct WindowInfo {

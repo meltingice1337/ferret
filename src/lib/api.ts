@@ -120,6 +120,8 @@ export const api = {
   openInExplorer: (path: string) => invoke<void>("open_in_explorer", { path }),
   /** Whether this window runs as administrator, and whether it was the first one open. */
   windowInfo: () => invoke<{ elevated: boolean; firstWindow: boolean }>("window_info"),
+  /** Shows the window, which starts hidden; true when it was on screen already. */
+  showWindow: () => invoke<boolean>("show_window"),
   /** Opens another Ferret window (elevated if this one is). */
   newWindow: (path?: string) => invoke<void>("new_window", { path }),
   /** Restarts this window as administrator (UAC prompt) with these tabs; resolves once it's on screen. */
