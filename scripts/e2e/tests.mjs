@@ -2,7 +2,8 @@
 // folder (`t.root`, `t.p(...)`), and helpers. They use real key presses and clicks where a user
 // would, and check results on disk where it matters. `soft` tests warn instead of failing
 // (they depend on the machine, like the drive index).
-import { existsSync, readdirSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
 import { execSync } from "node:child_process";
 import { crc32, deflateSync } from "node:zlib";
 import { sleep } from "./cdp.mjs";
@@ -180,8 +181,53 @@ export const tests = [
     },
   },
   {
+    name: "a folder rewritten by a build stays open and keeps up",
+    async run(t) {
+      // A cargo build replaces its outputs and churns its subfolders while you look at the
+      // folder. Ferret once took that for the folder being deleted, moved up, and its list
+      // and preview stopped updating.
+      const dir = t.p("build-out");
+      const errorsBefore = t.c.errors.length;
+      const previewWasOpen = await t.c.eval(`${T}.state.ui.previewOpen`);
+      await t.c.eval(`${T}.state.setUi("previewOpen", true)`);
+      await go(t, dir);
+      await t.c.waitFor(`[...document.querySelectorAll(".files .row .name")].some((e) => e.textContent === "tool.exe")`, { what: "build-out listed" });
+      await clickRow(t, "tool.exe");
+      await t.c.waitFor(previewShows("tool.exe"), { what: "tool.exe in the preview" });
+      const end = Date.now() + 4000;
+      for (let i = 0; Date.now() < end; i++) {
+        writeFileSync(join(dir, "deps", `lib${i % 40}.rlib`), "x".repeat(i % 400));
+        if (i % 3 === 0) rmSync(join(dir, "deps", `lib${(i + 20) % 40}.rlib`), { force: true });
+        // Outputs replaced in one step (written beside, renamed over), or deleted and written again.
+        writeFileSync(join(dir, "tool.pdb.tmp"), `pdb ${i}`);
+        renameSync(join(dir, "tool.pdb.tmp"), join(dir, "tool.pdb"));
+        if (i % 5 === 0) { rmSync(join(dir, "tool.d"), { force: true }); writeFileSync(join(dir, "tool.d"), `tool.d ${i}`); }
+        if (i % 7 === 0) { rmSync(join(dir, "helper.exe"), { force: true }); writeFileSync(join(dir, "helper.exe"), Buffer.concat([Buffer.from("MZ"), Buffer.alloc(510 + i)])); }
+        // The file in the preview is relinked too: for a moment the list has the new one
+        // while the preview still shows the old one (they used to overwrite each other's
+        // version forever, until Solid gave up and the UI stopped updating).
+        if (i % 40 === 20) { rmSync(join(dir, "tool.exe"), { force: true }); writeFileSync(join(dir, "tool.exe"), Buffer.concat([Buffer.from("MZ"), Buffer.alloc(510 + i)])); }
+        mkdirSync(join(dir, ".fingerprint", `tool-${i % 6}`), { recursive: true });
+        await sleep(15);
+      }
+      writeFileSync(join(dir, "done.txt"), "built");
+      await t.c.waitFor(`[...document.querySelectorAll(".files .row .name")].some((e) => e.textContent === "done.txt")`, { what: "the list to keep up with the build" });
+      const s = await t.c.eval(`({ path: ${tab}.p, toasts: ${T}.state.ui.toasts.map((x) => x.text) })`);
+      assert(s.path.toLowerCase() === dir.toLowerCase(), `the tab moved to ${s.path}`);
+      assert(!s.toasts.some((x) => /no longer available/.test(x)), `said the folder was gone: ${s.toasts.join(" | ")}`);
+      // Still in step: another folder replaces the list and the preview.
+      await go(t, t.root);
+      await t.c.waitFor(`[...document.querySelectorAll(".files .row .name")].some((e) => e.textContent === "build-out")`, { what: "the list to follow the next folder" });
+      await t.c.waitFor(`!(${previewShows("tool.exe")})`, { what: "the preview to let go of tool.exe" });
+      await t.c.eval(`${T}.state.setUi("previewOpen", ${!!previewWasOpen})`);
+      const errs = t.c.errors.slice(errorsBefore);
+      assert(!errs.length, `${errs.length} UI error(s) during the build: ${errs.slice(0, 3).join(" || ")}`);
+    },
+  },
+  {
     name: "creates a folder (Ctrl+Shift+N) and names it",
     async run(t) {
+      await go(t, t.p("docs"));
       await t.c.eval(`document.querySelector(".files").focus()`);
       await t.c.key("N", ["Control", "Shift"]);
       await t.c.waitFor(`document.querySelector("textarea.rename")`, { what: "the name box" });
@@ -450,6 +496,12 @@ export function fixture(root, needle) {
     "grep/other.txt": "nothing here",
     // Highlighting, and selecting code with an empty line in it.
     "code/lines.rs": "fn main() {\n\n    let x = 1; // one\n}\n",
+    // Rewritten the way a build rewrites its output folder (cargo's target\release).
+    "build-out/tool.exe": Buffer.concat([Buffer.from("MZ"), Buffer.alloc(510)]),
+    "build-out/tool.pdb": "pdb",
+    "build-out/tool.d": "tool.d",
+    ...Object.fromEntries(Array.from({ length: 40 }, (_, i) => [`build-out/deps/lib${i}.rlib`, "x"])),
+    "build-out/.fingerprint/tool-1/output": "x",
     "sub/inner.txt": "inside",
     "rename-me.txt": "rename me",
     "split-me.txt": "copied across in split view",

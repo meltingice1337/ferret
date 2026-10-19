@@ -1,4 +1,5 @@
 import { convertFileSrc, invoke as rawInvoke, type InvokeArgs } from "@tauri-apps/api/core";
+import { untrack } from "solid-js";
 import { createStore } from "solid-js/store";
 import { logCommandFailure } from "./log";
 import type {
@@ -140,7 +141,13 @@ const [versions, setVersions] = createStore<Record<string, string>>({});
 export function noteVersion(path: string, modified: number | null | undefined, size: number) {
   const k = path.toLowerCase();
   const v = `${modified ?? 0}-${size}`;
-  if (versions[k] !== v) setVersions(k, v);
+  // Read untracked: callers run this in a computation, which mustn't re-run when another one
+  // notes a version. Two copies of an entry are alive while a file is replaced (the list's new
+  // one, the preview's from just before), and they used to overwrite each other forever: Solid
+  // gave up, and the list and preview stopped updating. An older copy never turns it back.
+  const cur = untrack(() => versions[k]);
+  if (cur === v || (cur && Number(cur.split("-")[0]) > (modified ?? 0))) return;
+  setVersions(k, v);
 }
 const versionOf = (path: string) => versions[path.toLowerCase()];
 

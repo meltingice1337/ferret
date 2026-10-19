@@ -493,37 +493,49 @@ export function refresh(tab: Tab) {
 
 export async function reload(tab: Tab, reresolve = false) {
   const tok = ++tab.token;
+  let res;
   try {
-    const res = await api.listDir(tab.p);
-    if (tok !== tab.token) return;
-    // Keep unchanged entry objects so the list keeps its DOM (and any inline rename) intact.
-    const old = new Map(tab.entries[0]().map((e) => [e.path, e]));
-    const merged = res.entries.map((n) => {
-      const o = old.get(n.path);
-      return o && o.size === n.size && o.modified === n.modified && o.hidden === n.hidden && o.isDir === n.isDir ? o : n;
-    });
-    const same = merged.length === old.size && merged.every((e) => old.get(e.path) === e);
-    batch(() => {
-      if (!same) { tab.entries[1](merged); setFsTick((n) => n + 1); }
-      if (reresolve) applyResolved(tab, res.resolved);
-      const exists = new Set(res.entries.map((e) => pathKey(e.path)));
-      tab.selection[1]((s) => s.filter((p) => exists.has(pathKey(p))));
-    });
-  } catch (e) {
-    if (tok !== tab.token || vanishing.has(tab.id)) return;
-    vanishing.add(tab.id);
-    // The folder was deleted/renamed/unmounted: fall back to the nearest folder that still exists.
+    res = await api.listDir(tab.p);
+  } catch {
+    if (tok === tab.token && !vanishing.has(tab.id)) await leaveIfGone(tab, tok);
+    return;
+  }
+  if (tok !== tab.token) return;
+  // Keep unchanged entry objects so the list keeps its DOM (and any inline rename) intact.
+  const old = new Map(tab.entries[0]().map((e) => [e.path, e]));
+  const merged = res.entries.map((n) => {
+    const o = old.get(n.path);
+    return o && o.size === n.size && o.modified === n.modified && o.hidden === n.hidden && o.isDir === n.isDir ? o : n;
+  });
+  const same = merged.length === old.size && merged.every((e) => old.get(e.path) === e);
+  batch(() => {
+    if (!same) { tab.entries[1](merged); setFsTick((n) => n + 1); }
+    if (reresolve) applyResolved(tab, res.resolved);
+    const exists = new Set(res.entries.map((e) => pathKey(e.path)));
+    tab.selection[1]((s) => s.filter((p) => exists.has(pathKey(p))));
+  });
+}
+
+/** A folder that couldn't be listed again: if it was deleted, renamed or unmounted, the tab
+ *  moves up to the nearest folder that still exists. A folder that's still there (a listing
+ *  that failed for a moment, say while a build rewrites it) stays open as it was. */
+async function leaveIfGone(tab: Tab, tok: number) {
+  vanishing.add(tab.id);
+  try {
+    const still = await api.resolveInput(tab.p).catch(() => null);
+    if (still?.kind === "dir" || tok !== tab.token) return;
     let up = parent(tab.p);
     while (up) {
       const r = await api.resolveInput(up).catch(() => null);
       if (r?.kind === "dir") break;
       up = parent(up);
     }
+    if (tok !== tab.token) return;
     toast(`“${basename(tab.p)}” is no longer available${up ? `. Moved up to ${basename(up)}` : ""}`, "error");
     if (recents().some((r) => samePath(r.path, tab.p))) api.removeRecent(tab.p).then(setRecents).catch(() => {});
     if (up) await navigate(tab, up);
+  } finally {
     vanishing.delete(tab.id);
-    void e;
   }
 }
 
