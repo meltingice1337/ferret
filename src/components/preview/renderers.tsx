@@ -6,7 +6,7 @@ import { formatDate, formatSize, languageName, plural, typeLabel } from "../../l
 import { isRecycle, parent } from "../../lib/path";
 import { fsTick, isDark } from "../../lib/state";
 import { enter } from "../../lib/motion";
-import type { Entry } from "../../lib/types";
+import type { Entry, VideoInfo } from "../../lib/types";
 import FileIcon from "../FileIcon";
 import { highlight, langFor, prepare } from "./highlight";
 import { useThumbPath } from "../FileView";
@@ -394,10 +394,30 @@ const fmtDuration = (s: number) => {
   return h ? `${h}:${String(m).padStart(2, "0")}:${String(sec).padStart(2, "0")}` : `${m}:${String(sec).padStart(2, "0")}`;
 };
 
+const bitrate = (bps: number) => (bps >= 1e6 ? `${(bps / 1e6).toFixed(1)} Mbps` : `${Math.round(bps / 1e3)} kbps`);
+
+/** A video's details as Windows reads them (no playing needed): size as shown, length, frame
+ *  rate, codec, bitrate, sound. */
+function videoMeta(v: VideoInfo): Meta[] {
+  const turned = v.rotation === 90 || v.rotation === 270;
+  const rows: Meta[] = [];
+  if (v.width && v.height) rows.push({ label: "Dimensions", value: turned ? `${v.height} × ${v.width}` : `${v.width} × ${v.height}` });
+  if (v.durationMs) rows.push({ label: "Duration", value: fmtDuration(v.durationMs / 1000) });
+  if (v.fps) rows.push({ label: "Frame rate", value: `${Math.round(v.fps * 100) / 100} fps` });
+  if (v.codec && v.codec !== "Unknown") rows.push({ label: "Codec", value: v.codec });
+  if (v.videoBitrate) rows.push({ label: "Bitrate", value: bitrate(v.videoBitrate + v.audioBitrate) });
+  rows.push({ label: "Audio", value: !v.hasAudio ? "None" : v.audioBitrate ? bitrate(v.audioBitrate) : "Yes" });
+  return rows;
+}
+
 export function VideoView(props: { path: string; setMeta: SetMeta; large?: boolean }) {
   const [failed, setFailed] = createSignal(false);
   const [started, setStarted] = createSignal(!!props.large);
   createEffect(on(() => props.path, () => { setFailed(false); setStarted(!!props.large); }));
+  // The details come from Windows, so they show before the video plays. A video Windows can't
+  // read gets the player's (size and length) once it plays, if the player can.
+  const [info] = createResource(() => props.path, (p) => api.videoInfo(p).catch(() => null));
+  createEffect(() => { const v = info(); if (v && v.path === props.path) props.setMeta(videoMeta(v)); });
   return (
     <Show when={!failed()} fallback={
       <div class="pv-media-fallback">
@@ -417,7 +437,7 @@ export function VideoView(props: { path: string; setMeta: SetMeta; large?: boole
           controls
           autoplay
           preload="metadata"
-          onLoadedMetadata={(e) => props.setMeta([
+          onLoadedMetadata={(e) => !info() && props.setMeta([
             { label: "Dimensions", value: `${e.currentTarget.videoWidth} × ${e.currentTarget.videoHeight}` },
             { label: "Duration", value: fmtDuration(e.currentTarget.duration) },
           ])}

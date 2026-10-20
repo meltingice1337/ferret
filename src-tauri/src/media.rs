@@ -41,7 +41,7 @@ async fn blocking<T: Send + 'static>(f: impl FnOnce() -> Result<T, String> + Sen
     tauri::async_runtime::spawn_blocking(f).await.map_err(|e| e.to_string())?
 }
 
-/// `dest` if it's free, else `name (2).ext`, Ã¢â‚¬Â¦ in the same folder.
+/// `dest` if it's free, else `name (2).ext`, … in the same folder.
 fn free_dest(dest: &str) -> Result<PathBuf, String> {
     let p = Path::new(dest);
     let dir = p.parent().ok_or("Invalid destination")?.to_string_lossy().to_string();
@@ -67,7 +67,7 @@ fn remove_retrying(p: &Path) {
     log::warn!("couldn't remove {}", p.display());
 }
 
-// Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬ video Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
+// ───────────────────────────── video ─────────────────────────────
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -111,7 +111,7 @@ fn probe_video(path: &str) -> Result<VideoInfo, String> {
     let file = open_file(path)?;
     let profile = MediaEncodingProfile::CreateFromFileAsync(&file)
         .and_then(|op| op.join())
-        .map_err(|_| "Windows can't read this video. If it's HEVC (most iPhone videos), install Ã¢â‚¬Å“HEVC Video ExtensionsÃ¢â‚¬Â from the Microsoft Store.".to_string())?;
+        .map_err(|_| "Windows can't read this video. If it's HEVC (most iPhone videos), install “HEVC Video Extensions” from the Microsoft Store.".to_string())?;
     let v = profile.Video().map_err(|_| "This file has no video track".to_string())?;
     let fr = v.FrameRate().map_err(hr)?;
     let (num, den) = (fr.Numerator().unwrap_or(0), fr.Denominator().unwrap_or(1).max(1));
@@ -124,7 +124,7 @@ fn probe_video(path: &str) -> Result<VideoInfo, String> {
     if video_bitrate == 0 && duration_ms > 0 {
         video_bitrate = ((size * 8 * 1000 / duration_ms) as u32).saturating_sub(audio_bitrate);
     }
-    // The stream's size can be the coded size (HEVC pads 1206Ãƒâ€”2622 to 1208Ãƒâ€”2624);
+    // The stream's size can be the coded size (HEVC pads 1206×2622 to 1208×2624);
     // the file's properties have the real one when it's close.
     let (mut width, mut height) = (v.Width().unwrap_or(0), v.Height().unwrap_or(0));
     if let Some(p) = props.as_ref() {
@@ -176,13 +176,13 @@ fn failure_text(r: TranscodeFailureReason, hevc: bool) -> String {
         TranscodeFailureReason::CodecNotFound if hevc =>
             "This PC can't encode HEVC. Pick H.264 instead.".into(),
         TranscodeFailureReason::CodecNotFound =>
-            "Windows has no decoder for this video. For HEVC (iPhone) videos, install Ã¢â‚¬Å“HEVC Video ExtensionsÃ¢â‚¬Â from the Microsoft Store.".into(),
+            "Windows has no decoder for this video. For HEVC (iPhone) videos, install “HEVC Video Extensions” from the Microsoft Store.".into(),
         TranscodeFailureReason::InvalidProfile => "Windows' encoder doesn't support these settings. Try a smaller size or H.264.".into(),
         _ => "Windows couldn't convert this video".into(),
     }
 }
 
-/// One transcode. `tick` gets the progress (0Ã¢â‚¬â€œ1) about ten times a second and
+/// One transcode. `tick` gets the progress (0–1) about ten times a second and
 /// returns false to cancel.
 fn transcode(j: &VideoJob, info: &VideoInfo, dest: &Path, hardware: bool, tick: &mut dyn FnMut(f64) -> bool) -> Result<(), String> {
     let src = open_file(&j.source)?;
@@ -282,7 +282,7 @@ pub fn compress_videos(app: AppHandle, items: Vec<VideoJob>) -> Result<u64, Stri
     if items.is_empty() {
         return Err("Nothing to convert".into());
     }
-    log::info!("compress videos: {}", items.iter().map(|i| format!("\"{}\" Ã¢â€ â€™ \"{}\" {}x{} {} b/s", i.source, i.dest, i.width, i.height, i.video_bitrate)).collect::<Vec<_>>().join(", "));
+    log::info!("compress videos: {}", items.iter().map(|i| format!("\"{}\" → \"{}\" {}x{} {} b/s", i.source, i.dest, i.width, i.height, i.video_bitrate)).collect::<Vec<_>>().join(", "));
     let label = if items.len() == 1 { format!("Compressing {}", file_name(&items[0].source)) } else { format!("Compressing {} videos", items.len()) };
     Ok(jobs::spawn(&app, "media", &label, move |ctx| {
         let infos = items.iter().map(|i| probe_video(&i.source)).collect::<Result<Vec<_>, _>>()?;
@@ -310,7 +310,7 @@ pub fn compress_videos(app: AppHandle, items: Vec<VideoJob>) -> Result<u64, Stri
                 log::warn!("hardware transcode of {} failed ({e}); retrying in software", j.source);
                 transcode(j, info, &dest, false, &mut tick)?;
             }
-            log::info!("compressed {} in {:?}: {} Ã¢â€ â€™ {} bytes", j.source, started.elapsed(), info.size, std::fs::metadata(&dest).map(|m| m.len()).unwrap_or(0));
+            log::info!("compressed {} in {:?}: {} → {} bytes", j.source, started.elapsed(), info.size, std::fs::metadata(&dest).map(|m| m.len()).unwrap_or(0));
             ctx.created(dest.to_string_lossy().to_string());
             ctx.file_done();
         }
@@ -337,7 +337,7 @@ pub struct VideoSample {
 /// Encodes `length_ms` of `job.source` from `at_ms` with the job's settings, so the
 /// editor can show the real quality and measure the real size. `None` when a newer
 /// sample request replaced this one.
-/// Progress of the sample being encoded: `media-sample-progress` events with 0â€“1.
+/// Progress of the sample being encoded: `media-sample-progress` events with 0–1.
 #[tauri::command]
 pub async fn video_sample(app: AppHandle, job: VideoJob, at_ms: u64, length_ms: u64) -> Result<Option<VideoSample>, String> {
     let generation = SAMPLE_GEN.fetch_add(1, Ordering::SeqCst) + 1;
@@ -372,7 +372,7 @@ pub async fn video_sample(app: AppHandle, job: VideoJob, at_ms: u64, length_ms: 
     .await
 }
 
-// Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬ pictures Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
+// ───────────────────────────── pictures ─────────────────────────────
 
 /// A decoded picture, upright, as premultiplied BGRA.
 struct Decoded {
@@ -407,7 +407,7 @@ fn container_name(g: &windows::core::GUID) -> &'static str {
     }
 }
 
-/// EXIF orientation (1Ã¢â‚¬â€œ8) of a frame, 1 when it has none.
+/// EXIF orientation (1–8) of a frame, 1 when it has none.
 fn orientation(frame: &IWICBitmapFrameDecode) -> u16 {
     let Ok(reader) = (unsafe { frame.GetMetadataQueryReader() }) else { return 1 };
     for q in [w!("System.Photo.Orientation"), w!("/app1/ifd/{ushort=274}"), w!("/ifd/{ushort=274}")] {
@@ -450,9 +450,9 @@ fn decode(path: &str) -> Result<Arc<Decoded>, String> {
     let unreadable = |_| {
         let ext = path.rsplit('.').next().unwrap_or("").to_ascii_lowercase();
         match ext.as_str() {
-            "heic" | "heif" => "Windows can't read HEIC pictures without Ã¢â‚¬Å“HEIF Image ExtensionsÃ¢â‚¬Â (and Ã¢â‚¬Å“HEVC Video ExtensionsÃ¢â‚¬Â) from the Microsoft Store.".to_string(),
-            "webp" => "Windows can't read WebP pictures without Ã¢â‚¬Å“WebP Image ExtensionsÃ¢â‚¬Â from the Microsoft Store.".to_string(),
-            "avif" => "Windows can't read AVIF pictures without Ã¢â‚¬Å“AV1 Video ExtensionÃ¢â‚¬Â from the Microsoft Store.".to_string(),
+            "heic" | "heif" => "Windows can't read HEIC pictures without “HEIF Image Extensions” (and “HEVC Video Extensions”) from the Microsoft Store.".to_string(),
+            "webp" => "Windows can't read WebP pictures without “WebP Image Extensions” from the Microsoft Store.".to_string(),
+            "avif" => "Windows can't read AVIF pictures without “AV1 Video Extension” from the Microsoft Store.".to_string(),
             _ => "Windows can't read this picture".to_string(),
         }
     };
@@ -502,7 +502,7 @@ pub struct ImageOpts {
     /// Decide per picture: PNG when it has transparency, JPEG otherwise (overrides `png`).
     #[serde(default)]
     pub auto: bool,
-    /// JPEG quality, 1Ã¢â‚¬â€œ100.
+    /// JPEG quality, 1–100.
     pub quality: u32,
     /// Longest side in pixels; 0 keeps the size.
     pub max_side: u32,
@@ -778,12 +778,12 @@ mod tests {
     fn exif_orientation_is_applied() {
         let Some(src) = fixture("photo-exif-rotated.jpg") else { return };
         let d = decode(&src).unwrap();
-        // Stored 3200Ãƒâ€”2400 on its side, tagged to be shown upright.
+        // Stored 3200×2400 on its side, tagged to be shown upright.
         assert_eq!((d.width, d.height, d.alpha), (2400, 3200, false));
         let (bytes, w, h) = encode(&d, ImageOpts { png: false, auto: false, quality: 70, max_side: 1600 }).unwrap();
         assert_eq!((w, h), (1200, 1600));
         assert!(bytes.starts_with(&[0xFF, 0xD8]) && bytes.len() < std::fs::metadata(&src).unwrap().len() as usize);
-        // Lower quality Ã¢â€ â€™ smaller file.
+        // Lower quality → smaller file.
         let (small, ..) = encode(&d, ImageOpts { png: false, auto: false, quality: 30, max_side: 1600 }).unwrap();
         assert!(small.len() < bytes.len());
     }

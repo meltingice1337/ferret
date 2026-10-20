@@ -34,7 +34,7 @@ function useFocusedEntry(delay: number) {
 
 /** "66 lines", "1920 × 1080", "Duration 3:47" — readable on its own. */
 function metaText(m: Meta) {
-  if (m.label === "Dimensions" || m.label === "Duration") return m.value;
+  if (m.label === "Dimensions" || m.label === "Duration" || m.label === "Frame rate") return m.value;
   if (/^[\d,.+]+$/.test(m.value)) return `${m.value} ${m.value === "1" ? m.label.toLowerCase().replace(/s$/, "") : m.label.toLowerCase()}`;
   return `${m.label}: ${m.value}`;
 }

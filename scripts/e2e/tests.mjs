@@ -2,7 +2,7 @@
 // folder (`t.root`, `t.p(...)`), and helpers. They use real key presses and clicks where a user
 // would, and check results on disk where it matters. `soft` tests warn instead of failing
 // (they depend on the machine, like the drive index).
-import { existsSync, mkdirSync, readdirSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { execSync } from "node:child_process";
 import { crc32, deflateSync } from "node:zlib";
@@ -83,6 +83,24 @@ export const tests = [
       await t.c.waitFor(`document.querySelector(".pv-body h1")?.textContent.includes("E2E title")`, { what: "the rendered Markdown heading" });
       await clickRow(t, "photo.png");
       await t.c.waitFor(`(() => { const i = document.querySelector(".pv-body img"); return i && i.complete && i.naturalWidth > 0; })()`, { what: "the picture decoded" });
+    },
+  },
+  {
+    name: "a video's details show before it plays",
+    async run(t) {
+      await t.c.eval(`${T}.state.setUi("previewOpen", true)`);
+      await go(t, t.p("media"));
+      await clickRow(t, "clip.mp4");
+      await t.c.waitFor(`document.querySelector(".pv-poster")`, { what: "the video's poster" });
+      const details = `Object.fromEntries([...document.querySelectorAll(".pv-meta dt")].map((dt) => [dt.textContent, dt.nextElementSibling?.textContent ?? ""]))`;
+      await t.c.waitFor(`!!${details}["Duration"]?.trim()`, { what: "the video's length, without playing it" });
+      const d = await t.c.eval(details);
+      assert(d.Duration === "0:01", `Duration ${d.Duration}`);
+      assert(d.Dimensions === "160 × 90", `Dimensions ${d.Dimensions}`);
+      assert(d["Frame rate"] === "25 fps", `Frame rate ${d["Frame rate"]}`);
+      assert(d.Codec === "H.264", `Codec ${d.Codec}`);
+      assert(d.Audio && d.Audio !== "None", `Audio ${d.Audio}`);
+      assert(!(await t.c.eval(`!!document.querySelector(".pv-body video")`)), "the video started playing to get them");
     },
   },
   {
@@ -484,6 +502,8 @@ export function fixture(root, needle) {
     "docs/notes.txt": "hello from e2e\nsecond line",
     "docs/readme.md": "# E2E title\n\nSome *Markdown*.",
     "docs/photo.png": png(24, 16, [220, 40, 40]),
+    // 1 s, 160 × 90, 25 fps, H.264 with an AAC tone (made with ffmpeg).
+    "media/clip.mp4": readFileSync(new URL("./fixtures/clip.mp4", import.meta.url)),
     "kinds/one.zip": zip({ "a.txt": "a" }),
     "kinds/two.zip": zip({ "a.txt": "a", "b.txt": "b" }),
     // Never run: only its extension matters (an application, which has no detail rows).
