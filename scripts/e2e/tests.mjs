@@ -95,12 +95,61 @@ export const tests = [
       const details = `Object.fromEntries([...document.querySelectorAll(".pv-meta dt")].map((dt) => [dt.textContent, dt.nextElementSibling?.textContent ?? ""]))`;
       await t.c.waitFor(`!!${details}["Duration"]?.trim()`, { what: "the video's length, without playing it" });
       const d = await t.c.eval(details);
-      assert(d.Duration === "0:01", `Duration ${d.Duration}`);
+      assert(d.Duration === "0:06", `Duration ${d.Duration}`);
       assert(d.Dimensions === "160 × 90", `Dimensions ${d.Dimensions}`);
       assert(d["Frame rate"] === "25 fps", `Frame rate ${d["Frame rate"]}`);
       assert(d.Codec === "H.264", `Codec ${d.Codec}`);
       assert(d.Audio && d.Audio !== "None", `Audio ${d.Audio}`);
       assert(!(await t.c.eval(`!!document.querySelector(".pv-body video")`)), "the video started playing to get them");
+    },
+  },
+  {
+    name: "compress video: the preview says how it looks, zooms to actual pixels and goes full screen",
+    async run(t) {
+      const clip = t.p("media", "clip.mp4");
+      await t.c.eval(`${T}.state.setUi("media", { kind: "video", paths: [${JSON.stringify(clip)}] })`);
+      await t.c.waitFor(`document.querySelector(".mx-sample-btn")`, { what: "the compress editor" });
+      await t.c.eval(`document.querySelector(".mx-sample-btn").click()`);
+      // A flat-colored clip compresses without loss: the check must say so.
+      await t.c.waitFor(`document.querySelector(".mx-quality")`, { timeoutMs: 30000, what: "the quality check's verdict" });
+      const q = await t.c.eval(`(() => { const b = document.querySelector(".mx-quality"); return { level: b.dataset.level, text: b.textContent }; })()`);
+      assert(q.level === "same", `verdict ${q.level}: ${q.text}`);
+      // The verdict pauses on the weakest moment, side by side.
+      await t.c.eval(`document.querySelector(".mx-quality").click()`);
+      const viewIs = (name) => `[...document.querySelectorAll(".mx-ab .seg button.on")].some((b) => b.textContent === ${JSON.stringify(name)})`;
+      await t.c.waitFor(`${viewIs("Compare")} && [...document.querySelectorAll(".mx-screen video")].every((v) => v.paused)`, { what: "a paused side-by-side view" });
+      // Past the 4-second sample (of 6) only the original exists, and it says so while the mouse is
+      // down; let go there and the comparison follows, with a new sample there (from 0:02 to the end).
+      const timelineAt = (x) => t.c.eval(`(() => { const r = document.querySelector(".mx-tl").getBoundingClientRect(); return { x: r.left + r.width * ${x}, y: r.top + r.height / 2 }; })()`);
+      const mouse = (type, p) => t.c.send("Input.dispatchMouseEvent", { type, x: p.x, y: p.y, button: "left", clickCount: 1 });
+      const past = await timelineAt(0.9);
+      await mouse("mousePressed", past);
+      await t.c.waitFor(`${viewIs("Original")} && /Outside the/.test(document.querySelector(".mx-ab").textContent)`, { what: "the original past the sample, saying why" });
+      await mouse("mouseReleased", past);
+      await t.c.waitFor(`${viewIs("Compare")} && /sample from 0:02/.test(document.querySelector(".mx-ab").textContent)`, { timeoutMs: 30000, what: "a new sample where the mouse let go" });
+      // Inside the sample, the comparison stays.
+      const inside = await timelineAt(0.6);
+      await mouse("mousePressed", inside);
+      await mouse("mouseReleased", inside);
+      await sleep(300);
+      assert(await t.c.eval(viewIs("Compare")), "a click inside the sample left the comparison");
+      await t.c.waitFor(`document.querySelector(".mx-quality")`, { timeoutMs: 30000, what: "the new sample's verdict" });
+      // 100%: the picture at its own size (160 × 90); double-click fits it again.
+      await t.c.eval(`[...document.querySelectorAll(".mx-vzoom button")].find((b) => b.textContent === "100%").click()`);
+      await t.c.waitFor(`document.querySelector(".mx-vframe").style.width === "160px"`, { what: "the picture at actual pixels" });
+      const at = await t.c.eval(`(() => { const b = document.querySelector(".mx-screen").getBoundingClientRect(); return { x: b.left + b.width * 0.3, y: b.top + b.height * 0.6 }; })()`);
+      await t.c.send("Input.dispatchMouseEvent", { type: "mousePressed", x: at.x, y: at.y, button: "left", clickCount: 2 });
+      await t.c.send("Input.dispatchMouseEvent", { type: "mouseReleased", x: at.x, y: at.y, button: "left", clickCount: 2 });
+      await t.c.waitFor(`[...document.querySelectorAll(".mx-vzoom button")].find((b) => b.textContent === "Fit").classList.contains("on")`, { what: "double-click to fit again" });
+      // F: full screen; the first Esc only leaves it, the second closes the editor.
+      await t.c.key("f");
+      await t.c.waitFor(`document.fullscreenElement === document.querySelector(".mx-screen")`, { what: "full screen" });
+      await t.c.key("Escape");
+      await t.c.waitFor(`!document.fullscreenElement`, { what: "Esc to leave full screen" });
+      await sleep(400);
+      assert(await t.c.eval(`!!document.querySelector(".mx-sample-btn")`), "Esc closed the editor instead of leaving full screen");
+      await t.c.key("Escape");
+      await t.c.waitFor(`!document.querySelector(".mx-sample-btn")`, { what: "the second Esc to close the editor" });
     },
   },
   {
@@ -502,7 +551,7 @@ export function fixture(root, needle) {
     "docs/notes.txt": "hello from e2e\nsecond line",
     "docs/readme.md": "# E2E title\n\nSome *Markdown*.",
     "docs/photo.png": png(24, 16, [220, 40, 40]),
-    // 1 s, 160 × 90, 25 fps, H.264 with an AAC tone (made with ffmpeg).
+    // 6 s, 160 × 90, 25 fps, H.264 with an AAC tone (made with ffmpeg).
     "media/clip.mp4": readFileSync(new URL("./fixtures/clip.mp4", import.meta.url)),
     "kinds/one.zip": zip({ "a.txt": "a" }),
     "kinds/two.zip": zip({ "a.txt": "a", "b.txt": "b" }),

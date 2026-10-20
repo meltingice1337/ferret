@@ -3,7 +3,7 @@ import ContextMenu from "./components/ContextMenu";
 import { AskDialog, BatchRenameDialog, ConflictDialog, PropertiesDialog } from "./components/Dialogs";
 import Panes from "./components/Panes";
 import { DragGhost, JobsPanel } from "./components/Jobs";
-import MediaEditor, { closeMediaEditor } from "./components/MediaEditor";
+import MediaEditor, { closeMediaEditor, escLeavesFullscreen } from "./components/MediaEditor";
 import UpdateCard, { WhatsNewDialog } from "./components/UpdateCard";
 import { checkForUpdate, setUpdater, startUpdater, updater } from "./lib/updater";
 import { openKeyboardMenu } from "./components/menus";
@@ -212,7 +212,7 @@ export default function App() {
       if (e.key === "Escape" && ui.sidebarOverlay && !modalOpen()) { e.preventDefault(); return setUi("sidebarOverlay", false); }
       if (modalOpen()) {
         // Escape closes the top-most dialog even when focus fell back to <body>.
-        if (e.key === "Escape" && !ui.quickLook) { e.preventDefault(); closeTopModal(); }
+        if (e.key === "Escape" && !ui.quickLook) { e.preventDefault(); if (!escLeavesFullscreen()) closeTopModal(); }
         return;
       }
 

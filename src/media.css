@@ -83,7 +83,7 @@
 .mx-arrow { color: var(--fg-3); }
 .mx-after { font-size: 20px; font-weight: 650; color: var(--fg); }
 .mx-badge { font-size: 11.5px; font-weight: 700; padding: 2px 8px; border-radius: 999px; color: #34d399; background: rgba(16, 185, 129, 0.14); }
-.mx-badge.bad { color: #f59e0b; background: rgba(245, 158, 11, 0.14); }
+.mx-badge.bad, .mx-badge.warn { color: #f59e0b; background: rgba(245, 158, 11, 0.14); }
 .mx-bar { height: 5px; max-width: 420px; border-radius: 3px; background: var(--line-2); overflow: hidden; }
 .mx-bar > div { height: 100%; border-radius: 3px; background: var(--accent); transition: width 0.25s ease-out; }
 .mx-bar > div.bad { background: #f59e0b; }
@@ -211,3 +211,23 @@
   .mx-side { width: auto; border-left: none; border-top: 1px solid var(--line); overflow: visible; }
   .mx-foot { flex-wrap: wrap; }
 }
+
+/* The video's frame inside the screen: fitted, or zoomed and panned to look at actual pixels. */
+.mx-vframe { position: absolute; }
+.mx-screen .mx-vframe video { object-fit: fill; }
+.mx-screen.zoomed { cursor: grab; }
+.mx-screen.zoomed:active { cursor: grabbing; }
+.mx-screen.pixel video { image-rendering: pixelated; }
+.mx-screen:fullscreen { border-radius: 0; }
+.mx-vzoom { top: 10px; bottom: auto; right: 10px; }
+.mx-ab { flex-wrap: wrap; max-width: calc(100% - 200px); }
+/* The quality check's verdict: green when it looks fine, amber or red when it doesn't. */
+.mx-quality {
+  display: inline-flex; align-items: center; gap: 5px; height: 22px; padding: 0 10px; border-radius: 999px;
+  font-size: 11.5px; color: #6ee7a8; background: rgba(0, 0, 0, 0.6); backdrop-filter: blur(8px);
+}
+.mx-quality:hover { background: rgba(0, 0, 0, 0.78); }
+.mx-quality[data-level="ok"] { color: #fbbf24; }
+.mx-quality[data-level="poor"] { color: #f87171; }
+.mx-ab .mx-seg { width: auto; }
+.mx-ab .mx-seg button { flex: none; }

@@ -4,7 +4,8 @@
 // the settings, and the size it will come out at.
 
 import {
-  AlertTriangle, ChevronLeft, ChevronRight, Clapperboard, ImageDown, Loader2, Pause, Play, RotateCcw, Sparkles, Volume2, VolumeX, X,
+  AlertTriangle, ChevronLeft, ChevronRight, CircleCheck, Clapperboard, ImageDown, Loader2, Maximize2, Minimize2, Pause, Play, RotateCcw,
+  Sparkles, Volume2, VolumeX, X,
 } from "../lib/icons";
 import { createEffect, createMemo, createResource, createSignal, For, on, onCleanup, onMount, Show, type JSX } from "solid-js";
 import { createStore } from "solid-js/store";
@@ -14,6 +15,7 @@ import { api, fileUrl, thumbUrl } from "../lib/api";
 import { formatSize, plural } from "../lib/format";
 import { compressMedia } from "../lib/ops";
 import { basename, parent } from "../lib/path";
+import { luma, ssim, verdict } from "../lib/quality";
 import { setUi, toast, ui } from "../lib/state";
 import type { VideoInfo, VideoJob, VideoSample } from "../lib/types";
 
@@ -78,13 +80,13 @@ function Section(props: { title: string; aside?: JSX.Element; children: JSX.Elem
   );
 }
 
-function Presets<T extends { id: string; label: string; hint: string }>(props: { items: T[]; current: string | null; onPick: (p: T) => void }) {
+function Presets<T extends { id: string; label: string; hint: string }>(props: { items: T[]; current: string | null; onPick: (p: T) => void; hintOf?: (p: T) => string }) {
   return (
     <div class="mx-presets">
       <For each={props.items}>
         {(p) => (
           <button class="mx-preset" classList={{ on: props.current === p.id }} onClick={() => props.onPick(p)}>
-            <b>{p.label}</b><small>{p.hint}</small>
+            <b>{p.label}</b><small>{props.hintOf?.(p) ?? p.hint}</small>
           </button>
         )}
       </For>
@@ -114,13 +116,23 @@ function Summary(props: { before: number; after: number | null; approx: boolean;
         <span class="mx-arrow">→</span>
         <span class="mx-after">{props.after == null ? "…" : `${props.approx ? "≈ " : ""}${formatSize(props.after)}`}</span>
         <Show when={pct() != null}>
-          <span class="mx-badge" classList={{ bad: pct()! <= 0 }}>{pct()! > 0 ? `${pct()}% smaller` : "not smaller"}</span>
+          <span class="mx-badge" classList={{ bad: pct()! <= 0, warn: pct()! > 0 && pct()! < 10 }}>{pct()! <= 0 ? "not smaller" : pct()! < 10 ? `only ${pct()}% smaller` : `${pct()}% smaller`}</span>
         </Show>
       </div>
       <div class="mx-bar"><div style={{ width: `${clamp((ratio() ?? 1) * 100, 1.5, 100)}%` }} classList={{ bad: (ratio() ?? 0) >= 1 }} /></div>
       <div class="mx-sum-note">{props.note}</div>
     </div>
   );
+}
+
+let leftFullscreenAt = -Infinity;
+document.addEventListener("fullscreenchange", () => { if (!document.fullscreenElement) leftFullscreenAt = performance.now(); });
+/** Esc in full screen only leaves full screen (the webview does that itself, and may pass the
+ *  key on too, even after leaving): true when that is what this Esc was for. */
+export function escLeavesFullscreen() {
+  if (!document.fullscreenElement && performance.now() - leftFullscreenAt > 300) return false;
+  if (document.fullscreenElement) document.exitFullscreen().catch(() => {});
+  return true;
 }
 
 function Shell(props: {
@@ -133,7 +145,11 @@ function Shell(props: {
         ref={(el) => queueMicrotask(() => el.focus())}
         onKeyDown={(e) => {
           e.stopPropagation();
-          if (e.key === "Escape") { e.preventDefault(); return closeMediaEditor(); }
+          if (e.key === "Escape") {
+            e.preventDefault();
+            if (escLeavesFullscreen()) return;
+            return closeMediaEditor();
+          }
           const inField = !!(e.target as HTMLElement).closest("input, select, textarea");
           if (e.key === "Enter" && (e.ctrlKey || (inField && (e.target as HTMLInputElement).type === "text"))) {
             e.preventDefault();
@@ -254,6 +270,77 @@ async function drawFilmstrip(src: string, canvas: HTMLCanvasElement, durMs: numb
   }
 }
 
+/** A hidden <video> for reading frames. Anonymous CORS: the file protocol allows it, and a frame
+ *  from it can be read back from a canvas. */
+async function frameReader(src: string) {
+  const v = document.createElement("video");
+  v.muted = true;
+  v.preload = "auto";
+  v.crossOrigin = "anonymous";
+  v.src = src;
+  await new Promise((res, rej) => { v.onloadeddata = res; v.onerror = rej; });
+  return v;
+}
+/** Seeks and waits for the frame. Already there: nothing to wait for (no "seeked" may come). */
+const seekTo = (v: HTMLVideoElement, s: number) => new Promise<void>((resolve, reject) => {
+  if (Math.abs(v.currentTime - s) < 1e-6 && !v.seeking) return resolve();
+  const timer = setTimeout(() => reject(new Error("seek timed out")), 3000);
+  v.addEventListener("seeked", () => { clearTimeout(timer); resolve(); }, { once: true });
+  v.currentTime = s;
+});
+const SAMPLE_FRAMES = 8;
+
+/** The quality check: frames of a preview sample against the same moments of the original (see
+ *  lib/quality.ts). Both are drawn at the original's size (at most 1920 wide) and averaged down
+ *  to about 960 wide. Returns the worst frame's score and when it is (in the sample's time), and
+ *  how far the sample's pictures are from the original's (`shift`, seconds), or null when the
+ *  webview can't play one of them (or `stop` says the sample was replaced). */
+async function checkSample(original: string, sample: string, atMs: number, durMs: number, fps: number, origFps: number, stop: () => boolean) {
+  let o: HTMLVideoElement | undefined, s: HTMLVideoElement | undefined;
+  try {
+    [o, s] = await Promise.all([frameReader(original), frameReader(sample)]);
+    const W = Math.min(1920, o.videoWidth), H = Math.round((o.videoHeight * W) / o.videoWidth);
+    const f = Math.max(2, Math.round(W / 960));
+    const ca = new OffscreenCanvas(W, H).getContext("2d", { willReadFrequently: true })!;
+    const cb = new OffscreenCanvas(W, H).getContext("2d", { willReadFrequently: true })!;
+    const picture = (ctx: OffscreenCanvasRenderingContext2D, v: HTMLVideoElement, by: number) => {
+      ctx.drawImage(v, 0, 0, W, H);
+      return luma(ctx.getImageData(0, 0, W, H).data, W, H, by);
+    };
+    // The middle of one of the sample's frames, so both show the same picture.
+    const frameAt = (k: number) => (Math.floor(((k + 0.5) / SAMPLE_FRAMES) * (durMs / 1000) * fps) + 0.5) / fps;
+    const origAt = (t: number) => clamp(atMs / 1000 + t, 0, Math.max(0, o!.duration - 0.05));
+    // A sample can show the original's picture from a frame or two earlier or later (the encoder
+    // shifts the video, e.g. to make room for the sound): line them up first, on one frame.
+    let shift = 0;
+    {
+      const t = frameAt(0), step = 1 / (origFps || fps);
+      await seekTo(s, t);
+      const b = picture(cb, s, f * 2);
+      let best = -Infinity;
+      for (const d of [0, -1, 1, -2, 2, -3, 3, -4, 4]) {
+        if (stop()) return null;
+        await seekTo(o, origAt(t + d * step));
+        const score = ssim(picture(ca, o, f * 2), b);
+        if (score > best + 1e-4) { best = score; shift = d * step; }
+      }
+    }
+    let worst = { score: 1, ms: atMs };
+    for (let k = 0; k < SAMPLE_FRAMES; k++) {
+      if (stop()) return null;
+      const t = frameAt(k);
+      await Promise.all([seekTo(s, t), seekTo(o, origAt(t + shift))]);
+      const score = ssim(picture(ca, o, f), picture(cb, s, f));
+      if (score < worst.score) worst = { score, ms: atMs + t * 1000 };
+    }
+    return stop() ? null : { ...worst, shift };
+  } catch {
+    return null;
+  } finally {
+    for (const v of [o, s]) if (v) { v.removeAttribute("src"); v.load(); }
+  }
+}
+
 function VideoEditor(props: { paths: string[] }) {
   const single = props.paths.length === 1;
   const [results] = createResource(() => props.paths, (ps) => Promise.allSettled(ps.map((p) => api.videoInfo(p))));
@@ -287,6 +374,19 @@ function VideoEditor(props: { paths: string[] }) {
     };
   };
   const curPlan = () => (cur() ? plan(cur()!, s, trimOf(cur()!)) : null);
+  /** A preset card: the resolution it gives and the size the video (or all of them) would come
+   *  out at, so it shows that every preset compresses, and how much. */
+  const presetHint = (p: (typeof VPRESETS)[number]) => {
+    const list = infos();
+    if (!list.length) return p.hint;
+    const c = cur() ?? list[0];
+    const pl = plan(c, p.s, trimOf(c));
+    const res = `${Math.min(pl.ow, pl.oh)}p`;
+    if (p.s.mode === "size") return `${res} · ${p.hint}`;
+    const before = list.reduce((a, i) => a + i.size, 0);
+    const after = list.reduce((a, i) => a + plan(i, p.s, trimOf(i)).bytes, 0);
+    return after >= before * 0.9 ? `${res} · about the same size` : `${res} · ≈ ${formatSize(after)}`;
+  };
 
   // ---- player ----
   let vid!: HTMLVideoElement;
@@ -298,6 +398,9 @@ function VideoEditor(props: { paths: string[] }) {
   const [muted, setMuted] = createSignal(true);
   const [unplayable, setUnplayable] = createSignal(false);
   const [view, setView] = createSignal<"orig" | "split" | "sample">("orig");
+  /** The view picked (Compare after a preview). Outside the sample only the original exists, so
+   *  it shows there for a moment, and the picked view comes back inside. */
+  const [wanted, setWanted] = createSignal<"orig" | "split" | "sample">("orig");
 
   const [sample, setSample] = createSignal<(VideoSample & { key: string; atMs: number; source: string }) | null>(null);
   const [sampling, setSampling] = createSignal(false);
@@ -320,13 +423,114 @@ function VideoEditor(props: { paths: string[] }) {
   // The sample leads (it loops); the original follows it in the split view.
   const active = () => (inSample() && svid ? svid : vid);
 
+  // ---- quality check (of the latest sample, while it plays) ----
+  const [quality, setQuality] = createSignal<{ path: string; busy: boolean; score?: number; ms?: number; shift?: number } | null>(null);
+  /** How far the sample is from the original (seconds, from the check): the side-by-side view lines them up by it. */
+  const shift = () => { const q = quality(); return q && q.path === sample()?.path ? q.shift ?? 0 : 0; };
+  /** The check of the sample on screen (none once the settings changed since it). */
+  const ownQuality = () => { const q = quality(); return q && q.path === sample()?.path && sampleFresh() ? q : null; };
+  const checking = () => !!ownQuality()?.busy;
+  const result = createMemo(() => {
+    const q = ownQuality();
+    return q && !q.busy && q.score != null ? { ...verdict(q.score), score: q.score, ms: q.ms ?? 0 } : null;
+  });
+  /** Pauses on the sample's weakest moment, side by side, to look at it closely. */
+  const showWorst = () => {
+    const v = result();
+    if (!v) return;
+    svid?.pause();
+    vid?.pause();
+    if (view() === "orig") switchView("split");
+    seek(v.ms);
+  };
+
+  // ---- zoom: the picture at actual pixels, to look for blocks and smearing ----
+  let screen: HTMLDivElement | undefined;
+  const [box, setBox] = createSignal({ w: 1, h: 1 });
+  const [zoom, setZoom] = createSignal<number | null>(null);
+  const [pan, setPan] = createSignal({ x: 0, y: 0 });
+  /** The picture's own size (as shown, turned upright). */
+  const nat = () => { const p = curPlan(); return p ? { w: p.dw, h: p.dh } : { w: 16, h: 9 }; };
+  const fit = () => Math.min(box().w / nat().w, box().h / nat().h);
+  const scale = () => zoom() ?? fit();
+  const dims = () => ({ w: nat().w * scale(), h: nat().h * scale() });
+  const clampPan = (p: { x: number; y: number }) => {
+    const mx = Math.max(0, (dims().w - box().w) / 2), my = Math.max(0, (dims().h - box().h) / 2);
+    return { x: clamp(p.x, -mx, mx), y: clamp(p.y, -my, my) };
+  };
+  const frameLeft = () => box().w / 2 - dims().w / 2 + pan().x;
+  const frameTop = () => box().h / 2 - dims().h / 2 + pan().y;
+  /** Zooms keeping the point (cx, cy) from the screen's middle in place; null fits the screen.
+   *  A small video is fitted larger than its pixels, so its 100% is smaller than "fit". */
+  const zoomTo = (next: number | null, cx = 0, cy = 0) => {
+    const old = scale();
+    if (next != null) next = clamp(next, Math.min(fit(), 1), 8);
+    if (next == null || Math.abs(next - fit()) < 1e-3) { setZoom(null); setPan({ x: 0, y: 0 }); return; }
+    const p = pan();
+    setZoom(next);
+    setPan(clampPan({ x: cx - ((cx - p.x) * next) / old, y: cy - ((cy - p.y) * next) / old }));
+  };
+  createEffect(on(() => cur()?.path, () => { setZoom(null); setPan({ x: 0, y: 0 }); }));
+  const attachScreen = (el: HTMLDivElement) => {
+    screen = el;
+    const ro = new ResizeObserver(() => setBox({ w: el.clientWidth || 1, h: el.clientHeight || 1 }));
+    ro.observe(el);
+    const wheel = (e: WheelEvent) => {
+      if (unplayable() && !inSample()) return;
+      e.preventDefault();
+      const r = el.getBoundingClientRect();
+      zoomTo(clamp(scale() * (e.deltaY < 0 ? 1.2 : 1 / 1.2), 0, 8), e.clientX - r.left - box().w / 2, e.clientY - r.top - box().h / 2);
+    };
+    el.addEventListener("wheel", wheel, { passive: false });
+    onCleanup(() => { ro.disconnect(); el.removeEventListener("wheel", wheel); });
+  };
+  /** A click plays or pauses; a drag pans the zoomed picture. */
+  const onScreenDown = (e: PointerEvent) => {
+    const el = screen;
+    if (!el || e.button !== 0 || (e.target as HTMLElement).closest(".mx-vsplit, .mx-ab, .mx-zoom, .mx-poster")) return;
+    const start = { x: e.clientX, y: e.clientY, pan: pan() };
+    let moved = false;
+    el.setPointerCapture(e.pointerId);
+    const move = (ev: PointerEvent) => {
+      if (Math.abs(ev.clientX - start.x) + Math.abs(ev.clientY - start.y) > 4) moved = true;
+      if (moved && zoom() != null) setPan(clampPan({ x: start.pan.x + ev.clientX - start.x, y: start.pan.y + ev.clientY - start.y }));
+    };
+    const up = () => {
+      el.removeEventListener("pointermove", move);
+      el.removeEventListener("pointerup", up);
+      if (!moved) togglePlay();
+    };
+    el.addEventListener("pointermove", move);
+    el.addEventListener("pointerup", up);
+  };
+  const onScreenDbl = (e: MouseEvent) => {
+    if (!screen || (e.target as HTMLElement).closest(".mx-vsplit, .mx-ab, .mx-zoom, .mx-poster")) return;
+    const r = screen.getBoundingClientRect();
+    zoomTo(zoom() == null ? 1 : null, e.clientX - r.left - box().w / 2, e.clientY - r.top - box().h / 2);
+  };
+
+  // ---- full screen: the picture alone, as it would be watched ----
+  const [full, setFull] = createSignal(false);
+  const toggleFull = () => {
+    if (document.fullscreenElement) document.exitFullscreen().catch(() => {});
+    else screen?.requestFullscreen().catch(() => {});
+  };
+  onMount(() => {
+    const change = () => setFull(!!screen && document.fullscreenElement === screen);
+    document.addEventListener("fullscreenchange", change);
+    onCleanup(() => {
+      document.removeEventListener("fullscreenchange", change);
+      if (document.fullscreenElement) document.exitFullscreen().catch(() => {});
+    });
+  });
+
   let raf = 0;
   const tick = () => {
     const sm = sample();
     if (inSample() && svid && sm) {
       setTime(sm.atMs + svid.currentTime * 1000);
       if (view() === "split" && vid && !unplayable()) {
-        const target = sm.atMs / 1000 + svid.currentTime;
+        const target = sm.atMs / 1000 + svid.currentTime + shift();
         if (Math.abs(vid.currentTime - target) > 0.12) vid.currentTime = target;
         if (svid.paused !== vid.paused) svid.paused ? vid.pause() : vid.play().catch(() => {});
       }
@@ -345,14 +549,17 @@ function VideoEditor(props: { paths: string[] }) {
     if (!c) return;
     ms = clamp(ms, 0, c.durationMs);
     const sm = sample();
-    // Inside the sample, the comparison stays; outside it, only the original exists.
-    if (inSample() && sm && ms >= sm.atMs && ms <= sm.atMs + sm.durationMs && svid) {
+    // Inside the sample, the comparison shows; outside it, only the original exists.
+    let within = false;
+    if (sampleHere() && sm && ms >= sm.atMs && ms <= sm.atMs + sm.durationMs && svid) {
+      if (view() === "orig" && wanted() !== "orig") setView(wanted());
       svid.currentTime = Math.min((ms - sm.atMs) / 1000, sm.durationMs / 1000 - 0.05);
+      within = view() !== "orig";
     } else if (inSample()) {
       svid?.pause();
       setView("orig");
     }
-    if (vid) vid.currentTime = ms / 1000;
+    if (vid) vid.currentTime = ms / 1000 + (within ? shift() : 0);
     setTime(ms);
   };
   const togglePlay = () => {
@@ -374,9 +581,10 @@ function VideoEditor(props: { paths: string[] }) {
     svid?.pause();
     vid?.pause();
     setView(to);
+    setWanted(to);
     if (to !== "orig" && svid) {
       svid.currentTime = clamp((t - sm.atMs) / 1000, 0, sm.durationMs / 1000 - 0.05);
-      if (to === "split") vid.currentTime = sm.atMs / 1000 + svid.currentTime;
+      if (to === "split") vid.currentTime = sm.atMs / 1000 + svid.currentTime + shift();
     } else vid.currentTime = t / 1000;
     if (wasPlaying) queueMicrotask(() => active().play().catch(() => {}));
   };
@@ -393,12 +601,15 @@ function VideoEditor(props: { paths: string[] }) {
   const setStart = () => { const t = time(); setTrim(([, e]) => [Math.min(t, e - 500), e]); };
   const setEnd = () => { const t = time(); setTrim(([b]) => [b, Math.max(t, b + 500)]); };
 
+  /** Counts preview requests: a newer one replaces the one being encoded. */
+  let sampleSeq = 0;
   const makeSample = async () => {
     const c = cur();
     if (!c) return;
     const j = jobFor(c);
     const lo = single ? trim()[0] : 0, hi = single ? trim()[1] : c.durationMs;
     const at = Math.round(clamp(time(), lo, Math.max(lo, hi - SAMPLE_MS)));
+    const my = ++sampleSeq;
     setSampleProgress(0);
     setSampling(true);
     try {
@@ -408,6 +619,17 @@ function VideoEditor(props: { paths: string[] }) {
         vid?.pause();
         setSample({ ...r, key: keyOf(j), atMs: at, source: c.path });
         setView("split");
+        setWanted("split");
+        // Checked while it plays: a sample replaced in the meantime stops the check.
+        const path = r.path;
+        setQuality({ path, busy: true });
+        checkSample(fileUrl(c.path), fileUrl(path), at, r.durationMs, plan(c, s, trimOf(c)).fps || c.fps || 30, c.fps || 30, () => sample()?.path !== path)
+          .then((q) => {
+            if (sample()?.path !== path) return;
+            setQuality(q ? { path, busy: false, ...q } : null);
+            // Now that the shift is known, the two halves show the same moment.
+            if (q && svid && vid && view() === "split") vid.currentTime = at / 1000 + svid.currentTime + q.shift;
+          });
         // Both start together at the sample's first frame.
         queueMicrotask(() => {
           if (!svid) return;
@@ -417,10 +639,19 @@ function VideoEditor(props: { paths: string[] }) {
         });
       }
     } catch (e) {
-      toast(`Couldn't make a preview: ${e}`, "error");
+      if (my === sampleSeq) toast(`Couldn't make a preview: ${e}`, "error");
     } finally {
-      setSampling(false);
+      if (my === sampleSeq) setSampling(false);
     }
+  };
+  /** Letting go of the timeline outside the sample while comparing: the comparison follows, with
+   *  a new sample there (one only covers its own few seconds). */
+  const followWithSample = () => {
+    const sm = sample(), c = cur();
+    if (!sm || !c || sm.source !== c.path || wanted() === "orig") return;
+    const t = time();
+    if (t >= sm.atMs && t <= sm.atMs + sm.durationMs) return;
+    void makeSample();
   };
 
   // Frames along the timeline, once per video.
@@ -454,11 +685,17 @@ function VideoEditor(props: { paths: string[] }) {
       seek(what === "start" ? trim()[0] : what === "end" ? trim()[1] : ms);
     };
     move(e);
-    const up = () => { tl.removeEventListener("pointermove", move); tl.removeEventListener("pointerup", up); };
+    const up = () => {
+      tl.removeEventListener("pointermove", move);
+      tl.removeEventListener("pointerup", up);
+      if (what === "seek") followWithSample();
+    };
     tl.addEventListener("pointermove", move);
     tl.addEventListener("pointerup", up);
   };
 
+  let followTimer: number | undefined;
+  onCleanup(() => clearTimeout(followTimer));
   const onKey = (e: KeyboardEvent) => {
     const k = e.key.toLowerCase();
     if (k === " ") { e.preventDefault(); togglePlay(); }
@@ -468,7 +705,11 @@ function VideoEditor(props: { paths: string[] }) {
       e.preventDefault();
       const step = e.shiftKey ? 5000 : e.altKey ? 1000 / 30 : 1000;
       seek(time() + (e.key === "ArrowLeft" ? -step : step));
+      // Once the keys stop, a comparison follows like it does after a drag on the timeline.
+      clearTimeout(followTimer);
+      followTimer = window.setTimeout(followWithSample, 600);
     } else if (k === "m") { e.preventDefault(); setMuted(!muted()); }
+    else if (k === "f") { e.preventDefault(); toggleFull(); }
   };
 
   // ---- totals ----
@@ -506,24 +747,24 @@ function VideoEditor(props: { paths: string[] }) {
       }>
         {(c) => (
           <div class="mx-video">
-            <Pager paths={infos().map((i) => i.path)} idx={idx()} onIdx={(i) => { setSample(null); setView("orig"); setIdx(i); }} />
-            <div class="mx-screen" onClick={(e) => {
-              const t = e.target as HTMLElement;
-              if (t === e.currentTarget || t.tagName === "VIDEO") togglePlay();
-            }}>
-              {/* In the split view the sound comes from the original only. */}
-              <video ref={vid} src={fileUrl(c().path)} preload="auto" muted={muted() || showingSample()} playsinline
-                classList={{ hidden: showingSample() || unplayable() }}
-                onPlay={() => !inSample() && setPlaying(true)} onPause={() => !inSample() && setPlaying(false)}
-                onLoadedData={() => setUnplayable(false)} onError={() => setUnplayable(true)} />
-              <Show when={sample()}>
-                {(sm) => (
-                  <video ref={svid} src={fileUrl(sm().path)} loop playsinline muted={muted() || view() === "split"}
-                    classList={{ hidden: !inSample() }}
-                    style={{ "clip-path": view() === "split" ? `inset(0 0 0 ${vsplit() * 100}%)` : "none" }}
-                    onPlay={() => setPlaying(true)} onPause={() => setPlaying(false)} />
-                )}
-              </Show>
+            <Pager paths={infos().map((i) => i.path)} idx={idx()} onIdx={(i) => { setSample(null); setView("orig"); setWanted("orig"); setIdx(i); }} />
+            <div class="mx-screen" ref={attachScreen} classList={{ zoomed: zoom() != null, pixel: scale() >= 2 }}
+              onPointerDown={onScreenDown} onDblClick={onScreenDbl}>
+              <div class="mx-vframe" style={{ left: `${frameLeft()}px`, top: `${frameTop()}px`, width: `${dims().w}px`, height: `${dims().h}px` }}>
+                {/* In the split view the sound comes from the original only. */}
+                <video ref={vid} src={fileUrl(c().path)} preload="auto" muted={muted() || showingSample()} playsinline
+                  classList={{ hidden: showingSample() || unplayable() }}
+                  onPlay={() => !inSample() && setPlaying(true)} onPause={() => !inSample() && setPlaying(false)}
+                  onLoadedData={() => setUnplayable(false)} onError={() => setUnplayable(true)} />
+                <Show when={sample()}>
+                  {(sm) => (
+                    <video ref={svid} src={fileUrl(sm().path)} loop playsinline muted={muted() || view() === "split"}
+                      classList={{ hidden: !inSample() }}
+                      style={{ "clip-path": view() === "split" ? `inset(0 0 0 ${clamp(vsplit() * box().w - frameLeft(), 0, dims().w)}px)` : "none" }}
+                      onPlay={() => setPlaying(true)} onPause={() => setPlaying(false)} />
+                  )}
+                </Show>
+              </div>
               <Show when={sampleHere() && view() === "split"}>
                 <div class="mx-vsplit" style={{ left: `${vsplit() * 100}%` }} onPointerDown={onSplitDown} onClick={(e) => e.stopPropagation()}>
                   <span class="mx-knob"><ChevronLeft size={13} /><ChevronRight size={13} /></span>
@@ -546,6 +787,32 @@ function VideoEditor(props: { paths: string[] }) {
                       {sampleFresh() ? `${SAMPLE_MS / 1000}-second sample from ${fmtTime(sample()!.atMs, false)}` : "Settings changed since this sample"}
                     </span>
                   </Show>
+                  <Show when={sampleHere() && view() === "orig" && wanted() !== "orig"}>
+                    <span class="mx-ab-note">Outside the {SAMPLE_MS / 1000}-second sample: the original, until one is made here</span>
+                  </Show>
+                  <Show when={checking()}>
+                    <span class="mx-ab-note"><Loader2 class="spin" size={11} /> Checking quality…</span>
+                  </Show>
+                  <Show when={result()}>
+                    {(r) => (
+                      <button class="mx-quality" data-level={r().level} onClick={showWorst}
+                        title={`Compared frame by frame with the original (${SAMPLE_FRAMES} frames). Its weakest moment, at ${fmtTime(r().ms)}, scores ${r().score.toFixed(3)} (1 is identical): click to pause there side by side.`}>
+                        <Show when={r().level === "same" || r().level === "good"} fallback={<AlertTriangle size={12} />}><CircleCheck size={12} /></Show>
+                        {r().text}
+                      </button>
+                    )}
+                  </Show>
+                </div>
+              </Show>
+              <Show when={!unplayable() || inSample()}>
+                <div class="mx-zoom mx-vzoom">
+                  <button classList={{ on: zoom() == null }} onClick={() => zoomTo(null)} title="Fit the screen">Fit</button>
+                  <button classList={{ on: zoom() === 1 }} onClick={() => zoomTo(1)} title="Actual pixels, to look for blocks and smearing (double-click; scroll to zoom)">100%</button>
+                  <span>{Math.round(scale() * 100)}%</span>
+                  <span class="mx-zoom-sep" />
+                  <button onClick={toggleFull} title={full() ? "Leave full screen (F or Esc)" : "Full screen (F)"}>
+                    <Show when={full()} fallback={<Maximize2 size={13} />}><Minimize2 size={13} /></Show>
+                  </button>
                 </div>
               </Show>
               <Show when={sampling()}>
@@ -565,7 +832,7 @@ function VideoEditor(props: { paths: string[] }) {
               <span class="mx-time">{fmtTime(time())} <span class="muted">/ {fmtTime(c().durationMs)}</span></span>
               <span class="mx-grow" />
               <button class="btn mx-sample-btn" classList={{ fresh: sampleFresh() }} disabled={sampling()} onClick={makeSample}
-                title={`Encode ${SAMPLE_MS / 1000} seconds from the playhead with these settings, to compare and measure the size`}>
+                title={`Encode ${SAMPLE_MS / 1000} seconds from the playhead with these settings, to compare, check the quality and measure the size. Fast motion is the hardest to compress: put the playhead there.`}>
                 <Sparkles size={14} /> {sampleFresh() ? "Preview again" : "Preview quality"}
               </button>
             </div>
@@ -609,7 +876,7 @@ function VideoEditor(props: { paths: string[] }) {
       {(c) => (
         <>
           <Section title="Preset">
-            <Presets items={VPRESETS} current={preset()} onPick={(p) => setS({ ...p.s })} />
+            <Presets items={VPRESETS} current={preset()} onPick={(p) => setS({ ...p.s })} hintOf={presetHint} />
           </Section>
           <Section title="Size" aside={<Seg value={s.mode} onChange={(v) => setS("mode", v)} options={[{ value: "quality", label: "By quality" }, { value: "size", label: "By file size" }]} />}>
             <Show when={s.mode === "quality"} fallback={
@@ -637,7 +904,7 @@ function VideoEditor(props: { paths: string[] }) {
           </Section>
           <Section title="Resolution">
             <select class="mx-select" value={s.res && s.res < short() ? s.res : 0} onChange={(e) => setS("res", +e.currentTarget.value)}>
-              <option value={0}>Original · {curPlan()?.dw} × {curPlan()?.dh}</option>
+              <option value={0}>Keep {curPlan()?.dw} × {curPlan()?.dh}</option>
               <For each={RESOLUTIONS.filter((r) => r < short())}>
                 {(r) => {
                   const p = () => plan(c(), { ...s, res: r }, null);
@@ -648,7 +915,7 @@ function VideoEditor(props: { paths: string[] }) {
           </Section>
           <Section title="Frame rate">
             <Seg value={curPlan()?.fps ?? 0} onChange={(v) => setS("fps", v)}
-              options={[{ value: 0, label: `Original${c().fps ? ` (${Math.round(c().fps)})` : ""}` }, ...[30, 24].filter((f) => f < c().fps - 0.5).map((f) => ({ value: f, label: `${f} fps` }))]} />
+              options={[{ value: 0, label: c().fps ? `Keep ${Math.round(c().fps)} fps` : "Keep" }, ...[30, 24].filter((f) => f < c().fps - 0.5).map((f) => ({ value: f, label: `${f} fps` }))]} />
           </Section>
           <Section title="Format">
             <Seg value={s.hevc} onChange={(v) => setS("hevc", v)}

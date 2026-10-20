@@ -21,6 +21,7 @@ export { default as Check } from "lucide-solid/icons/check";
 export { default as ChevronDown } from "lucide-solid/icons/chevron-down";
 export { default as ChevronLeft } from "lucide-solid/icons/chevron-left";
 export { default as ChevronRight } from "lucide-solid/icons/chevron-right";
+export { default as CircleCheck } from "lucide-solid/icons/circle-check";
 export { default as CircleHelp } from "lucide-solid/icons/circle-question-mark";
 export { default as Clapperboard } from "lucide-solid/icons/clapperboard";
 export { default as ClipboardPaste } from "lucide-solid/icons/clipboard-paste";
