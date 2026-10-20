@@ -141,7 +141,17 @@ export const tests = [
       await t.c.send("Input.dispatchMouseEvent", { type: "mousePressed", x: at.x, y: at.y, button: "left", clickCount: 2 });
       await t.c.send("Input.dispatchMouseEvent", { type: "mouseReleased", x: at.x, y: at.y, button: "left", clickCount: 2 });
       await t.c.waitFor(`[...document.querySelectorAll(".mx-vzoom button")].find((b) => b.textContent === "Fit").classList.contains("on")`, { what: "double-click to fit again" });
-      // F: full screen; the first Esc only leaves it, the second closes the editor.
+      // F: full screen; the first Esc only leaves it, the second closes the editor. With a stand-in
+      // for the browser's full screen: the real one takes the window itself full screen too
+      // (Tauri does), which would bring the off-screen test window up over the desktop.
+      await t.c.eval(`(() => {
+        let el = null;
+        const changed = () => document.dispatchEvent(new Event("fullscreenchange"));
+        window.__e2eFullscreen = { request: Element.prototype.requestFullscreen, exit: document.exitFullscreen };
+        Object.defineProperty(document, "fullscreenElement", { configurable: true, get: () => el });
+        Element.prototype.requestFullscreen = function () { el = this; changed(); return Promise.resolve(); };
+        document.exitFullscreen = () => (el ? ((el = null), changed(), Promise.resolve()) : Promise.reject(new TypeError("not in full screen")));
+      })()`);
       await t.c.key("f");
       await t.c.waitFor(`document.fullscreenElement === document.querySelector(".mx-screen")`, { what: "full screen" });
       await t.c.key("Escape");
@@ -150,6 +160,12 @@ export const tests = [
       assert(await t.c.eval(`!!document.querySelector(".mx-sample-btn")`), "Esc closed the editor instead of leaving full screen");
       await t.c.key("Escape");
       await t.c.waitFor(`!document.querySelector(".mx-sample-btn")`, { what: "the second Esc to close the editor" });
+      await t.c.eval(`(() => {
+        const f = window.__e2eFullscreen;
+        delete document.fullscreenElement;
+        Element.prototype.requestFullscreen = f.request;
+        document.exitFullscreen = f.exit;
+      })()`);
     },
   },
   {

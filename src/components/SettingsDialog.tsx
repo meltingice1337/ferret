@@ -283,7 +283,7 @@ function Integration() {
         <Toggle checked={!!status()?.enabled} onChange={(v) => !busy() && change(v)} />
       </Field>
       <Show when={status()?.devBuild && !status()?.enabled}>
-        <p class="card-note">This is a development build, which only runs while the dev server does. Use a release build of Ferret to turn this on.</p>
+        <p class="card-note">This copy is a development or test build, run from the project folder. Turn this on from the installed Ferret.</p>
       </Show>
       <Show when={status()?.enabled && status()?.target}>
         <p class="card-note">Opens with {status()!.target}</p>

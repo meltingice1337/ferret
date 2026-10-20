@@ -178,6 +178,21 @@ pub struct DefaultStatus {
     dev_build: bool,
 }
 
+/// Not an installed Ferret: a development build, or a release build run from the project's cargo
+/// `target` folder (one being tried out or tested). Such a copy never takes over as the default
+/// file manager: it would point Win+E, folder double-clicks and the sign-in helper at a build
+/// folder, and the helper running from there keeps the next build from replacing the exe.
+pub fn test_build() -> bool {
+    cfg!(debug_assertions) || std::env::current_exe().is_ok_and(|p| in_cargo_target(&p))
+}
+
+/// `exe` is inside a `target` folder next to a Cargo.toml.
+fn in_cargo_target(exe: &std::path::Path) -> bool {
+    exe.ancestors().any(|a| {
+        a.file_name().is_some_and(|n| n.eq_ignore_ascii_case("target")) && a.parent().is_some_and(|p| p.join("Cargo.toml").is_file())
+    })
+}
+
 fn exe() -> Res<String> {
     std::env::current_exe().map(|p| p.to_string_lossy().into_owned()).map_err(|e| e.to_string())
 }
@@ -291,7 +306,7 @@ fn status() -> DefaultStatus {
     let target = reg::current_target();
     #[cfg(not(windows))]
     let target = None;
-    DefaultStatus { enabled: target.is_some(), target, dev_build: cfg!(debug_assertions) }
+    DefaultStatus { enabled: target.is_some(), target, dev_build: test_build() }
 }
 
 #[tauri::command]
@@ -307,8 +322,8 @@ pub fn set_default_manager(state: State<'_, AppState>, enable: bool) -> Res<Defa
         let conn = state.db.lock().map_err(|e| e.to_string())?;
         let backup = db::kv_get(&conn, BACKUP_KEY);
         if enable {
-            if cfg!(debug_assertions) {
-                return Err("This is a development build. Build Ferret for release (npm run tauri build) and turn this on from that copy".into());
+            if test_build() {
+                return Err("This copy of Ferret is a development or test build (it runs from the project folder). Turn this on from the installed Ferret".into());
             }
             let saved = reg::enable(&exe()?, if status().enabled { backup.as_ref() } else { None })?;
             db::kv_set(&conn, BACKUP_KEY, &saved).map_err(|e| e.to_string())?;
@@ -363,7 +378,7 @@ pub(crate) fn default_target() -> Option<String> {
 pub fn refresh_registration(state: &AppState) {
     #[cfg(windows)]
     {
-        if cfg!(debug_assertions) {
+        if test_build() {
             return;
         }
         let (Some(target), Ok(me)) = (reg::current_target(), exe()) else { return };
@@ -443,9 +458,14 @@ pub fn reveal(window: &tauri::WebviewWindow) -> bool {
     if e2e() {
         #[cfg(windows)]
         if let Ok(hwnd) = window.hwnd() {
-            use windows::Win32::UI::WindowsAndMessaging::{ShowWindow, SW_SHOWNOACTIVATE};
+            use windows::Win32::UI::WindowsAndMessaging::{GetWindowLongPtrW, SetWindowLongPtrW, ShowWindow, GWL_EXSTYLE, SW_SHOWNOACTIVATE, WS_EX_NOACTIVATE};
+            let h = windows::Win32::Foundation::HWND(hwnd.0 as *mut _);
             unsafe {
-                let _ = ShowWindow(windows::Win32::Foundation::HWND(hwnd.0 as *mut _), SW_SHOWNOACTIVATE);
+                // Never the active window either: started from the app in front, it may take the
+                // focus (the page focusing its list is enough), and the desktop's keys would go to it.
+                let ex = GetWindowLongPtrW(h, GWL_EXSTYLE);
+                SetWindowLongPtrW(h, GWL_EXSTYLE, ex | WS_EX_NOACTIVATE.0 as isize);
+                let _ = ShowWindow(h, SW_SHOWNOACTIVATE);
             }
         }
     } else {
@@ -594,6 +614,19 @@ mod tests {
 
     fn t(path: &str, select: Option<&str>) -> LaunchTarget {
         target(path, select.map(Into::into))
+    }
+
+    #[test]
+    fn builds_in_a_cargo_target_folder_are_not_installed() {
+        let project = std::env::temp_dir().join("ferret-target-test");
+        std::fs::create_dir_all(project.join("target").join("release")).unwrap();
+        std::fs::write(project.join("Cargo.toml"), "[package]").unwrap();
+        assert!(in_cargo_target(&project.join("target").join("release").join("ferret.exe")));
+        assert!(in_cargo_target(&project.join("target").join("e2e-opt").join("release").join("ferret.exe")));
+        // Installed (no Cargo.toml beside a "target" folder), or a folder merely called target.
+        assert!(!in_cargo_target(std::path::Path::new(r"C:\Users\someone\AppData\Local\Ferret\ferret.exe")));
+        assert!(!in_cargo_target(&std::env::temp_dir().join("target").join("ferret.exe")));
+        let _ = std::fs::remove_dir_all(&project);
     }
 
     #[test]
