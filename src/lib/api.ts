@@ -59,8 +59,9 @@ export const api = {
   findInTrash: (items: string[]) => invoke<string[]>("find_in_trash", { items }),
   itemInfo: (path: string) => invoke<ItemInfo>("item_info", { path }),
   folderStats: (items: string[]) => invoke<Stats>("folder_stats", { items }),
-  folderSizes: (requester: number, paths: string[], refresh = false) =>
-    invoke<FolderSize[]>("folder_sizes", { requester, paths, refresh }),
+  /** `dir`: the folder the tab shows (it and those above it are counted in the background). */
+  folderSizes: (requester: number, paths: string[], refresh = false, dir?: string) =>
+    invoke<FolderSize[]>("folder_sizes", { requester, paths, refresh, dir: dir ?? null }),
   folderSizesInvalidate: (paths: string[], deep = false) => invoke<void>("folder_sizes_invalidate", { paths, deep }),
   setAttributes: (path: string, readonly: boolean, hidden: boolean) =>
     invoke<void>("set_attributes", { path, readonly, hidden }),

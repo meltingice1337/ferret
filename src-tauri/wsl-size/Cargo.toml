@@ -1,0 +1,19 @@
+[package]
+name = "ferret-wsl-size"
+version = "0.1.0"
+description = "Counts folder sizes inside WSL for Ferret"
+edition = "2024"
+publish = false
+
+[dependencies]
+libc = "0.2"
+
+# Its own workspace: build.rs builds it for Linux (see .cargo/config.toml), apart from the app.
+[workspace]
+
+[profile.release]
+lto = true
+codegen-units = 1
+# A worker that panicked would leave its folders waiting forever: end the count instead.
+panic = "abort"
+strip = true

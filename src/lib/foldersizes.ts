@@ -12,12 +12,13 @@ export const [folderSizes, setFolderSizes] = createStore<Record<string, FolderSi
 /** A new count only replaces a finished one once it's finished too, so a refresh shows the
  *  old size (marked as refreshing) rather than counting up from zero again. An older count
  *  never replaces a newer one: the finished recount can arrive before the reply that said
- *  it was starting. */
+ *  it was starting. A finished count does replace one shown as refreshing, though: a count
+ *  that used earlier sizes of folders inside carries their (older) time. */
 function take(s: Record<string, FolderSize>, size: FolderSize) {
   if (uncounted(size.path)) return;
   const k = pathKey(size.path);
   const old = s[k];
-  if (!old?.done || (size.done && size.countedAt >= old.countedAt)) s[k] = size;
+  if (!old?.done || (size.done && ((old.refreshing && !size.refreshing) || size.countedAt >= old.countedAt))) s[k] = size;
 }
 
 // Counting a folder of 3,000 folders sends thousands of these: applied in bundles (a few times
@@ -37,6 +38,12 @@ function flush() {
   setFolderSizes(produce((s) => batch.forEach((x) => take(s, x))));
   if (batch.some((x) => x.done)) resort();
 }
+
+/** What the counting is doing (for the status bar): folders on screen waiting or being counted,
+ *  others counted in the background, and a few of the ones being counted right now. */
+type SizeActivity = { left: number; background: number; counting: string[] };
+export const [sizeActivity, setSizeActivity] = createSignal<SizeActivity>({ left: 0, background: 0, counting: [] });
+listen<SizeActivity>("folder-sizes-activity", (ev) => setSizeActivity(ev.payload));
 
 /** Bumped when finished sizes arrived: a list sorted by size puts its folders in order again.
  *  At most once a second, so rows don't keep jumping (and re-sorting thousands of items for
@@ -70,9 +77,10 @@ export function uncounted(path: string): string | undefined {
   if (drive) return `Windows drive ${drive[1].toUpperCase()}: (open it from Drives to see folder sizes)`;
 }
 
-/** Ask for the sizes of a tab's folders (in display order); replaces that tab's earlier ask. */
-export async function requestFolderSizes(tabId: number, paths: string[]) {
-  const known = await api.folderSizes(tabId, paths).catch(() => [] as FolderSize[]);
+/** Ask for the sizes of a tab's folders (in display order); replaces that tab's earlier ask.
+ *  `dir` is the folder the tab shows. */
+export async function requestFolderSizes(tabId: number, paths: string[], dir?: string) {
+  const known = await api.folderSizes(tabId, paths, false, dir).catch(() => [] as FolderSize[]);
   if (known.length) {
     setFolderSizes(produce((s) => known.forEach((k) => take(s, k))));
     resort();

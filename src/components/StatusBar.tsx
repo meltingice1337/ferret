@@ -1,12 +1,12 @@
 import { ArrowDownUp, Columns2, Eye, EyeOff, Layers, LayoutGrid, List, LoaderCircle, PanelRight } from "../lib/icons";
 import { createMemo, Show } from "solid-js";
 import { formatSize, plural } from "../lib/format";
-import { isRecycle, pathKey } from "../lib/path";
+import { basename, isRecycle, pathKey } from "../lib/path";
 import {
-  stripTab, toggleSplit, activeTab, openMenu, persistSession, previewSpace, saveViewForFolder, setUi, settings, ui, updateView,
+  stripTab, toggleSplit, activeTab, jobsRunning, openMenu, persistSession, previewSpace, saveViewForFolder, setUi, settings, ui, updateView,
 } from "../lib/state";
 import type { Entry, GroupBy, SortBy } from "../lib/types";
-import { folderSizes } from "../lib/foldersizes";
+import { folderSizes, sizeActivity } from "../lib/foldersizes";
 import { entryFilter } from "../lib/filter";
 import { GROUP_LABELS, SORT_LABELS } from "./FileView";
 
@@ -29,6 +29,16 @@ export default function StatusBar() {
       anyDir: selected.some((e) => known(e) === null), anyFile: selected.some((e) => known(e) !== null),
     };
   });
+
+  const sizesTitle = () => {
+    const a = sizeActivity();
+    const names = a.counting.map((p) => basename(p) || p);
+    const more = a.left + a.background > names.length ? " and more" : "";
+    const what = a.left
+      ? "Sizes are counted in the background, at low priority, and saved for next time."
+      : "Sizes of other folders are counted ahead, nearest first, so they show at once when you open them. At low priority, and paused whenever a folder you're looking at needs counting.";
+    return `${names.length ? `Counting ${names.join(", ")}${more}. ` : ""}${what}`;
+  };
 
   const sortMenu = (e: MouseEvent) => {
     const r = (e.currentTarget as HTMLElement).getBoundingClientRect();
@@ -59,6 +69,17 @@ export default function StatusBar() {
         <Show when={stats().hidden && !v().showHidden}><span class="muted">· {stats().hidden} hidden</span></Show>
         <Show when={stats().selected}>
           <span class="sel-count">· {stats().selected} selected{stats().anyFile ? ` (${formatSize(stats().bytes)}${stats().anyDir ? "+" : ""})` : ""}</span>
+        </Show>
+        {/* Folder sizes are counted in the background: say so while they are, and what. */}
+        <Show when={sizeActivity().left + sizeActivity().background > 0}>
+          <span class="sb-sizes" classList={{ quiet: !sizeActivity().left }} title={sizesTitle()}>
+            · <LoaderCircle size={12} classList={{ spin: !jobsRunning() }} />
+            {jobsRunning()
+              ? "Folder sizes wait for the file operation"
+              : sizeActivity().left
+                ? `Counting folder sizes · ${sizeActivity().left.toLocaleString()} left`
+                : "Counting other folders ahead"}
+          </span>
         </Show>
       </div>
       <div class="status-right">

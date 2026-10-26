@@ -11,7 +11,7 @@
 //   yarn test:e2e --no-build      reuse the last test build
 //   yarn test:e2e --keep          keep the fixture and the window open afterwards
 //   yarn test:e2e --only rename   run tests whose name contains "rename"
-import { spawn, execSync } from "node:child_process";
+import { spawn, execSync, execFileSync } from "node:child_process";
 import { existsSync, mkdirSync, rmSync, writeFileSync, copyFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
@@ -62,6 +62,15 @@ for (const [rel, content] of Object.entries(fixture(root, needle))) {
   writeFileSync(f, content);
 }
 const webviewData = join(process.env.LOCALAPPDATA, IDENT, "EBWebView");
+// Folder sizes are counted ahead in the background: in the test copy only inside the fixture and
+// one WSL folder of the test's own (in each running distro), never anyone's own folders.
+const wslDir = `/tmp/ferret-e2e-${stamp}`;
+let distros = [];
+try {
+  distros = execFileSync("wsl.exe", ["--list", "--running", "--quiet"]).toString("utf16le")
+    .split(/\r?\n/).map((l) => l.replace(/\0/g, "").replace(/^﻿/, "").trim()).filter(Boolean);
+} catch {}
+const sizesWithin = [root, ...distros.map((d) => `\\\\wsl.localhost\\${d}${wslDir.replace(/\//g, "\\")}`)].join(";");
 rmSync(artifacts, { recursive: true, force: true });
 mkdirSync(artifacts, { recursive: true });
 
@@ -72,6 +81,7 @@ const app = spawn(exe, [root], {
     ...process.env,
     FERRET_E2E: "1",
     FERRET_DEVTOOLS: "1",
+    FERRET_SIZES_WITHIN: sizesWithin,
     WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS: `--remote-debugging-port=${PORT}`,
     WEBVIEW2_USER_DATA_FOLDER: webviewData,
   },
@@ -85,7 +95,7 @@ try {
   // Every test starts from a running app showing the fixture (so --only works too).
   await c.waitFor(`window.__ferretTest?.state.ready() && window.__ferretTest.state.activeTab()?.p === ${JSON.stringify(root)}`, { timeoutMs: 30_000, what: "Ferret to start on the fixture folder" });
   const t = {
-    c, root, needle,
+    c, root, needle, wslDir,
     p: (...parts) => join(root, ...parts),
     notes: [],
     note(s) { this.notes.push(s); },

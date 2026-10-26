@@ -22,6 +22,7 @@ pub mod ipc;
 pub mod mft;
 pub mod query;
 pub mod service;
+pub mod signed;
 pub mod walk;
 pub mod wsl;
 
@@ -337,6 +338,27 @@ fn launch_installer() -> Result<(), String> {
     use windows::Win32::UI::Shell::ShellExecuteW;
     use windows::Win32::UI::WindowsAndMessaging::SW_HIDE;
     let exe = indexer_exe().ok_or_else(|| "ferret-indexer.exe was not found next to Ferret".to_string())?;
+    // A running service updates itself, with no UAC prompt: it installs Ferret's copy only if
+    // that's a newer release, signed with Ferret's release key (`service::update_from`), so a
+    // copy swapped into Ferret's folder (which this account can change) can't become the
+    // service. Services from before that (indexer 1) don't know how ("bad request"): those are
+    // reinstalled below, as is a first install, and a development build's (it isn't signed).
+    if !cfg!(debug_assertions) && service::service_state().1 {
+        let ask = ipc::Request::Update { exe: exe.to_string_lossy().into_owned() };
+        let answer = ipc::PipeClient::connect_to_service(Duration::from_secs(2)).and_then(|mut c| c.request(&ask, Duration::from_secs(30)));
+        match answer {
+            Ok(ipc::Response::Updating) => {
+                log::info!("the search service is updating itself to {}", exe.display());
+                app().pipe.lock().next_try = None;
+                return Ok(());
+            }
+            Ok(ipc::Response::Error { message }) if !message.starts_with("bad request") => {
+                log::warn!("the search service didn't update: {message}");
+                return Err(format!("The drive index service wasn't updated: {message}"));
+            }
+            other => log::info!("the search service can't update itself ({other:?}): installing it again"),
+        }
+    }
     log::info!("launching the search service installer: {}", exe.display());
     let file: Vec<u16> = exe.to_string_lossy().encode_utf16().chain(Some(0)).collect();
     let r = unsafe { ShellExecuteW(None, w!("runas"), PCWSTR(file.as_ptr()), w!("--install"), PCWSTR::null(), SW_HIDE) };

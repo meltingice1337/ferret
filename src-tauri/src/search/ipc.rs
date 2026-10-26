@@ -15,8 +15,9 @@ use serde::{Deserialize, Serialize};
 pub const PIPE_NAME: &str = r"\\.\pipe\ferret-index";
 /// Bump when the service binary must be replaced: a change to the indexer, the snapshot
 /// format or this protocol. The app offers to update an installed service that reports a
-/// lower number (one UAC prompt); app releases that leave it alone need no prompt.
-pub const INDEXER_VERSION: u32 = 1;
+/// lower number; app releases that leave it alone need no update. From 2, the service updates
+/// itself (`Request::Update`, no UAC prompt); older ones are reinstalled (one UAC prompt).
+pub const INDEXER_VERSION: u32 = 2;
 const MAX_MSG: usize = 64 << 20;
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -25,6 +26,9 @@ pub enum Request {
     Query(SearchRequest),
     Status,
     Ping,
+    /// Replace the service with this `ferret-indexer.exe` (Ferret's own copy), if it's a newer
+    /// release, signed with Ferret's release key (see `service::update_from`).
+    Update { exe: String },
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, Default)]
@@ -45,6 +49,8 @@ pub enum Response {
     Results(SearchResults),
     Status(ServiceStatus),
     Pong,
+    /// The update was checked and starts now: the service restarts in a few seconds.
+    Updating,
     Error { message: String },
 }
 
@@ -233,6 +239,10 @@ mod win {
                     errors: errors.lock().clone(),
                 }),
                 Ok(Request::Ping) => Response::Pong,
+                Ok(Request::Update { exe }) => match crate::search::service::update_from(&exe) {
+                    Ok(()) => Response::Updating,
+                    Err(message) => Response::Error { message },
+                },
                 Err(e) => Response::Error { message: format!("bad request: {e}") },
             };
             if f.write_all(&encode(&resp)).is_err() {
@@ -503,6 +513,10 @@ mod tests {
         assert!(matches!(back, Request::Query(q) if q.limit == 5));
         let st: Request = serde_json::from_str(r#"{"type":"status"}"#).unwrap();
         assert!(matches!(st, Request::Status));
+        // An update: a service from before it answers "bad request" (the app then reinstalls it).
+        let up = serde_json::to_string(&Request::Update { exe: r"C:\Ferret\ferret-indexer.exe".into() }).unwrap();
+        assert_eq!(up, r#"{"type":"update","exe":"C:\\Ferret\\ferret-indexer.exe"}"#);
+        assert_eq!(serde_json::to_string(&Response::Updating).unwrap(), r#"{"type":"updating"}"#);
         let resp = Response::Error { message: "x".into() };
         let s = serde_json::to_string(&resp).unwrap();
         assert_eq!(s, r#"{"type":"error","message":"x"}"#);

@@ -455,3 +455,5 @@ kbd { font-family: var(--mono); font-size: 11px; padding: 2px 6px; border-radius
 @media (prefers-reduced-motion: reduce) {
   :is(.menu, .toast, .modal, .modal-backdrop, .palette, .palette-backdrop, .ql, .ql-backdrop, .scrim, .sidebar.overlay) { animation: none !important; }
 }
+.sb-sizes { display: inline-flex; align-items: center; gap: 5px; color: var(--fg-3); min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.sb-sizes.quiet { opacity: 0.7; }

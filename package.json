@@ -12,7 +12,8 @@
     "app:dev": "tauri dev --config src-tauri/tauri.dev.conf.json",
     "test": "vitest run",
     "test:watch": "vitest",
-    "test:e2e": "node scripts/e2e/run.mjs"
+    "test:e2e": "node scripts/e2e/run.mjs",
+    "sign:indexer": "node scripts/sign-indexer.mjs"
   },
   "license": "MIT",
   "dependencies": {

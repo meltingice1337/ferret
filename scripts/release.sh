@@ -89,6 +89,9 @@ if [[ -z "$version" ]]; then
 fi
 tag="v$version"
 [[ -z "$(git tag --list "$tag")" ]] || fail "tag $tag already exists"
+# The WSL folder-size helper is built for Linux with the app (src-tauri/build.rs).
+rustup target list --installed | grep -qx x86_64-unknown-linux-musl ||
+  fail "Rust's Linux target is missing: rustup target add x86_64-unknown-linux-musl"
 
 if [[ -n "$prev" ]]; then
   compare="https://github.com/$repo/compare/$prev...$tag"

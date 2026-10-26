@@ -15,6 +15,10 @@ crate-type = ["rlib"]
 
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
+# build.rs: the WSL helper's fingerprint
+sha2 = "0.10"
+# build.rs: the release key, from tauri.conf.json
+serde_json = "1"
 
 [dependencies]
 tauri = { version = "2", features = [] }
@@ -51,6 +55,10 @@ parking_lot = "0.12"
 # content: searches (search/content.rs); both were already in the build through other crates
 regex = "1"
 walkdir = "2"
+# the service installs only a release-signed indexer over itself (search/signed.rs); both come
+# with the updater already
+minisign-verify = "0.2"
+base64 = "0.22"
 # --- end search ---
 # --- self-update (GitHub Releases) ---
 tauri-plugin-updater = "2"

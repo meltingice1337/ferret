@@ -7,6 +7,7 @@
     "beforeDevCommand": "yarn dev",
     "devUrl": "http://localhost:1420",
     "beforeBuildCommand": "yarn build",
+    "beforeBundleCommand": "yarn sign:indexer",
     "frontendDist": "../dist"
   },
   "app": {
@@ -62,6 +63,7 @@
     "copyright": "© 2026 meltingice1337",
     "targets": ["nsis"],
     "createUpdaterArtifacts": true,
+    "resources": { "target/signed/ferret-indexer.exe.sig": "ferret-indexer.exe.sig" },
     "icon": [
       "icons/32x32.png",
       "icons/128x128.png",

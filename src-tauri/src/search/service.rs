@@ -52,7 +52,7 @@ pub fn main_entry() -> i32 {
 }
 
 #[cfg(windows)]
-pub use win::main_entry;
+pub use win::{main_entry, update_from};
 
 #[cfg(windows)]
 mod win {
@@ -81,6 +81,7 @@ mod win {
         let args: Vec<String> = std::env::args().skip(1).collect();
         match args.first().map(|s| s.as_str()) {
             Some("--install") => install(),
+            Some("--finish-update") => finish_update(),
             Some("--uninstall") => uninstall(),
             Some("--console") => console(),
             Some("--service") => run_service_dispatcher(),
@@ -363,7 +364,112 @@ mod win {
         matches!(e, windows_service::Error::Winapi(io) if io.raw_os_error() == Some(5))
     }
 
+    /// The copy the service runs, in a folder only SYSTEM and administrators can change.
+    fn installed_exe() -> PathBuf {
+        state_dir().join("bin").join("ferret-indexer.exe")
+    }
+
+    /// A copy waiting to replace the installed one (`update_from`), in the same folder.
+    fn next_exe() -> PathBuf {
+        state_dir().join("bin").join("ferret-indexer.next.exe")
+    }
+
+    /// The release signature that comes with an exe (`ferret-indexer.exe.sig`; see `signed`).
+    fn signature_of(exe: &Path) -> PathBuf {
+        let mut name = exe.file_name().unwrap_or_default().to_os_string();
+        name.push(".sig");
+        exe.with_file_name(name)
+    }
+
+    fn same_file(a: &Path, b: &Path) -> bool {
+        matches!((std::fs::canonicalize(a), std::fs::canonicalize(b)), (Ok(x), Ok(y)) if x == y)
+    }
+
+    /// Reads at most `most` bytes of a file (what a client names is read by SYSTEM).
+    fn read_at_most(path: &Path, most: u64) -> Result<Vec<u8>, String> {
+        use std::io::Read;
+        let mut bytes = Vec::new();
+        std::fs::File::open(path).and_then(|f| f.take(most + 1).read_to_end(&mut bytes)).map_err(|e| format!("{} can't be read ({e})", path.display()))?;
+        if bytes.len() as u64 > most {
+            return Err(format!("{} is too big", path.display()));
+        }
+        Ok(bytes)
+    }
+
+    /// `Request::Update`, in the service: installs a newer release of the indexer in place of
+    /// this one. `exe` is Ferret's copy, in Ferret's own folder, which the user's account can
+    /// change: it's installed only if it's signed with Ferret's release key and no older than
+    /// this one (`signed::may_replace`). The check is made here, by the installed copy, and the
+    /// bytes checked are the ones installed: they go to `next_exe`, which finishes the update
+    /// (`--finish-update`). Anyone may ask: all they can get is a newer release.
+    pub fn update_from(exe: &str) -> Result<(), String> {
+        static BUSY: AtomicBool = AtomicBool::new(false);
+        let installed = installed_exe();
+        if !std::env::current_exe().is_ok_and(|me| same_file(&me, &installed)) {
+            return Err("only the installed service updates itself".into());
+        }
+        let new = Path::new(exe);
+        let bytes = read_at_most(new, 64 << 20)?;
+        let sig = read_at_most(&signature_of(new), 4096).ok().and_then(|s| String::from_utf8(s).ok()).unwrap_or_default();
+        let old = (std::fs::read(&installed).ok(), std::fs::read_to_string(signature_of(&installed)).ok());
+        let old = old.0.as_deref().zip(old.1.as_deref());
+        crate::search::signed::may_replace((&bytes, &sig), old, crate::search::signed::RELEASE_KEY)
+            .map_err(|why| format!("{} wasn't installed: {why}", new.display()))?;
+        if BUSY.swap(true, Relaxed) {
+            return Err("an update is under way already".into());
+        }
+        let next = next_exe();
+        let written = std::fs::write(&next, &bytes).and_then(|_| std::fs::write(signature_of(&next), &sig));
+        let started = written.and_then(|_| {
+            use std::os::windows::process::CommandExt;
+            const DETACHED_PROCESS: u32 = 0x8;
+            const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+            std::process::Command::new(&next).arg("--finish-update").creation_flags(DETACHED_PROCESS | CREATE_NO_WINDOW).spawn()
+        });
+        if let Err(e) = started {
+            BUSY.store(false, Relaxed);
+            return Err(format!("the update couldn't start ({e})"));
+        }
+        Ok(())
+    }
+
+    /// `--finish-update`: run from `next_exe` (see `update_from`), stops the service and puts this
+    /// copy in its place.
+    fn finish_update() -> i32 {
+        let next = next_exe();
+        if !std::env::current_exe().is_ok_and(|me| same_file(&me, &next)) {
+            eprintln!("error: --finish-update is for the service's own update ({})", next.display());
+            return 2;
+        }
+        let (Ok(bytes), Ok(sig)) = (std::fs::read(&next), std::fs::read_to_string(signature_of(&next))) else {
+            eprintln!("error: {} can't be read", next.display());
+            return 1;
+        };
+        put_in_place(&bytes, Some(&sig))
+    }
+
+    /// `--install`: this copy, as it is (a first install has nothing to check it against).
     fn install() -> i32 {
+        let src = match std::env::current_exe() {
+            Ok(p) => p,
+            Err(e) => {
+                eprintln!("error: {e}");
+                return 1;
+            }
+        };
+        let bytes = match std::fs::read(&src) {
+            Ok(b) => b,
+            Err(e) => {
+                eprintln!("error: reading {}: {e}", src.display());
+                return 1;
+            }
+        };
+        let sig = std::fs::read_to_string(signature_of(&src)).ok().filter(|s| !s.trim().is_empty());
+        put_in_place(&bytes, sig.as_deref())
+    }
+
+    /// Registers (again) and starts the service, running these bytes from `installed_exe`.
+    fn put_in_place(bytes: &[u8], sig: Option<&str>) -> i32 {
         let manager = match ServiceManager::local_computer(None::<&str>, ServiceManagerAccess::CONNECT | ServiceManagerAccess::CREATE_SERVICE) {
             Ok(m) => m,
             Err(e) if is_access_denied(&e) => {
@@ -390,17 +496,30 @@ mod win {
             eprintln!("error: {e}");
             return 1;
         }
-        let src = match std::env::current_exe() {
-            Ok(p) => p,
-            Err(e) => {
-                eprintln!("error: {e}");
-                return 1;
+        let exe = installed_exe();
+        // With its signature, for the next update to compare with (none: a development build).
+        let sig_file = signature_of(&exe);
+        // The old service's process may hold its exe for a moment after it stopped.
+        let write_exe = || {
+            let mut tries = 0;
+            loop {
+                match std::fs::write(&exe, bytes) {
+                    Err(e) if tries < 20 && matches!(e.raw_os_error(), Some(5 | 32)) => {
+                        tries += 1;
+                        std::thread::sleep(Duration::from_millis(250));
+                    }
+                    r => return r,
+                }
             }
         };
-        let bin_dir = dir.join("bin");
-        let exe = bin_dir.join("ferret-indexer.exe");
-        if let Err(e) = std::fs::create_dir_all(&bin_dir).and_then(|_| std::fs::copy(&src, &exe)) {
-            eprintln!("error: copying {} to {}: {e}", src.display(), exe.display());
+        let written = std::fs::create_dir_all(exe.parent().unwrap_or(&dir))
+            .and_then(|_| write_exe())
+            .and_then(|_| match sig {
+                Some(s) => std::fs::write(&sig_file, s),
+                None => std::fs::remove_file(&sig_file).or_else(|e| if e.kind() == std::io::ErrorKind::NotFound { Ok(()) } else { Err(e) }),
+            });
+        if let Err(e) = written {
+            eprintln!("error: writing {}: {e}", exe.display());
             return 1;
         }
         let info = ServiceInfo {
@@ -573,5 +692,16 @@ mod win {
             }
         }
         0
+    }
+}
+
+#[cfg(all(test, windows))]
+mod tests {
+    /// Only the installed service (in its admin-only folder) checks and installs an update: this
+    /// test runs from elsewhere, so nothing is read or installed.
+    #[test]
+    fn only_the_installed_service_updates_itself() {
+        let refused = super::update_from(r"C:\nowhere\ferret-indexer.exe").unwrap_err();
+        assert!(refused.contains("only the installed service"), "{refused}");
     }
 }

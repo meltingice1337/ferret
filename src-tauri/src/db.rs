@@ -66,6 +66,43 @@ pub fn folder_sizes(conn: &Connection, keys: &[String]) -> rusqlite::Result<Vec<
     Ok(out)
 }
 
+/// The outermost folders inside `key` with a saved size counted since `since` (Unix
+/// milliseconds) and not out of date: looked up a level at a time, going further down only
+/// below folders whose own size is out of date or older.
+pub fn recent_folder_sizes_inside(conn: &Connection, key: &str, since: i64) -> rusqlite::Result<Vec<(String, SavedSize)>> {
+    // Keys inside `base` sort between "base\" and "base]" ("]" follows "\" in ASCII); those
+    // right inside have no "\" after that.
+    let mut st = conn.prepare_cached(
+        "SELECT path_key, path, bytes, files, partial, counted_at, stale FROM folder_sizes
+         WHERE path_key > ?1 AND path_key < ?2 AND instr(substr(path_key, ?3), '\\') = 0",
+    )?;
+    let mut out = Vec::new();
+    let mut open = vec![key.trim_end_matches('\\').to_string()];
+    while let Some(base) = open.pop() {
+        let from = format!("{base}\\");
+        let rest = from.chars().count() as i64 + 1;
+        let rows = st.query_map(params![from, format!("{base}]"), rest], |r| {
+            Ok((r.get::<_, String>(0)?, SavedSize {
+                path: r.get(1)?,
+                bytes: r.get::<_, i64>(2)? as u64,
+                files: r.get::<_, Option<i64>>(3)?.map(|f| f as u64),
+                partial: r.get::<_, i64>(4)? != 0,
+                counted_at: r.get(5)?,
+                stale: r.get::<_, i64>(6)? != 0,
+            }))
+        })?;
+        for row in rows {
+            let (k, s) = row?;
+            if !s.stale && s.counted_at >= since {
+                out.push((k, s));
+            } else {
+                open.push(k);
+            }
+        }
+    }
+    Ok(out)
+}
+
 pub fn put_folder_size(conn: &Connection, key: &str, s: &SavedSize) -> rusqlite::Result<()> {
     conn.execute(
         "INSERT INTO folder_sizes (path_key, path, bytes, files, partial, counted_at, stale)
@@ -427,6 +464,22 @@ mod tests {
         assert_eq!(marked, [r"c:\", r"c:\a", r"c:\a\b", r"c:\a\b\c"]);
         put(r"c:\a", 21);
         assert!(!stale(&[r"c:\a"])[0].2);
+
+        // The outermost recent ones inside a folder that aren't out of date (c:\ab isn't inside c:\a).
+        let inside = |key: &str, since: i64| -> Vec<String> {
+            let mut v: Vec<String> = recent_folder_sizes_inside(&conn, key, since).unwrap().into_iter().map(|(k, _)| k).collect();
+            v.sort();
+            v
+        };
+        assert!(inside(r"c:\a", 0).is_empty());
+        put(r"c:\a\b", 3);
+        assert_eq!(inside(r"c:\a", 0), [r"c:\a\b"]);
+        assert_eq!(inside(r"c:\", 0), [r"c:\a", r"c:\ab"]);
+        assert!(inside(r"c:\a", now() + 60_000).is_empty());
+        // Too old: the ones inside it are looked at instead.
+        let old = SavedSize { path: r"c:\a".into(), bytes: 1, files: Some(1), partial: false, counted_at: 1, stale: false };
+        put_folder_size(&conn, r"c:\a", &old).unwrap();
+        assert_eq!(inside(r"c:\", now() - 60_000), [r"c:\a\b", r"c:\ab"]);
         drop(conn);
         for ext in ["", "-wal", "-shm"] {
             let _ = std::fs::remove_file(format!("{}{ext}", file.display()));

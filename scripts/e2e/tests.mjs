@@ -3,8 +3,8 @@
 // would, and check results on disk where it matters. `soft` tests warn instead of failing
 // (they depend on the machine, like the drive index).
 import { existsSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
-import { execSync } from "node:child_process";
+import { dirname, join } from "node:path";
+import { execFileSync, execSync } from "node:child_process";
 import { crc32, deflateSync } from "node:zlib";
 import { sleep } from "./cdp.mjs";
 
@@ -490,6 +490,110 @@ export const tests = [
     },
   },
   {
+    name: "counting a folder's size also gives the sizes of the folders in it",
+    async run(t) {
+      // Counted now (again, if the list already did), then the two levels in it are known.
+      const top = t.p("sizes");
+      await t.c.eval(`${T}.api.folderSizes(424244, ${JSON.stringify([top])}, true)`);
+      let got = [];
+      for (const started = Date.now(); Date.now() - started < 15000 && !got.length; await sleep(200)) {
+        got = (await t.c.eval(`${T}.api.folderSizes(424244, ${JSON.stringify([top])})`)).filter((s) => s.done && !s.refreshing);
+      }
+      assert(got[0]?.bytes === 1320 && got[0]?.files === 3, `sizes: ${JSON.stringify(got[0])}`);
+      // Known from that count, without counting them: asked once, answered at once.
+      const inside = [t.p("sizes", "one"), t.p("sizes", "one", "two")];
+      const known = await t.c.eval(`${T}.api.folderSizes(424244, ${JSON.stringify(inside)})`);
+      await t.c.eval(`${T}.api.folderSizes(424244, [])`);
+      const of = (p) => known.find((s) => s.path.toLowerCase() === p.toLowerCase() && s.done && !s.refreshing);
+      assert(of(inside[0])?.bytes === 1320 && of(inside[0])?.files === 3, `one: ${JSON.stringify(of(inside[0]))}`);
+      assert(of(inside[1])?.bytes === 320 && of(inside[1])?.files === 2, `two: ${JSON.stringify(of(inside[1]))}`);
+    },
+  },
+  {
+    name: "the folders around the one on screen are counted ahead, without opening them",
+    async run(t) {
+      // Made while another folder is shown, so nothing has counted them yet.
+      await go(t, t.p("sizes"));
+      const near = (...p) => t.p("nearby", ...p);
+      const files = { "a/b/c/f1": 100, "a/b/f2": 20, "a/sib/f3": 3000, "a/f4": 4, "other/deep/f5": 50000, "top": 600000 };
+      for (const [rel, n] of Object.entries(files)) {
+        mkdirSync(dirname(near(...rel.split("/"))), { recursive: true });
+        writeFileSync(near(...rel.split("/")), Buffer.alloc(n));
+      }
+      // Showing a\b counts c (on screen), then b, a and nearby in the background: each uses the
+      // size just found inside it, and walks the rest. (The fixture is as far up as a test goes.)
+      await go(t, near("a", "b"));
+      await t.c.waitFor(`${T}.sizes.folderSize(${JSON.stringify(near("a", "b", "c"))})?.done`, { timeoutMs: 10000, what: "c counted" });
+      await t.c.waitFor(`(() => { const a = ${T}.sizes.sizeActivity(); return a.left + a.background === 0; })()`, { timeoutMs: 15000, what: "the background counting to finish" });
+      const want = { [near("a", "sib")]: [3000, 1], [near("other")]: [50000, 1], [near("other", "deep")]: [50000, 1], [near("a", "b")]: [120, 2], [near("a")]: [3124, 4], [near()]: [653124, 6] };
+      const asked = Object.keys(want);
+      const got = await t.c.eval(`${T}.api.folderSizes(424250, ${JSON.stringify(asked)})`);
+      await t.c.eval(`${T}.api.folderSizes(424250, [])`);
+      for (const p of asked) {
+        const s = got.find((g) => g.path.toLowerCase() === p.toLowerCase());
+        assert(s?.done && !s.refreshing && s.bytes === want[p][0] && s.files === want[p][1], `${p.slice(t.root.length)}: ${JSON.stringify(s)} (expected ${want[p].join(" bytes, ")} files)`);
+      }
+      // Known already: the ask counted nothing.
+      const log = readFileSync(join(process.env.LOCALAPPDATA, "com.ferret.e2e", "logs", "ferret.log"), "utf8");
+      assert(log.includes(`tab 424250 asked for ${asked.length} (${asked.length} known, 0 to count)`), "the ask had to count some of them");
+    },
+  },
+  {
+    name: "WSL folder sizes come from Linux, all folders at once, with file counts",
+    soft: true,
+    async run(t) {
+      // Only in a distro that's already running: a test never starts one.
+      const running = execFileSync("wsl.exe", ["--list", "--running", "--quiet"]).toString("utf16le")
+        .split(/\r?\n/).map((l) => l.replace(/\0/g, "").replace(/^﻿/, "").trim()).filter(Boolean);
+      if (!running.length) return t.note("no WSL distro running: skipped");
+      const distro = running[0];
+      // The one WSL folder the test copy may count in the background (see run.mjs).
+      const dir = t.wslDir;
+      // 30 folders: folder d has files of 100, 200, … d×100 bytes, and a 7-byte one a level down.
+      execFileSync("wsl.exe", ["-d", distro, "--exec", "sh", "-c",
+        `set -e; mkdir -p "$1/empty"; cd "$1"; for d in $(seq 1 30); do mkdir -p "dir$d/sub"; for f in $(seq 1 $d); do head -c $((f * 100)) /dev/zero > "dir$d/f$f"; done; head -c 7 /dev/zero > "dir$d/sub/deep"; done`,
+        "sh", dir]);
+      try {
+        const win = `\\\\wsl.localhost\\${distro}${dir.replace(/\//g, "\\")}`;
+        await go(t, win);
+        await t.c.waitFor(`${tab}.entries[0]().filter((e) => e.isDir).length === 31`, { timeoutMs: 15000, what: "the WSL folder listed" });
+        const paths = await t.c.eval(`${tab}.entries[0]().filter((e) => e.isDir).map((e) => e.path)`);
+        // Asked for alongside the tab (its own asks stay as they are).
+        const started = Date.now();
+        let sizes = [];
+        while (Date.now() - started < 30000) {
+          sizes = (await t.c.eval(`${T}.api.folderSizes(424242, ${JSON.stringify(paths)})`)).filter((s) => s.done && !s.refreshing);
+          if (sizes.length === paths.length) break;
+          await sleep(200);
+        }
+        await t.c.eval(`${T}.api.folderSizes(424242, [])`);
+        assert(sizes.length === paths.length, `${sizes.length} of ${paths.length} sizes after 30 s`);
+        for (const s of sizes) {
+          const name = s.path.split("\\").pop();
+          const d = name === "empty" ? 0 : Number(name.slice(3));
+          const want = name === "empty" ? { bytes: 0, files: 0 } : { bytes: (100 * d * (d + 1)) / 2 + 7, files: d + 1 };
+          assert(s.bytes === want.bytes && s.files === want.files, `${name}: ${s.bytes} bytes, ${s.files} files (expected ${want.bytes}, ${want.files})`);
+        }
+        const took = Date.now() - started;
+        // The folders in them are known at once too (counted on the way): no second count on opening one.
+        const subs = paths.filter((p) => /dir\d+$/.test(p)).map((p) => p + "\\sub");
+        const known = (await t.c.eval(`${T}.api.folderSizes(424243, ${JSON.stringify(subs)})`)).filter((s) => s.done && !s.refreshing);
+        await t.c.eval(`${T}.api.folderSizes(424243, [])`);
+        assert(known.length === subs.length && known.every((s) => s.bytes === 7 && s.files === 1), `${known.length} of ${subs.length} folders inside known at once`);
+        // One wsl.exe for all of them, not one each.
+        const log = readFileSync(join(process.env.LOCALAPPDATA, "com.ferret.e2e", "logs", "ferret.log"), "utf8");
+        const batches = [...log.matchAll(/folder sizes in WSL \([^)]*\): (\d+) folders/g)].map((m) => +m[1]);
+        assert(batches.some((n) => n >= 31), `counted in batches of ${batches.join(", ") || "none"}`);
+        // By Ferret's Linux helper, unless the build has none: when it has one, it starts.
+        assert(!log.includes("the counting helper didn't start"), "the helper didn't start in WSL");
+        const find = /folder sizes in WSL \([^)]*\): \d+ folders in \S+ with find/.test(log);
+        t.note(`${paths.length} folders in ${took} ms, ${find ? "with find (built without the helper)" : "with the helper"}`);
+      } finally {
+        execFileSync("wsl.exe", ["-d", distro, "--exec", "rm", "-rf", "--", dir]);
+      }
+    },
+  },
+  {
     name: "finds a new file with Ctrl+K",
     soft: true,
     async run(t) {
@@ -587,6 +691,10 @@ export function fixture(root, needle) {
     "build-out/tool.d": "tool.d",
     ...Object.fromEntries(Array.from({ length: 40 }, (_, i) => [`build-out/deps/lib${i}.rlib`, "x"])),
     "build-out/.fingerprint/tool-1/output": "x",
+    // Folder sizes: counting one/ also gives two/ and two/three/ (two levels down).
+    "sizes/one/x.bin": Buffer.alloc(1000),
+    "sizes/one/two/y.bin": Buffer.alloc(300),
+    "sizes/one/two/three/z.bin": Buffer.alloc(20),
     "sub/inner.txt": "inside",
     "rename-me.txt": "rename me",
     "split-me.txt": "copied across in split view",

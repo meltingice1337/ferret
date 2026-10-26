@@ -155,8 +155,10 @@ export default function FileView(props: { tab: Tab }) {
   // While a file job runs, counting waits (the backend pauses it) and the list doesn't ask: it
   // would reload and re-ask after every deleted item. It asks once when the job is done.
   const sizesPaused = () => jobsRunning() > 0;
-  createEffect(on([sizeTargets, sizesEpoch, sizesPaused], ([s, , paused]) => {
-    if (!paused) requestFolderSizes(t.id, s ? s.split("\n") : []);
+  // The folder itself too: it and the folders above it are counted in the background.
+  const sizesDir = () => (showFolderSizes() ? t.p : "");
+  createEffect(on([sizeTargets, sizesDir, sizesEpoch, sizesPaused], ([s, dir, , paused]) => {
+    if (!paused) requestFolderSizes(t.id, s ? s.split("\n") : [], dir || undefined);
   }));
   onCleanup(() => requestFolderSizes(t.id, []));
 

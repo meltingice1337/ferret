@@ -98,6 +98,7 @@ It reads the NTFS file table (MFT) and follows the change journal (USN), so the 
 - Runs as its own small process, `ferret-indexer.exe`, and talks to Ferret over a named pipe
 - Only returns results from folders the requesting user is allowed to list
 - Saves index snapshots to `%PROGRAMDATA%\Ferret`, readable only by SYSTEM and Administrators
+- Runs from its own copy in `%PROGRAMDATA%\Ferret\bin`, and updates itself without a UAC prompt: it installs only a newer `ferret-indexer.exe` signed with Ferret's release key (so a copy swapped into Ferret's own folder can't become the service)
 
 ```text
 ferret-indexer --install | --uninstall | --status | --query <text> | --console | --probe
@@ -107,7 +108,7 @@ ferret-indexer --install | --uninstall | --status | --query <text> | --console |
 
 ## Development
 
-**Requirements:** Windows 10/11, [Rust](https://rustup.rs), Node.js 22.12 or newer (an LTS version, like 24 or 26) with Yarn 4, and WebView2 (included with Windows 11). Yarn comes through Corepack: `npm install -g corepack` then `corepack enable`, and the project picks its own Yarn version (`packageManager` in `package.json`).
+**Requirements:** Windows 10/11, [Rust](https://rustup.rs) with its Linux target (`rustup target add x86_64-unknown-linux-musl`, for the WSL folder-size helper), Node.js 22.12 or newer (an LTS version, like 24 or 26) with Yarn 4, and WebView2 (included with Windows 11). Yarn comes through Corepack: `npm install -g corepack` then `corepack enable`, and the project picks its own Yarn version (`packageManager` in `package.json`).
 
 ```powershell
 yarn                  # install
@@ -126,4 +127,5 @@ yarn test             # unit tests (yarn test:e2e for the end-to-end run)
 | `src-tauri/src/bin/ferret-indexer.rs` | Entry point of the indexer service |
 | `src-tauri/src/redirect.rs` | Background helper that opens Explorer's folder windows in Ferret |
 | `src-tauri/src/media.rs` | Video (Media Foundation transcoder) and picture (WIC) compression |
+| `src-tauri/wsl-size` | Linux program that counts folder sizes inside WSL (static, built into the app) |
 | `src-tauri/vendor/drag` | Patched copy of the `drag` crate (dragging files out of Ferret) |

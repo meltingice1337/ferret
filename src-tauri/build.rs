@@ -1,6 +1,63 @@
 fn main() {
     indexer_icon();
+    wsl_helper();
+    release_key();
     tauri_build::build()
+}
+
+/// The release key (the updater's, tauri.conf.json) for search/signed.rs, and a place for the
+/// indexer's signature: scripts/sign-indexer.mjs writes it before bundling, and the installer
+/// carries it (bundle.resources). Until then, and in builds that aren't signed, it's empty.
+fn release_key() {
+    let dir = std::path::PathBuf::from(std::env::var("CARGO_MANIFEST_DIR").unwrap());
+    let conf = dir.join("tauri.conf.json");
+    println!("cargo:rerun-if-changed={}", conf.display());
+    let conf: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&conf).unwrap()).unwrap();
+    let key = conf["plugins"]["updater"]["pubkey"].as_str().expect("tauri.conf.json: plugins.updater.pubkey");
+    println!("cargo:rustc-env=FERRET_RELEASE_KEY={key}");
+    let sig = dir.join("target").join("signed").join("ferret-indexer.exe.sig");
+    if !sig.exists() {
+        std::fs::create_dir_all(sig.parent().unwrap()).unwrap();
+        std::fs::write(&sig, "").unwrap();
+    }
+}
+
+/// The Linux program that counts folder sizes in WSL (wsl-size/), built for Linux and embedded
+/// in the app (foldersize.rs writes it out and runs it). Without Rust's musl target a debug
+/// build goes without it (WSL counts with find then); a release needs it.
+fn wsl_helper() {
+    use std::path::PathBuf;
+    use std::process::Command;
+    let dir = PathBuf::from(std::env::var("CARGO_MANIFEST_DIR").unwrap());
+    let src = dir.join("wsl-size");
+    for p in ["src", "Cargo.toml", "Cargo.lock", ".cargo/config.toml"] {
+        println!("cargo:rerun-if-changed={}", src.join(p).display());
+    }
+    let out = PathBuf::from(std::env::var("OUT_DIR").unwrap()).join("ferret-wsl-size");
+    let target_dir = dir.join("target").join("wsl-size");
+    let mut cargo = Command::new(std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into()));
+    // Its own settings (target, linker, flags: wsl-size/.cargo/config.toml), not the app's.
+    // (Its output to stderr: what a build script prints on stdout is read as instructions.)
+    cargo.current_dir(&src).args(["build", "--release", "--locked", "--target-dir"]).arg(&target_dir);
+    cargo.stdout(std::io::stderr());
+    for v in ["CARGO_TARGET_DIR", "CARGO_BUILD_TARGET", "CARGO_ENCODED_RUSTFLAGS", "RUSTFLAGS", "RUSTC_WORKSPACE_WRAPPER"] {
+        cargo.env_remove(v);
+    }
+    let built = target_dir.join("x86_64-unknown-linux-musl").join("release").join("ferret-wsl-size");
+    let ok = cargo.status().is_ok_and(|s| s.success()) && std::fs::copy(&built, &out).is_ok();
+    if !ok {
+        let fix = "the WSL folder-size helper didn't build (`rustup target add x86_64-unknown-linux-musl`)";
+        if std::env::var("PROFILE").as_deref() == Ok("release") {
+            panic!("{fix}");
+        }
+        println!("cargo:warning={fix}: WSL folders are counted with find instead");
+        std::fs::write(&out, []).unwrap();
+    }
+    // Its fingerprint: Linux checks a copy against it before running it.
+    use sha2::Digest;
+    let hash = sha2::Sha256::digest(std::fs::read(&out).unwrap());
+    let hex: String = hash.iter().map(|b| format!("{b:02x}")).collect();
+    println!("cargo:rustc-env=FERRET_WSL_HELPER_SHA256={hex}");
 }
 
 /// ferret-indexer.exe gets its own icon. Explorer and Task Manager show a program's

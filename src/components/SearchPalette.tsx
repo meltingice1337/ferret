@@ -572,9 +572,11 @@ export default function SearchPalette(props: { mode: "files" | "commands"; comma
   };
 
   const installService = async () => {
+    // An installed service updates itself (no prompt; one from an older Ferret asks once).
+    const update = !!status()?.serviceInstalled;
     try {
       await invoke("search_install_service");
-      toast("Installing the Ferret indexer: approve the Windows prompt");
+      toast(update ? "Updating the drive index service…" : "Installing the Ferret indexer: approve the Windows prompt");
       setTimeout(() => invoke<SearchStatus>("search_status").then(setStatus).catch(() => {}), 4000);
     } catch (e) {
       toast(`Couldn't install the indexer: ${e}`, "error");
@@ -761,7 +763,7 @@ export default function SearchPalette(props: { mode: "files" | "commands"; comma
                 </Show>
                 <Show when={status()?.serviceRunning}>
                   <Show when={status()!.serviceOutdated} fallback={<><ShieldCheck size={12} /> Drive index</>}>
-                    <button class="palette-install" onClick={installService} title="This version of Ferret ships a newer drive index service. Needs one admin approval.">
+                    <button class="palette-install" onClick={installService} title="This version of Ferret ships a newer drive index service. It updates itself; one installed by an older Ferret needs one admin approval, once.">
                       <ShieldCheck size={12} /> Update drive index
                     </button>
                   </Show>
