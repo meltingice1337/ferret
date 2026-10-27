@@ -1253,7 +1253,7 @@ dependencies = [
 
 [[package]]
 name = "ferret"
-version = "0.8.1"
+version = "0.8.2"
 dependencies = [
  "base64 0.22.1",
  "bzip2",
