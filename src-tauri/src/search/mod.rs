@@ -326,21 +326,101 @@ pub async fn search_status() -> Result<SearchStatus, String> {
     tauri::async_runtime::spawn_blocking(status).await.map_err(|e| e.to_string())
 }
 
-/// Is the installed service older than this app expects? Unlike `search_status`, this
-/// never starts the in-process walk, so it is cheap to call at startup.
+/// What the installed service needs, from what it says about itself.
+#[derive(Debug, PartialEq, Eq)]
+enum ServiceNeeds {
+    Nothing,
+    /// To update itself to the release this Ferret ships (`Request::Update`: no prompt).
+    Update,
+    /// The installer (one UAC prompt, which the user is asked for): it can't update itself.
+    Installer,
+}
+
+/// The service should be the release this Ferret ships, or a newer one. One that can update
+/// itself (indexer 2 on) is updated when it's older; one that can't needs the installer when its
+/// indexer is older than this app's.
+fn service_needs(st: &ipc::ServiceStatus, app_version: &str) -> ServiceNeeds {
+    if st.indexer < 2 {
+        return if st.indexer < ipc::INDEXER_VERSION { ServiceNeeds::Installer } else { ServiceNeeds::Nothing };
+    }
+    // 1.2.3 as numbers (anything after them, like "-dev", aside).
+    let parts = |v: &str| -> Vec<u64> { v.split(['.', '-', '+']).take(3).map(|p| p.parse().unwrap_or(0)).collect() };
+    if parts(app_version) > parts(&st.version) || st.indexer < ipc::INDEXER_VERSION {
+        ServiceNeeds::Update
+    } else {
+        ServiceNeeds::Nothing
+    }
+}
+
+/// Is the installed service out of date in a way that needs the user (the installer's UAC
+/// prompt)? Called once at startup: a service that can update itself to this release is asked to,
+/// quietly, here. Unlike `search_status`, this never starts the in-process walk.
 #[tauri::command]
 pub async fn search_service_outdated() -> Result<bool, String> {
     tauri::async_runtime::spawn_blocking(|| {
         #[cfg(windows)]
         if service::service_state().1 {
             if let Some(ipc::Response::Status(st)) = service_request(app(), &ipc::Request::Status, Duration::from_secs(2)) {
-                return st.indexer < ipc::INDEXER_VERSION;
+                return match service_needs(&st, env!("CARGO_PKG_VERSION")) {
+                    ServiceNeeds::Nothing => false,
+                    ServiceNeeds::Installer => true,
+                    // (A development build's indexer isn't signed: the service would refuse it.)
+                    ServiceNeeds::Update if cfg!(debug_assertions) => false,
+                    ServiceNeeds::Update => {
+                        log::info!(
+                            "search service {} (indexer {}) is older than this app ({}): updating it",
+                            st.version,
+                            st.indexer,
+                            env!("CARGO_PKG_VERSION")
+                        );
+                        match update_service_itself() {
+                            SelfUpdate::Started => false,
+                            // It doesn't know how after all: the installer, then.
+                            SelfUpdate::CantUpdate => true,
+                            SelfUpdate::Refused(e) | SelfUpdate::NoAnswer(e) => {
+                                log::warn!("the search service didn't update: {e}");
+                                false
+                            }
+                        }
+                    }
+                };
             }
         }
         false
     })
     .await
     .map_err(|e| e.to_string())
+}
+
+#[cfg(windows)]
+enum SelfUpdate {
+    Started,
+    /// From before services could (indexer 1: "bad request"): it needs the installer.
+    CantUpdate,
+    /// It said no (not signed, older than itself…).
+    Refused(String),
+    NoAnswer(String),
+}
+
+/// Asks the running service to update itself to Ferret's own `ferret-indexer.exe`, which it
+/// installs only if that's a newer release signed with Ferret's release key
+/// (`service::update_from`), so a copy swapped into Ferret's folder (which this account can
+/// change) can't become the service. No UAC prompt.
+#[cfg(windows)]
+fn update_service_itself() -> SelfUpdate {
+    let Some(exe) = indexer_exe() else { return SelfUpdate::Refused("ferret-indexer.exe was not found next to Ferret".into()) };
+    let ask = ipc::Request::Update { exe: exe.to_string_lossy().into_owned() };
+    let answer = ipc::PipeClient::connect_to_service(Duration::from_secs(2)).and_then(|mut c| c.request(&ask, Duration::from_secs(30)));
+    match answer {
+        Ok(ipc::Response::Updating) => {
+            log::info!("the search service is updating itself to {}", exe.display());
+            app().pipe.lock().next_try = None;
+            SelfUpdate::Started
+        }
+        Ok(ipc::Response::Error { message }) if message.starts_with("bad request") => SelfUpdate::CantUpdate,
+        Ok(ipc::Response::Error { message }) => SelfUpdate::Refused(message),
+        other => SelfUpdate::NoAnswer(format!("{other:?}")),
+    }
 }
 
 /// Launches `ferret-indexer.exe --install` elevated (UAC prompt); returns once
@@ -368,25 +448,19 @@ fn launch_installer() -> Result<(), String> {
     use windows::Win32::UI::Shell::ShellExecuteW;
     use windows::Win32::UI::WindowsAndMessaging::SW_HIDE;
     let exe = indexer_exe().ok_or_else(|| "ferret-indexer.exe was not found next to Ferret".to_string())?;
-    // A running service updates itself, with no UAC prompt: it installs Ferret's copy only if
-    // that's a newer release, signed with Ferret's release key (`service::update_from`), so a
-    // copy swapped into Ferret's folder (which this account can change) can't become the
-    // service. Services from before that (indexer 1) don't know how ("bad request"): those are
-    // reinstalled below, as is a first install, and a development build's (it isn't signed).
+    // A running service updates itself (`update_service_itself`: no UAC prompt). Services from
+    // before that (indexer 1) are reinstalled below, as is a first install, and a development
+    // build's (it isn't signed).
     if !cfg!(debug_assertions) && service::service_state().1 {
-        let ask = ipc::Request::Update { exe: exe.to_string_lossy().into_owned() };
-        let answer = ipc::PipeClient::connect_to_service(Duration::from_secs(2)).and_then(|mut c| c.request(&ask, Duration::from_secs(30)));
-        match answer {
-            Ok(ipc::Response::Updating) => {
-                log::info!("the search service is updating itself to {}", exe.display());
-                app().pipe.lock().next_try = None;
-                return Ok(());
+        match update_service_itself() {
+            SelfUpdate::Started => return Ok(()),
+            SelfUpdate::CantUpdate => log::info!("the search service can't update itself: installing it again"),
+            SelfUpdate::NoAnswer(e) => log::info!("the search service didn't answer ({e}): installing it again"),
+            // Never the installer instead: that would install the copy it refused.
+            SelfUpdate::Refused(e) => {
+                log::warn!("the search service didn't update: {e}");
+                return Err(format!("The drive index service wasn't updated: {e}"));
             }
-            Ok(ipc::Response::Error { message }) if !message.starts_with("bad request") => {
-                log::warn!("the search service didn't update: {message}");
-                return Err(format!("The drive index service wasn't updated: {message}"));
-            }
-            other => log::info!("the search service can't update itself ({other:?}): installing it again"),
         }
     }
     log::info!("launching the search service installer: {}", exe.display());
@@ -408,4 +482,27 @@ fn launch_installer() -> Result<(), String> {
 #[cfg(not(windows))]
 fn launch_installer() -> Result<(), String> {
     Err("the indexer service is only available on Windows".into())
+}
+
+#[cfg(test)]
+mod service_tests {
+    use super::*;
+
+    fn st(version: &str, indexer: u32) -> ipc::ServiceStatus {
+        ipc::ServiceStatus { version: version.into(), indexer, ..Default::default() }
+    }
+
+    #[test]
+    fn the_service_follows_this_release() {
+        let me = "0.8.2";
+        assert_eq!(service_needs(&st("0.8.2", 3), me), ServiceNeeds::Nothing);
+        assert_eq!(service_needs(&st("0.8.0", 3), me), ServiceNeeds::Update, "a development build of an earlier version");
+        assert_eq!(service_needs(&st("0.8.0", 2), me), ServiceNeeds::Update, "0.8.0's service");
+        assert_eq!(service_needs(&st("0.8.2", 2), me), ServiceNeeds::Update, "the same version with an older indexer");
+        assert_eq!(service_needs(&st("0.7.2", 1), me), ServiceNeeds::Installer, "from before services updated themselves");
+        assert_eq!(service_needs(&st("0.5.0", 0), me), ServiceNeeds::Installer);
+        assert_eq!(service_needs(&st("0.9.0", 3), me), ServiceNeeds::Nothing, "newer than this app");
+        assert_eq!(service_needs(&st("0.8.10", 3), "0.8.9"), ServiceNeeds::Nothing, "numbers, not text");
+        assert_eq!(service_needs(&st("0.8.9", 3), "0.8.10"), ServiceNeeds::Update);
+    }
 }
