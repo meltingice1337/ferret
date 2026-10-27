@@ -206,7 +206,10 @@ pub fn folder_sizes(app: AppHandle, requester: u32, paths: Vec<String>, refresh:
     let s = sizes();
     let wanted: Vec<(String, String)> =
         paths.iter().filter(|p| countable(p)).map(|p| (paths::key(p), paths::normalize(p))).collect();
-    load_saved(&app, wanted.iter().map(|(k, _)| k.clone()));
+    // From the drive index service where it has them (current to the second): the rest from what
+    // was counted here before, or counted now.
+    let indexed = from_drive_index(&wanted);
+    load_saved(&app, wanted.iter().filter(|(k, _)| !indexed.contains_key(k)).map(|(k, _)| k.clone()));
 
     let mut st = s.state.lock();
     if !st.started {
@@ -241,6 +244,11 @@ pub fn folder_sizes(app: AppHandle, requester: u32, paths: Vec<String>, refresh:
     let mut out = Vec::new();
     let (mut missing, mut outdated) = (Vec::new(), Vec::new());
     for (key, path) in wanted {
+        if let Some(size) = indexed.get(&key) {
+            st.cache.insert(key, Cached { size: size.clone(), stale: false });
+            out.push(size.clone());
+            continue;
+        }
         match st.cache.get(&key) {
             Some(c) if !refresh && !c.stale && now - c.size.counted_at < STALE_AFTER => out.push(c.size.clone()),
             Some(c) => {
@@ -250,7 +258,7 @@ pub fn folder_sizes(app: AppHandle, requester: u32, paths: Vec<String>, refresh:
             None => missing.push((key, path)),
         }
     }
-    let (known, to_count) = (out.len() - outdated.len(), missing.len() + outdated.len());
+    let (known, to_count) = (out.len() - outdated.len() - indexed.len(), missing.len() + outdated.len());
     // Folders with no size at all come before refreshing known ones.
     for (key, path) in missing.into_iter().chain(outdated) {
         if let Some(r) = st.running.get_mut(&key) {
@@ -273,8 +281,10 @@ pub fn folder_sizes(app: AppHandle, requester: u32, paths: Vec<String>, refresh:
     drop(st);
     s.wake.notify_all();
     log::info!(
-        "folder sizes: tab {requester} asked for {} ({known} known, {to_count} to count{}); queue {shown} (+{background} in the background), counting {running}",
-        paths.len(), if refresh { ", refresh" } else { "" }
+        "folder sizes: tab {requester} asked for {} ({}{known} known, {to_count} to count{}); queue {shown} (+{background} in the background), counting {running}",
+        paths.len(),
+        if indexed.is_empty() { String::new() } else { format!("{} from the drive index, ", indexed.len()) },
+        if refresh { ", refresh" } else { "" }
     );
     if let Some(dir) = dir {
         plan(&app, Rank::Near, upward(&dir));
@@ -400,6 +410,27 @@ fn local(path: &str) -> bool {
             .any(|d| key.starts_with(d.as_str()))
 }
 
+/// Sizes from the drive index service for these folders (key, path): those on a drive it reads
+/// (fixed NTFS drives, from their file table: search/sizes.rs) and that this user may open, all
+/// at once, as current as the drive's change journal. The rest are counted here.
+fn from_drive_index(folders: &[(String, String)]) -> HashMap<String, FolderSize> {
+    let on_drives: Vec<&(String, String)> = folders.iter().filter(|(k, p)| !paths::is_wsl(k) && local(p)).collect();
+    if on_drives.is_empty() {
+        return HashMap::new();
+    }
+    let asked: Vec<String> = on_drives.iter().map(|(_, p)| p.clone()).collect();
+    let Some(sizes) = crate::search::service_folder_sizes(&asked) else { return HashMap::new() };
+    let now = db::now();
+    on_drives
+        .into_iter()
+        .zip(sizes)
+        .filter_map(|((key, path), s)| {
+            let s = s?;
+            Some((key.clone(), FolderSize { path: path.clone(), bytes: s.bytes, files: Some(s.files), partial: s.partial, done: true, refreshing: false, counted_at: now }))
+        })
+        .collect()
+}
+
 /// Background counting goes anywhere, except in the end-to-end tests: only inside the folders in
 /// FERRET_SIZES_WITHIN (separated by `;`), so a test never walks anyone's own folders.
 fn background_allowed(path: &str) -> bool {
@@ -484,6 +515,11 @@ fn worker(app: AppHandle) {
                 st.idle -= 1;
             }
         };
+        // On a drive the indexer service reads: its size, at once.
+        if let Some(size) = from_drive_index(&[(job.key.clone(), job.path.clone())]).remove(&job.key) {
+            finish(&app, &job, Some(size), None);
+            continue;
+        }
         let started = Instant::now();
         let reuse = reusable(&app, &job);
         let mut found = Vec::new();
@@ -730,6 +766,19 @@ fn count(
             progress(FolderSize { bytes, files: Some(files), done: false, ..blank(path.to_string()) });
         }
     }
+}
+
+/// A folder counted the way Ferret counts one, start to end (to compare with: the indexer's
+/// `--sizes-bench`).
+pub(crate) fn count_folder(path: &str) -> Option<FolderSize> {
+    count(path, db::now(), || false, |_| None, |_| {}, |_| {})
+}
+
+/// The same, with every folder inside it too (each as its count finished).
+pub(crate) fn count_folder_all(path: &str) -> (Option<FolderSize>, Vec<FolderSize>) {
+    let mut inside = Vec::new();
+    let top = count(path, db::now(), || false, |_| None, |_| {}, |s| inside.push(s));
+    (top, inside)
 }
 
 /// Most WSL folders one `wsl.exe` counts with find, and the room their paths may take on its

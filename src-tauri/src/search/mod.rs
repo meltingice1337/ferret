@@ -23,6 +23,7 @@ pub mod mft;
 pub mod query;
 pub mod service;
 pub mod signed;
+pub mod sizes;
 pub mod walk;
 pub mod wsl;
 
@@ -100,6 +101,35 @@ fn retire_walk(a: &'static AppSearch) {
         p.save();
         p.stop();
     });
+}
+
+/// Folder sizes from the drive index service (its file table: sizes.rs), in the order asked,
+/// when it's running and knows how (indexer 3 on). Whether it does is asked once a minute, so
+/// without it this costs nothing.
+pub fn service_folder_sizes(paths: &[String]) -> Option<Vec<Option<ipc::FolderTotal>>> {
+    #[cfg(windows)]
+    {
+        static CAN: Mutex<Option<(Instant, bool)>> = Mutex::new(None);
+        let a = app();
+        let known = (*CAN.lock()).filter(|(t, _)| t.elapsed() < Duration::from_secs(60)).map(|(_, ok)| ok);
+        let can = known.unwrap_or_else(|| {
+            let ok = matches!(service_request(a, &ipc::Request::Status, Duration::from_secs(1)), Some(ipc::Response::Status(st)) if st.indexer >= 3);
+            *CAN.lock() = Some((Instant::now(), ok));
+            ok
+        });
+        if !can {
+            return None;
+        }
+        match service_request(a, &ipc::Request::Sizes { paths: paths.to_vec() }, Duration::from_secs(5)) {
+            Some(ipc::Response::Sizes { sizes }) if sizes.len() == paths.len() => Some(sizes),
+            _ => None,
+        }
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = paths;
+        None
+    }
 }
 
 #[cfg(windows)]

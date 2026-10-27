@@ -533,9 +533,11 @@ export const tests = [
         const s = got.find((g) => g.path.toLowerCase() === p.toLowerCase());
         assert(s?.done && !s.refreshing && s.bytes === want[p][0] && s.files === want[p][1], `${p.slice(t.root.length)}: ${JSON.stringify(s)} (expected ${want[p].join(" bytes, ")} files)`);
       }
-      // Known already: the ask counted nothing.
+      // Known already (or from the drive index service, where it runs): the ask counted nothing.
       const log = readFileSync(join(process.env.LOCALAPPDATA, "com.ferret.e2e", "logs", "ferret.log"), "utf8");
-      assert(log.includes(`tab 424250 asked for ${asked.length} (${asked.length} known, 0 to count)`), "the ask had to count some of them");
+      const n = asked.length;
+      const none = new RegExp(`tab 424250 asked for ${n} \\((${n} known|${n} from the drive index, 0 known), 0 to count\\)`);
+      assert(none.test(log), "the ask had to count some of them");
     },
   },
   {

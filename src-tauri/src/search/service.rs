@@ -9,6 +9,8 @@
 //! ferret-indexer --query TEXT   query the running service, print results + timing
 //! ferret-indexer --status       service + index status
 //! ferret-indexer --probe        what MFT/USN access works for this user
+//! ferret-indexer --sizes DIR... folder sizes from the service (as this user), next to a walk
+//! ferret-indexer --sizes-bench  times and checks folder sizes from the file table      [admin]
 //! ```
 
 pub const SERVICE_NAME: &str = "FerretIndexer";
@@ -24,6 +26,9 @@ USAGE:
   ferret-indexer --query <text>  Send a query to the running service and print results + timing
   ferret-indexer --status        Show service and index status
   ferret-indexer --probe         Report which MFT/USN operations work for the current user
+  ferret-indexer --sizes <dir>.. Folder sizes from the service (as this user), next to a walk of them
+  ferret-indexer --sizes-diff <dir>  Every folder inside, service against walk: where they differ
+  ferret-indexer --sizes-bench OUT [--cold] [DIR | each:DIR | change:DIR | diff:DIR | names:FILE]...  Times and checks folder sizes from the file table [admin]
   ferret-indexer --help          This help
 
 Pipe: \\\\.\\pipe\\ferret-index    State: %PROGRAMDATA%\\Ferret
@@ -88,6 +93,9 @@ mod win {
             Some("--query") => query_cli(&args[1..].join(" ")),
             Some("--status") => status_cli(),
             Some("--probe") => probe_cli(),
+            Some("--sizes-bench") => sizes_bench(&args[1..]),
+            Some("--sizes") => sizes_cli(&args[1..]),
+            Some("--sizes-diff") => sizes_diff_cli(args.get(1).map_or("C:\\", |s| s.as_str())),
             None | Some("--help") | Some("-h") | Some("/?") => {
                 print!("{HELP}");
                 0
@@ -692,6 +700,426 @@ mod win {
             }
         }
         0
+    }
+
+    /// `--sizes FOLDER...`: asks the running service for these folders' sizes, as Ferret does (as
+    /// this user), and walks them too, to compare.
+    fn sizes_cli(folders: &[String]) -> i32 {
+        let mut c = match PipeClient::connect_to_service(Duration::from_secs(2)) {
+            Ok(c) => c,
+            Err(e) => {
+                eprintln!("error: cannot connect to {} ({e}). Is the {SERVICE_NAME} service running?", ipc::PIPE_NAME);
+                return 3;
+            }
+        };
+        let t = Instant::now();
+        let sizes = match c.request(&Request::Sizes { paths: folders.to_vec() }, Duration::from_secs(30)) {
+            Ok(Response::Sizes { sizes }) => sizes,
+            Ok(other) => {
+                eprintln!("error: {other:?}");
+                return 1;
+            }
+            Err(e) => {
+                eprintln!("error: {e}");
+                return 1;
+            }
+        };
+        println!("{} folders in {:.2?}", folders.len(), t.elapsed());
+        let gb = |b: u64| format!("{:.3} GB", b as f64 / 1e9);
+        for (f, s) in folders.iter().zip(sizes) {
+            let t = Instant::now();
+            let w = crate::foldersize::count_folder(f);
+            let took = t.elapsed();
+            let service = s.map_or("—".to_string(), |s| format!("{} in {} files{}", gb(s.bytes), s.files, if s.partial { ", partial" } else { "" }));
+            let walk = w.as_ref().map_or("—".to_string(), |w| format!("{} in {} files{}", gb(w.bytes), w.files.unwrap_or(0), if w.partial { ", partial" } else { "" }));
+            let same = match (s, &w) {
+                (Some(s), Some(w)) => s.bytes == w.bytes && Some(s.files) == w.files && s.partial == w.partial,
+                (None, None) => true,
+                _ => false,
+            };
+            println!("{f}\n  service: {service}\n  walk ({took:.2?}): {walk}  {}", if same { "same" } else { "DIFFERENT" });
+        }
+        0
+    }
+
+    /// `--sizes-diff FOLDER`: every folder in FOLDER walked once, and asked of the service all at
+    /// once (as this user): where do they start to differ?
+    fn sizes_diff_cli(folder: &str) -> i32 {
+        let t = Instant::now();
+        let (top, mut all) = crate::foldersize::count_folder_all(folder);
+        all.extend(top);
+        let walked = t.elapsed();
+        let paths: Vec<String> = all.iter().map(|s| s.path.clone()).collect();
+        let mut c = match PipeClient::connect_to_service(Duration::from_secs(2)) {
+            Ok(c) => c,
+            Err(e) => {
+                eprintln!("error: cannot connect ({e})");
+                return 3;
+            }
+        };
+        let t = Instant::now();
+        let Ok(Response::Sizes { sizes }) = c.request(&Request::Sizes { paths: paths.clone() }, Duration::from_secs(120)) else {
+            eprintln!("error: no sizes from the service");
+            return 1;
+        };
+        let asked = t.elapsed();
+        type Differ<'a> = (&'a str, (u64, u64, bool), Option<ipc::FolderTotal>);
+        let differ: Vec<Differ> = all
+            .iter()
+            .zip(&sizes)
+            .filter_map(|(w, s)| {
+                let walk = (w.bytes, w.files.unwrap_or(0), w.partial);
+                let same = s.is_some_and(|s| (s.bytes, s.files, s.partial) == walk);
+                (!same).then_some((w.path.as_str(), walk, *s))
+            })
+            .collect();
+        let lower: Vec<String> = differ.iter().map(|(p, _, _)| p.to_lowercase() + "\\").collect();
+        let starts: Vec<_> = differ.iter().filter(|(p, _, _)| { let me = p.to_lowercase() + "\\"; !lower.iter().any(|o| o != &me && o.starts_with(&me)) }).collect();
+        println!("{folder}: {} folders walked in {walked:.2?}, asked in {asked:.2?}; {} differ, {} where it starts", all.len(), differ.len(), starts.len());
+        for (p, w, s) in starts.iter().take(25) {
+            let s = s.map_or("none".to_string(), |s| format!("{} bytes, {} files{}", s.bytes, s.files, if s.partial { ", partial" } else { "" }));
+            println!("  {p}\n    walk {} bytes, {} files{}; service {s}", w.0, w.1, if w.2 { ", partial" } else { "" });
+        }
+        0
+    }
+
+    // ------------------------------------------------------------ folder sizes benchmark
+
+    /// `--sizes-bench OUT [--cold] [FOLDER | each:FOLDER | change:FOLDER]...` [admin]: times
+    /// folder sizes from the file table (`sizes::scan`, and the raw table read alone, as WizTree
+    /// reads it) and Ferret's own walk (`foldersize`), and compares their sizes:
+    /// - each fixed NTFS drive: the table read and scanned;
+    /// - FOLDER: walked, and its size from the table, side by side;
+    /// - each:FOLDER: every folder inside it too, which must all agree;
+    /// - change:FOLDER: files and folders changed in it, then followed through the change
+    ///   journal (`sizes::look_up`, `Tree::update_all`), as the service follows them: the tree
+    ///   must then be what a fresh scan gives, and what a walk gives.
+    ///
+    /// With --cold, Windows' file cache is emptied before each first timing. What it finds goes
+    /// to OUT too.
+    fn sizes_bench(args: &[String]) -> i32 {
+        use crate::search::sizes::{self, Tree};
+        let Some(out) = args.first() else {
+            eprintln!("usage: ferret-indexer --sizes-bench OUT [--cold] [FOLDER | each:FOLDER | change:FOLDER]...");
+            return 2;
+        };
+        let cold = args.iter().any(|a| a == "--cold");
+        let mut lines: Vec<String> = Vec::new();
+        let mut say = |s: String| {
+            println!("{s}");
+            lines.push(s);
+        };
+        let purge = |say: &mut dyn FnMut(String)| {
+            if let Err(e) = if cold { purge_file_cache() } else { Ok(()) } {
+                say(format!("  (the file cache wasn't emptied: {e})"));
+            }
+        };
+        let gb = |b: u64| format!("{:.2} GB", b as f64 / 1e9);
+        let never = AtomicBool::new(false);
+        let mut drives: Vec<(String, mft::VolHandle, Tree)> = Vec::new();
+        for root in mft::ntfs_fixed_volumes() {
+            let letter = root.chars().next().unwrap_or('C');
+            let vol = match mft::open_volume(letter) {
+                Ok(v) => v,
+                Err(e) => {
+                    say(format!("{root} {e}"));
+                    continue;
+                }
+            };
+            purge(&mut say);
+            match sizes::raw_read(&vol) {
+                Ok((bytes, used, took)) => say(format!(
+                    "{root} raw table read: {:.0} MB, {used} records in use, {took:.2?} ({:.0} MB/s)",
+                    bytes as f64 / 1e6,
+                    bytes as f64 / 1e6 / took.as_secs_f64()
+                )),
+                Err(e) => say(format!("{root} raw table read: {e}")),
+            }
+            purge(&mut say);
+            match sizes::scan(&vol, &never) {
+                Ok((tree, st)) => {
+                    let all = tree.dir(sizes::ROOT).copied().unwrap_or_default();
+                    say(format!(
+                        "{root} table scan: {} records, {} folders, {} calls, {:.0} MB of answers, {:.2?}; the drive: {} in {} files; tree {:.0} MB",
+                        st.records,
+                        tree.dir_count(),
+                        st.calls,
+                        st.output_bytes as f64 / 1e6,
+                        st.took,
+                        gb(all.bytes),
+                        all.files,
+                        tree.heap_bytes() as f64 / 1e6
+                    ));
+                    if let Ok((_, again)) = sizes::scan(&vol, &never) {
+                        say(format!("{root} table scan again (cached): {:.2?}", again.took));
+                    }
+                    drives.push((root.clone(), vol, tree));
+                }
+                Err(e) => say(format!("{root} table scan: {e}")),
+            }
+        }
+        let recno = |p: &str| mft::root_frn(p).ok().map(|f| (f & 0x0000_FFFF_FFFF_FFFF) as u32);
+        let walk = |p: &str| crate::foldersize::count_folder(p).map(|s| (s.bytes, s.files.unwrap_or(0), s.partial));
+        let table = |tree: &Tree, p: &str| recno(p).and_then(|r| tree.dir(r)).map(|d| (d.bytes, d.files));
+        // Every folder inside one (no symlinks or junctions, as the walk).
+        fn folders_in(dir: &str, out: &mut Vec<String>) {
+            for e in std::fs::read_dir(dir).into_iter().flatten().flatten() {
+                if e.file_type().is_ok_and(|t| t.is_dir()) {
+                    let p = e.path().to_string_lossy().into_owned();
+                    out.push(p.clone());
+                    folders_in(&p, out);
+                }
+            }
+        }
+        for arg in args[1..].iter().filter(|a| *a != "--cold") {
+            let (how, folder) = match arg.split_once(':').filter(|(h, _)| matches!(*h, "each" | "change" | "diff" | "names")) {
+                Some((h, f)) => (h, f),
+                None => ("", arg.as_str()),
+            };
+            let Some(d) = drives.iter().position(|(r, _, _)| folder.to_lowercase().starts_with(&r.to_lowercase())) else {
+                say(format!("{folder}: not on a scanned drive"));
+                continue;
+            };
+            if how == "change" {
+                let (_, vol, tree) = &mut drives[d];
+                say(change_check(vol, tree, folder));
+                continue;
+            }
+            // File names only for my own test folders.
+            let names_ok = |p: &str| p.to_lowercase().contains(r"\ferretqa\");
+            if how == "names" {
+                let (_, vol, _) = &drives[d];
+                for l in recno(folder).map(|r| sizes::describe(vol, &[r], names_ok(folder)).unwrap_or_default()).unwrap_or_default() {
+                    say(format!("{folder}: {l}"));
+                }
+                continue;
+            }
+            if how == "diff" {
+                // Every folder walked once, against the table: where do they start to differ?
+                let (_, vol, tree) = &drives[d];
+                let (top, mut all) = crate::foldersize::count_folder_all(folder);
+                all.extend(top);
+                type Differ = (String, (u64, u64), Option<(u64, u64)>);
+                let differ: Vec<Differ> = all
+                    .iter()
+                    .filter_map(|s| {
+                        let w = (s.bytes, s.files.unwrap_or(0));
+                        let t = table(tree, &s.path);
+                        (Some(w) != t).then(|| (s.path.clone(), w, t))
+                    })
+                    .collect();
+                let lower: Vec<String> = differ.iter().map(|(p, _, _)| p.to_lowercase() + "\\").collect();
+                let mut starts: Vec<&Differ> =
+                    differ.iter().filter(|(p, _, _)| { let me = p.to_lowercase() + "\\"; !lower.iter().any(|o| o != &me && o.starts_with(&me)) }).collect();
+                let off = |(_, w, t): &&Differ| (w.1 as i64 - t.map_or(0, |t| t.1) as i64).abs();
+                starts.sort_by_key(|e| std::cmp::Reverse(off(e)));
+                // A program started from a packaged (Store) app, like this one from the Claude
+                // app, sees that app's own copy of AppData merged in: the walk counts that too.
+                let appdata = |p: &str| p.to_lowercase().contains(r"\appdata\");
+                say(format!(
+                    "{folder}: {} folders compared, {} differ, {} where it starts; outside AppData: {} differ, {} where it starts",
+                    all.len(),
+                    differ.len(),
+                    starts.len(),
+                    differ.iter().filter(|(p, _, _)| !appdata(p)).count(),
+                    starts.iter().filter(|(p, _, _)| !appdata(p)).count()
+                ));
+                starts.sort_by_key(|(p, _, _)| appdata(p));
+                for (p, w, t) in starts.iter().take(15) {
+                    say(format!("    {p}: walk {w:?}, table {t:?}"));
+                }
+                for (p, _, _) in starts.iter().take(6) {
+                    // The folder and some of what's in it: in the table, and in the tree.
+                    let Some(r) = recno(p) else { continue };
+                    say(format!("  {p}: record {r}; the tree: {}", tree.debug(r)));
+                    for l in sizes::describe(vol, &[r], names_ok(p)).unwrap_or_default() {
+                        say(format!("    its record: {l}"));
+                    }
+                    for e in std::fs::read_dir(p).into_iter().flatten().flatten().take(6) {
+                        let child = e.path().to_string_lossy().into_owned();
+                        let Ok(f) = mft::root_frn(&child) else { continue };
+                        let c = (f & 0x0000_FFFF_FFFF_FFFF) as u32;
+                        say(format!("    inside: record {c} (seq {}); the tree: {}", f >> 48, tree.debug(c)));
+                        for l in sizes::describe(vol, &[c], names_ok(p)).unwrap_or_default() {
+                            say(format!("      {l}"));
+                        }
+                    }
+                }
+                for (p, _, _) in starts.iter().take(0) {
+                    let recs = recno(p).map(|r| tree.in_folder(r)).unwrap_or_default();
+                    say(format!("  the table, in {p}: {} records", recs.len()));
+                    for l in sizes::describe(vol, &recs[..recs.len().min(40)], names_ok(p)).unwrap_or_default() {
+                        say(format!("    {l}"));
+                    }
+                    say(format!("  the walk, in {p}:"));
+                    for e in std::fs::read_dir(p).into_iter().flatten().flatten().take(40) {
+                        use std::os::windows::fs::MetadataExt;
+                        let (Ok(kind), Ok(m)) = (e.file_type(), e.metadata()) else { continue };
+                        let name = e.file_name().to_string_lossy().into_owned();
+                        let shown = if names_ok(p) { name } else { name.rsplit_once('.').map(|(_, x)| format!("*.{x}")).unwrap_or("*".into()) };
+                        say(format!("    {shown:?} attributes {:#x} {} bytes{}", m.file_attributes(), m.len(), if kind.is_symlink() { " (symlink)" } else { "" }));
+                    }
+                }
+                continue;
+            }
+            let tree = &drives[d].2;
+            purge(&mut say);
+            let t = Instant::now();
+            let walked = walk(folder);
+            let first = t.elapsed();
+            let t = Instant::now();
+            let _ = walk(folder);
+            let again = t.elapsed();
+            let from_table = table(tree, folder);
+            let t = Instant::now();
+            for _ in 0..1000 {
+                let _ = table(tree, folder);
+            }
+            let ask = t.elapsed() / 1000;
+            let same = walked.map(|(b, f, _)| (b, f)) == from_table;
+            say(format!(
+                "{folder}: walk {first:.2?} (again {again:.2?}): {}; table ({ask:.1?} to ask): {}; {}",
+                walked.map_or("—".into(), |(b, f, p)| format!("{} in {f} files{}", gb(b), if p { ", partial" } else { "" })),
+                from_table.map_or("—".into(), |(b, f)| format!("{} in {f} files", gb(b))),
+                if same { "the same" } else { "DIFFERENT" }
+            ));
+            if how == "each" {
+                let mut all = Vec::new();
+                folders_in(folder, &mut all);
+                let differ: Vec<String> = all
+                    .iter()
+                    .filter_map(|p| {
+                        let (w, t) = (walk(p).map(|(b, f, _)| (b, f)), table(tree, p));
+                        (w != t).then(|| format!("    {p}: walk {w:?}, table {t:?}"))
+                    })
+                    .collect();
+                say(format!("  {} folders inside compared: {} differ", all.len(), differ.len()));
+                for line in differ.into_iter().take(30) {
+                    say(line);
+                }
+            }
+        }
+        if let Err(e) = std::fs::write(out, lines.join("\n") + "\n") {
+            eprintln!("error: writing {out}: {e}");
+            return 1;
+        }
+        0
+    }
+
+    /// `change:FOLDER` (see `sizes_bench`): changes made in FOLDER\changes, followed through the
+    /// journal, must leave the tree as a fresh scan and a walk have it.
+    fn change_check(vol: &mft::VolHandle, tree: &mut crate::search::sizes::Tree, folder: &str) -> String {
+        use crate::search::sizes;
+        let base = Path::new(folder).join("changes");
+        let _ = std::fs::remove_dir_all(&base);
+        let Ok(j) = vol.query_journal() else { return format!("{folder}: no change journal") };
+        let start = j.next_usn;
+        // Files made, grown, linked, moved and deleted; folders made, moved and deleted.
+        let made = (|| -> std::io::Result<()> {
+            let (a, b) = (base.join("a"), base.join("b"));
+            std::fs::create_dir_all(a.join("deep").join("er"))?;
+            std::fs::create_dir_all(&b)?;
+            std::fs::write(a.join("one"), vec![1u8; 1000])?;
+            std::fs::write(a.join("deep").join("er").join("two"), vec![2u8; 20_000])?;
+            std::fs::write(b.join("three"), vec![3u8; 300])?;
+            std::fs::hard_link(a.join("one"), b.join("one-again"))?;
+            let mut f = std::fs::OpenOptions::new().append(true).open(b.join("three"))?;
+            std::io::Write::write_all(&mut f, &[4u8; 4000])?;
+            drop(f);
+            std::fs::rename(a.join("deep"), b.join("deep"))?;
+            std::fs::write(b.join("gone"), vec![5u8; 50])?;
+            std::fs::remove_file(b.join("gone"))?;
+            std::fs::create_dir_all(base.join("c").join("d"))?;
+            std::fs::remove_dir_all(base.join("c"))?;
+            std::os::windows::fs::symlink_file(a.join("one"), a.join("link"))?;
+            Ok(())
+        })();
+        if let Err(e) = made {
+            return format!("{folder}: couldn't make the changes ({e})");
+        }
+        std::thread::sleep(Duration::from_millis(500));
+        // What changed, from the journal, looked up again and put in the tree.
+        let t = Instant::now();
+        let (mut at, mut changed, mut buf) = (start, Vec::new(), vec![0u64; 64 * 1024]);
+        while let Ok((next, recs)) = vol.read_journal(j.id, at, &mut buf) {
+            changed.extend(recs.iter().filter_map(|r| u32::try_from(mft::recno(r.frn)).ok()));
+            if next == at {
+                break;
+            }
+            at = next;
+        }
+        changed.sort_unstable();
+        changed.dedup();
+        let now = match sizes::look_up(vol, &changed) {
+            Ok(n) => n,
+            Err(e) => return format!("{folder}: look-up failed ({e})"),
+        };
+        let found = now.iter().filter(|(_, r)| r.is_some()).count();
+        tree.update_all(now);
+        let took = t.elapsed();
+        let never = AtomicBool::new(false);
+        let Ok((fresh, _)) = sizes::scan(vol, &never) else { return format!("{folder}: rescan failed") };
+        let recno = |p: &Path| mft::root_frn(&p.to_string_lossy()).ok().map(|f| (f & 0x0000_FFFF_FFFF_FFFF) as u32);
+        let mut report = format!("{folder}: {} records changed ({found} there now), followed in {took:.2?}", changed.len());
+        let mut ok = true;
+        for p in [base.clone(), base.join("a"), base.join("b"), base.join("b").join("deep"), Path::new(folder).to_path_buf()] {
+            let r = recno(&p);
+            let (t, f) = (r.and_then(|r| tree.dir(r)).map(|d| (d.bytes, d.files)), r.and_then(|r| fresh.dir(r)).map(|d| (d.bytes, d.files)));
+            let w = crate::foldersize::count_folder(&p.to_string_lossy()).map(|s| (s.bytes, s.files.unwrap_or(0)));
+            let good = t == f && t == w;
+            ok &= good;
+            report.push_str(&format!("\n    {}: followed {t:?}, fresh scan {f:?}, walk {w:?}{}", p.display(), if good { "" } else { "  DIFFERENT" }));
+        }
+        let _ = std::fs::remove_dir_all(&base);
+        report.push_str(if ok { "\n  all the same" } else { "\n  NOT the same" });
+        report
+    }
+
+    /// Empties Windows' file cache (the system cache's working set, then the standby list), so
+    /// what's timed next reads from the disk.
+    fn purge_file_cache() -> Result<(), String> {
+        use windows::Win32::System::Memory::SetSystemFileCacheSize;
+        enable_privilege("SeIncreaseQuotaPrivilege")?;
+        enable_privilege("SeProfileSingleProcessPrivilege")?;
+        unsafe { SetSystemFileCacheSize(usize::MAX, usize::MAX, Default::default()) }.map_err(|e| format!("emptying the file cache: {e}"))?;
+        #[link(name = "ntdll")]
+        unsafe extern "system" {
+            fn NtSetSystemInformation(class: i32, info: *mut std::ffi::c_void, len: u32) -> i32;
+        }
+        const SYSTEM_MEMORY_LIST_INFORMATION: i32 = 80;
+        let mut purge_standby_list = 4i32;
+        let st = unsafe { NtSetSystemInformation(SYSTEM_MEMORY_LIST_INFORMATION, &mut purge_standby_list as *mut i32 as *mut _, 4) };
+        if st != 0 {
+            return Err(format!("purging the standby list: status {st:#x}"));
+        }
+        Ok(())
+    }
+
+    fn enable_privilege(name: &str) -> Result<(), String> {
+        use windows::core::PCWSTR;
+        use windows::Win32::Foundation::{CloseHandle, GetLastError, ERROR_NOT_ALL_ASSIGNED, HANDLE, LUID};
+        use windows::Win32::Security::{
+            AdjustTokenPrivileges, LookupPrivilegeValueW, LUID_AND_ATTRIBUTES, SE_PRIVILEGE_ENABLED, TOKEN_ADJUST_PRIVILEGES,
+            TOKEN_PRIVILEGES, TOKEN_QUERY,
+        };
+        use windows::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
+        let mut token = HANDLE::default();
+        unsafe { OpenProcessToken(GetCurrentProcess(), TOKEN_ADJUST_PRIVILEGES | TOKEN_QUERY, &mut token) }.map_err(|e| e.to_string())?;
+        let w: Vec<u16> = name.encode_utf16().chain(Some(0)).collect();
+        let mut luid = LUID::default();
+        let r = unsafe { LookupPrivilegeValueW(PCWSTR::null(), PCWSTR(w.as_ptr()), &mut luid) }.and_then(|_| {
+            let tp = TOKEN_PRIVILEGES { PrivilegeCount: 1, Privileges: [LUID_AND_ATTRIBUTES { Luid: luid, Attributes: SE_PRIVILEGE_ENABLED }] };
+            unsafe { AdjustTokenPrivileges(token, false, Some(&tp), 0, None, None) }
+        });
+        // It succeeds without the privilege too, saying so only in the last error.
+        let missing = r.is_ok() && unsafe { GetLastError() } == ERROR_NOT_ALL_ASSIGNED;
+        unsafe {
+            let _ = CloseHandle(token);
+        }
+        if missing {
+            return Err(format!("{name} isn't held"));
+        }
+        r.map_err(|e| format!("{name}: {e}"))
     }
 }
 

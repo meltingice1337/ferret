@@ -16,8 +16,9 @@ pub const PIPE_NAME: &str = r"\\.\pipe\ferret-index";
 /// Bump when the service binary must be replaced: a change to the indexer, the snapshot
 /// format or this protocol. The app offers to update an installed service that reports a
 /// lower number; app releases that leave it alone need no update. From 2, the service updates
-/// itself (`Request::Update`, no UAC prompt); older ones are reinstalled (one UAC prompt).
-pub const INDEXER_VERSION: u32 = 2;
+/// itself (`Request::Update`, no UAC prompt); older ones are reinstalled (one UAC prompt). 3:
+/// folder sizes (`Request::Sizes`).
+pub const INDEXER_VERSION: u32 = 3;
 const MAX_MSG: usize = 64 << 20;
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -29,6 +30,17 @@ pub enum Request {
     /// Replace the service with this `ferret-indexer.exe` (Ferret's own copy), if it's a newer
     /// release, signed with Ferret's release key (see `service::update_from`).
     Update { exe: String },
+    /// The sizes of these folders, from the file table (indexer 3 on).
+    Sizes { paths: Vec<String> },
+}
+
+/// A folder's size as the asking user would count it: what's inside, without what's in folders
+/// inside that they can't open (then `partial`).
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FolderTotal {
+    pub bytes: u64,
+    pub files: u64,
+    pub partial: bool,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, Default)]
@@ -51,6 +63,9 @@ pub enum Response {
     Pong,
     /// The update was checked and starts now: the service restarts in a few seconds.
     Updating,
+    /// For each folder asked for: its size, or none (not on a drive the service has read yet,
+    /// or one the user can't open).
+    Sizes { sizes: Vec<Option<FolderTotal>> },
     Error { message: String },
 }
 
@@ -224,9 +239,11 @@ mod win {
         // `File` gives us blocking Read/Write over the pipe handle.
         let mut f = unsafe { File::from_raw_handle(raw as *mut _) };
         let mut access = AccessCache::default();
+        let mut size_access = SizeAccess::default();
         loop {
             let Ok(msg) = read_frame(&mut f) else { break };
             let resp = match serde_json::from_slice::<Request>(&msg) {
+                Ok(Request::Sizes { paths }) => Response::Sizes { sizes: sizes_filtered(engine, &paths, h, &mut size_access) },
                 Ok(Request::Query(q)) => match query_filtered(engine, &q, h, &mut access) {
                     Ok(r) => Response::Results(r),
                     Err(e) => Response::Error { message: e },
@@ -294,6 +311,148 @@ mod win {
             self.0.insert(key, (ok, Instant::now()));
             ok
         }
+    }
+
+    /// Per connection: whether the client may list folders with a given security id, per drive.
+    #[derive(Default)]
+    struct SizeAccess(HashMap<(u8, u32), bool>);
+
+    /// A folder opened to look at it (as whoever is asking): its volume serial number and file
+    /// reference. With `list`, only if it may be listed.
+    fn folder_id(path: &str, list: bool) -> Option<(u32, u64)> {
+        use windows::Win32::Storage::FileSystem::{GetFileInformationByHandle, BY_HANDLE_FILE_INFORMATION};
+        const FILE_LIST_DIRECTORY: u32 = 1;
+        const FILE_READ_ATTRIBUTES: u32 = 0x80;
+        let h = unsafe {
+            CreateFileW(
+                PCWSTR(wide(&crate::paths::for_io(path)).as_ptr()),
+                if list { FILE_LIST_DIRECTORY } else { FILE_READ_ATTRIBUTES },
+                FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                None,
+                OPEN_EXISTING,
+                FILE_FLAG_BACKUP_SEMANTICS,
+                None,
+            )
+        }
+        .ok()?;
+        let mut info = BY_HANDLE_FILE_INFORMATION::default();
+        let got = unsafe { GetFileInformationByHandle(h, &mut info) };
+        unsafe {
+            let _ = CloseHandle(h);
+        }
+        got.ok()?;
+        Some((info.dwVolumeSerialNumber, (u64::from(info.nFileIndexHigh) << 32) | u64::from(info.nFileIndexLow)))
+    }
+
+    /// May whoever is asking list the folder with this file reference? (`hint`: any handle on its
+    /// drive.) None if it's not there any more.
+    fn can_list_by_id(hint: HANDLE, frn: u64) -> Option<bool> {
+        use windows::Win32::Foundation::ERROR_ACCESS_DENIED;
+        use windows::Win32::Storage::FileSystem::{FileIdType, OpenFileById, FILE_ID_DESCRIPTOR, FILE_ID_DESCRIPTOR_0};
+        const FILE_LIST_DIRECTORY: u32 = 1;
+        let id = FILE_ID_DESCRIPTOR {
+            dwSize: std::mem::size_of::<FILE_ID_DESCRIPTOR>() as u32,
+            Type: FileIdType,
+            Anonymous: FILE_ID_DESCRIPTOR_0 { FileId: frn as i64 },
+        };
+        match unsafe {
+            OpenFileById(hint, &id, FILE_LIST_DIRECTORY, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, None, FILE_FLAG_BACKUP_SEMANTICS)
+        } {
+            Ok(h) => {
+                unsafe {
+                    let _ = CloseHandle(h);
+                }
+                Some(true)
+            }
+            Err(e) if e.code() == ERROR_ACCESS_DENIED.to_hresult() => Some(false),
+            Err(_) => None,
+        }
+    }
+
+    /// `Request::Sizes`: each folder's total from the file table (sizes.rs), as Ferret's own walk
+    /// would count it as the client: only for a folder the client may list, and without what's
+    /// in the folders inside that they may not (then `partial`). The table has everything; who
+    /// may list what is asked as the client, once for each security id a folder can have (a drive
+    /// has a few thousand), and the topmost folders the client can't list come off the totals.
+    fn sizes_filtered(engine: &Engine, paths: &[String], pipe: HANDLE, access: &mut SizeAccess) -> Vec<Option<FolderTotal>> {
+        let mut out = vec![None; paths.len()];
+        for vol in engine.volumes() {
+            let mine: Vec<usize> = (0..paths.len()).filter(|&i| paths[i].get(..vol.root.len()).is_some_and(|p| p.eq_ignore_ascii_case(&vol.root))).collect();
+            if mine.is_empty() {
+                continue;
+            }
+            let guard = vol.sizes.read();
+            let Some(tree) = guard.as_ref() else { continue };
+            let letter = vol.root.as_bytes().first().copied().unwrap_or(b'C').to_ascii_uppercase();
+            // As the service: a handle on the drive (OpenFileById needs one), and its serial.
+            let Some((serial, _)) = folder_id(&vol.root, false) else { continue };
+            let Ok(hint) = (unsafe {
+                CreateFileW(
+                    PCWSTR(wide(&vol.root).as_ptr()),
+                    0,
+                    FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                    None,
+                    OPEN_EXISTING,
+                    FILE_FLAG_BACKUP_SEMANTICS,
+                    None,
+                )
+            }) else {
+                continue;
+            };
+            {
+                let Ok(_as_client) = Impersonation::start(pipe) else {
+                    unsafe {
+                        let _ = CloseHandle(hint);
+                    }
+                    break;
+                };
+                let mut denied = super::super::index::FastSet::default();
+                for (r, d) in tree.dirs() {
+                    let ok = match access.0.get(&(letter, d.security)) {
+                        Some(&ok) => ok,
+                        None => match can_list_by_id(hint, tree.frn(r)) {
+                            Some(ok) => *access.0.entry((letter, d.security)).or_insert(ok),
+                            None => true,
+                        },
+                    };
+                    if !ok {
+                        denied.insert(r);
+                    }
+                }
+                let topmost: Vec<u32> = denied
+                    .iter()
+                    .copied()
+                    .filter(|&d| {
+                        let mut cur = d;
+                        while let Some(p) = tree.up(cur) {
+                            if denied.contains(&p) {
+                                return false;
+                            }
+                            cur = p;
+                        }
+                        true
+                    })
+                    .collect();
+                for i in mine {
+                    let Some((s, frn)) = folder_id(&paths[i], true) else { continue };
+                    let r = (frn & 0x0000_FFFF_FFFF_FFFF) as u32;
+                    let Some(d) = tree.dir(r).filter(|_| s == serial) else { continue };
+                    let mut total = FolderTotal { bytes: d.bytes, files: d.files, partial: false };
+                    for &x in &topmost {
+                        if let Some(xd) = tree.dir(x).filter(|_| tree.inside(x, r)) {
+                            total.bytes = total.bytes.saturating_sub(xd.bytes);
+                            total.files = total.files.saturating_sub(xd.files);
+                            total.partial = true;
+                        }
+                    }
+                    out[i] = Some(total);
+                }
+            }
+            unsafe {
+                let _ = CloseHandle(hint);
+            }
+        }
+        out
     }
 
     /// Reverts impersonation even on early return / panic.
@@ -517,6 +676,12 @@ mod tests {
         let up = serde_json::to_string(&Request::Update { exe: r"C:\Ferret\ferret-indexer.exe".into() }).unwrap();
         assert_eq!(up, r#"{"type":"update","exe":"C:\\Ferret\\ferret-indexer.exe"}"#);
         assert_eq!(serde_json::to_string(&Response::Updating).unwrap(), r#"{"type":"updating"}"#);
+        // Sizes: one answer for each folder asked, none where the service has nothing to say.
+        let ask = serde_json::to_string(&Request::Sizes { paths: vec![r"C:\a".into()] }).unwrap();
+        assert_eq!(ask, r#"{"type":"sizes","paths":["C:\\a"]}"#);
+        let answer = Response::Sizes { sizes: vec![Some(FolderTotal { bytes: 5, files: 1, partial: true }), None] };
+        let back: Response = serde_json::from_str(&serde_json::to_string(&answer).unwrap()).unwrap();
+        assert!(matches!(back, Response::Sizes { sizes } if sizes[0] == Some(FolderTotal { bytes: 5, files: 1, partial: true }) && sizes[1].is_none()));
         let resp = Response::Error { message: "x".into() };
         let s = serde_json::to_string(&resp).unwrap();
         assert_eq!(s, r#"{"type":"error","message":"x"}"#);

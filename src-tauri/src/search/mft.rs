@@ -318,7 +318,7 @@ mod win {
         s.encode_utf16().chain(Some(0)).collect()
     }
 
-    fn map_err(e: windows::core::Error, what: &str) -> MftError {
+    pub(crate) fn map_err(e: windows::core::Error, what: &str) -> MftError {
         let c = e.code();
         if c == ERROR_ACCESS_DENIED.to_hresult() {
             MftError::AccessDenied(what.to_string())
@@ -395,7 +395,19 @@ mod win {
     }
 
     impl VolHandle {
-        fn ioctl(&self, code: u32, input: Option<&[u8]>, out: &mut [u8]) -> windows::core::Result<usize> {
+        /// Reads the volume at a byte offset (a multiple of its sector size).
+        pub(crate) fn read_at(&self, offset: u64, buf: &mut [u8]) -> windows::core::Result<usize> {
+            use windows::Win32::Storage::FileSystem::ReadFile;
+            use windows::Win32::System::IO::OVERLAPPED;
+            let mut ov = OVERLAPPED::default();
+            ov.Anonymous.Anonymous.Offset = offset as u32;
+            ov.Anonymous.Anonymous.OffsetHigh = (offset >> 32) as u32;
+            let mut got = 0u32;
+            unsafe { ReadFile(self.h, Some(buf), Some(&mut got), Some(&mut ov))? };
+            Ok(got as usize)
+        }
+
+        pub(crate) fn ioctl(&self, code: u32, input: Option<&[u8]>, out: &mut [u8]) -> windows::core::Result<usize> {
             let mut got = 0u32;
             unsafe {
                 DeviceIoControl(
@@ -719,6 +731,11 @@ mod win {
             }
         }
 
+        // Every folder's size, from the file table, kept current with the journal below; read
+        // again now and then, in case the two ever drift apart.
+        let mut sized = read_sizes(&h, &vol, root, stop, log);
+        let mut sizes_tried = Instant::now();
+
         // Tail the journal.
         let mut buf = vec![0u64; 64 * 1024];
         let mut last_save = Instant::now();
@@ -734,6 +751,22 @@ mod win {
                         if ix.needs_compaction() {
                             ix.compact();
                         }
+                        drop(ix);
+                        // What changed, looked at again: its old share of each folder above it
+                        // out, its new one in.
+                        if sized.is_some() {
+                            let mut changed: Vec<u32> = recs.iter().filter_map(|r| u32::try_from(recno(r.frn)).ok()).collect();
+                            changed.sort_unstable();
+                            changed.dedup();
+                            match crate::search::sizes::look_up(&h, &changed) {
+                                Ok(now) => {
+                                    if let Some(tree) = vol.sizes.write().as_mut() {
+                                        tree.update_all(now);
+                                    }
+                                }
+                                Err(e) => log(format!("{root}: folder sizes: {e}")),
+                            }
+                        }
                     }
                     let advanced = next != next_usn;
                     next_usn = next;
@@ -748,6 +781,8 @@ mod win {
                     let ix = h.enumerate(root, root_frn, i64::MAX, stop, |_, _| {})?;
                     *vol.index.write() = ix;
                     dirty = true;
+                    sized = read_sizes(&h, &vol, root, stop, log);
+                    sizes_tried = Instant::now();
                 }
                 Err(e) => {
                     log(format!("{root}: {e}"));
@@ -759,10 +794,39 @@ mod win {
                 last_save = Instant::now();
                 dirty = false;
             }
+            // Sizes read again every 6 hours (a failed read: every hour).
+            let again = if sized.is_some() { 6 * 3600 } else { 3600 };
+            if sizes_tried.elapsed() > Duration::from_secs(again) {
+                sized = read_sizes(&h, &vol, root, stop, log).or(sized);
+                sizes_tried = Instant::now();
+            }
             std::thread::sleep(Duration::from_millis(250));
         }
         let _ = save_snapshot(&snap, &vol.index.read(), &journal, next_usn, root_frn);
         Ok(())
+    }
+
+    /// Reads every folder's size from the file table into `vol` (sizes.rs); when, if it did.
+    fn read_sizes(h: &VolHandle, vol: &Volume, root: &str, stop: &AtomicBool, log: &(dyn Fn(String) + Sync)) -> Option<Instant> {
+        match crate::search::sizes::scan(h, stop) {
+            Ok((tree, st)) => {
+                let all = tree.dir(crate::search::sizes::ROOT).copied().unwrap_or_default();
+                log(format!(
+                    "{root}: folder sizes from {} records in {:.1}s: {} folders, {} files, {:.0} MB in memory",
+                    st.records,
+                    st.took.as_secs_f64(),
+                    tree.dir_count(),
+                    all.files,
+                    tree.heap_bytes() as f64 / 1e6
+                ));
+                *vol.sizes.write() = Some(tree);
+                Some(Instant::now())
+            }
+            Err(e) => {
+                log(format!("{root}: folder sizes: {e}"));
+                None
+            }
+        }
     }
 }
 

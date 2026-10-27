@@ -36,10 +36,10 @@ pub fn verify(data: &[u8], sig: &str, key: &str) -> Result<u64, String> {
 pub fn may_replace(new: (&[u8], &str), old: Option<(&[u8], &str)>, key: &str) -> Result<(), String> {
     let signed = verify(new.0, new.1, key)?;
     // An installed copy without a (valid) signature: a first install, or a development build.
-    if let Some(was) = old.and_then(|(data, sig)| verify(data, sig, key).ok()) {
-        if signed < was {
-            return Err(format!("it's older than the installed one (signed {signed}, installed {was})"));
-        }
+    if let Some(was) = old.and_then(|(data, sig)| verify(data, sig, key).ok())
+        && signed < was
+    {
+        return Err(format!("it's older than the installed one (signed {signed}, installed {was})"));
     }
     Ok(())
 }

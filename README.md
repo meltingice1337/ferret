@@ -97,11 +97,12 @@ It reads the NTFS file table (MFT) and follows the change journal (USN), so the 
 
 - Runs as its own small process, `ferret-indexer.exe`, and talks to Ferret over a named pipe
 - Only returns results from folders the requesting user is allowed to list
+- Also gives the Size column every folder's size at once, as WizTree does: it reads the file table once (about 5 s for a drive with a million files, where walking it took 36 s) and follows the change journal from there. Folders the user can't open are left out, as Ferret's own count does
 - Saves index snapshots to `%PROGRAMDATA%\Ferret`, readable only by SYSTEM and Administrators
 - Runs from its own copy in `%PROGRAMDATA%\Ferret\bin`, and updates itself without a UAC prompt: it installs only a newer `ferret-indexer.exe` signed with Ferret's release key (so a copy swapped into Ferret's own folder can't become the service)
 
 ```text
-ferret-indexer --install | --uninstall | --status | --query <text> | --console | --probe
+ferret-indexer --install | --uninstall | --status | --query <text> | --sizes <folder>... | --console | --probe
 ```
 
 ---

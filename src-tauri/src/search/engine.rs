@@ -82,6 +82,8 @@ pub struct VolumeStatus {
 pub struct Volume {
     pub root: String,
     pub index: RwLock<Index>,
+    /// MFT volumes: every folder's size (sizes.rs), once the file table has been read.
+    pub sizes: RwLock<Option<super::sizes::Tree>>,
     pub ready: AtomicBool,
     progress: AtomicU32,
     /// Live entry count published by builders (readable without the lock).
@@ -95,6 +97,7 @@ impl Volume {
         Arc::new(Volume {
             root,
             index: RwLock::new(index),
+            sizes: RwLock::new(None),
             ready: AtomicBool::new(ready),
             progress: AtomicU32::new(if ready { 1f32.to_bits() } else { 0 }),
             entries: AtomicU64::new(n),
