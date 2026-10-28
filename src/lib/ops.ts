@@ -12,8 +12,8 @@ import { plural } from "./format";
 import { isVirtual, basename, inRecycleBin, isArchiveName, isRecycle, isSearch, isWithin, parent, pathKey, samePath } from "./path";
 import {
   otherPane, setJobsRunning,
-  activeTab, allPanes, ask, ASK_ALT, beginTypeAhead, elevateWindow, friendly, navigate, places, refreshRecycleInfo, reload, setUi,
-  toast, ui, type Tab,
+  activeTab, allPanes, ask, ASK_ALT, beginTypeAhead, dismissToast, elevateWindow, friendly, navigate, places, refreshRecycleInfo, reload, setUi,
+  showToast, toast, ui, type Tab,
 } from "./state";
 import { formatSize } from "./format";
 import type { Entry, JobUpdate, Policy } from "./types";
@@ -97,6 +97,8 @@ interface UndoStep {
   label: string;
   undo: () => Promise<unknown>;
   redo?: () => Promise<unknown>;
+  /** The toast that offered to undo this step; it goes once the step is undone. */
+  toast?: number;
 }
 
 const undoStack: UndoStep[] = [];
@@ -114,7 +116,12 @@ function record(step: UndoStep, announce?: string) {
   if (undoStack.length > 100) undoStack.shift();
   redoStack.length = 0;
   syncLabels();
-  if (announce) toast(announce, "info", { label: "Undo", run: () => undo() });
+  // The toast's Undo is for this step only: once later steps are on top of it, Ctrl+Z
+  // (or the toast) would undo something else.
+  if (announce) step.toast = showToast(announce, "info", {
+    label: "Undo",
+    run: () => (undoStack.at(-1) === step ? undo() : toast(undoStack.includes(step) ? "Undo the later changes first" : "Already undone")),
+  });
 }
 
 /** Selects items an undo brought back, if they're in the folder being viewed. */
@@ -134,7 +141,11 @@ function tracked<T>(p: Promise<T>): Promise<T> {
   p.finally(() => inflight.delete(p)).catch(() => {});
   return p;
 }
-const settle = () => Promise.allSettled([...inflight]);
+/** True once they're done; false if one is still going after a moment (a long copy, or a job
+ *  waiting on the user), so undo says so instead of firing whenever that job ends. */
+const settle = () => !inflight.size ? Promise.resolve(true)
+  : Promise.race([Promise.allSettled([...inflight]).then(() => true), new Promise<boolean>((r) => setTimeout(() => r(false), 1500))]);
+const BUSY_NOTE = "Wait for the operation in progress to finish (or cancel it), then try again";
 
 /** Paths an operation is currently working on; repeated commands ignore them. */
 const busy = new Set<string>();
@@ -145,10 +156,11 @@ let quietJobs = 0;
 const reason = (e: unknown) => friendly(e instanceof JobEnded ? e.update.error ?? "failed" : String(e));
 
 export async function undo() {
-  await settle();
+  if (!(await settle())) return toast(BUSY_NOTE);
   const step = undoStack.pop();
   syncLabels();
   if (!step) return toast("Nothing to undo");
+  if (step.toast) dismissToast(step.toast);
   quietJobs++;
   try {
     const result = await step.undo();
@@ -165,7 +177,7 @@ export async function undo() {
 }
 
 export async function redo() {
-  await settle();
+  if (!(await settle())) return toast(BUSY_NOTE);
   const step = redoStack.pop();
   syncLabels();
   if (!step?.redo) return toast("Nothing to redo");
@@ -265,17 +277,14 @@ function binGuard(paths: string[], what: string): boolean {
 
 const describe = (paths: string[]) => (paths.length === 1 ? `“${basename(paths[0])}”` : plural(paths.length, "item"));
 
-/** Selected entries of a tab, or the cursor entry when nothing is selected. */
+/** Selected entries of a tab. As in Explorer, the focused item alone (Ctrl+arrows, Esc) isn't a target. */
 export function targetsOf(t: Tab): Entry[] {
   if (t.loading[0]()) return [];
   const sel = new Set(t.selection[0]().map(pathKey));
+  if (!sel.size) return [];
   const shown = t.ordered[0]();
   const entries = (shown.length ? shown : visibleEntries(t)).filter((e) => !busy.has(pathKey(e.path)));
-  const picked = entries.filter((e) => sel.has(pathKey(e.path)));
-  if (picked.length) return picked;
-  const cur = t.cursor[0]();
-  const c = cur ? entries.find((e) => samePath(e.path, cur)) : undefined;
-  return c ? [c] : [];
+  return entries.filter((e) => sel.has(pathKey(e.path)));
 }
 
 /** Entries currently shown (respects the filter box and hidden-items setting). */
@@ -338,11 +347,15 @@ export async function paste(dest: string) {
     return toast(`Clipboard error: ${e}`, "error");
   }
   if (!clip || !clip.paths.length) return toast("Nothing to paste: the clipboard has no files");
-  await transferTo(clip.cut ? "move" : "copy", clip.paths, dest);
-  if (clip.cut) {
-    setUi("clipboard", null);
-    api.clipboardWriteFiles([], false).catch(() => {});
-  }
+  if (!clip.cut) return transferTo("copy", clip.paths, dest);
+  // A cut that was already pasted (here or in Explorer) has nothing left to move.
+  const sources = await stillThere(clip.paths);
+  if (sources.length) await transferTo("move", sources, dest);
+  // Like Explorer, a pasted cut leaves the clipboard; what wasn't moved (skipped, cancelled) stays cut.
+  const left = sources.length ? await stillThere(sources) : [];
+  const ours = await api.clipboardAfterCut(clip.paths, left).catch(() => true);
+  if (ours) setUi("clipboard", left.length ? { paths: left, cut: true } : null);
+  if (!sources.length) toast("Nothing to paste: the cut items have already been moved");
 }
 
 export const isCut = (path: string) => !!ui.clipboard?.cut && ui.clipboard.paths.some((p) => samePath(p, path));
@@ -386,7 +399,7 @@ export async function transferTo(op: "copy" | "move", sources: string[], dest: s
     if (!p) return;
     policy = p;
   }
-  const label = `${op === "move" ? "Move" : "Copy"} ${describe(sources)} to ${basename(dest)}`;
+  const asked = `${op === "move" ? "Move" : "Copy"} ${describe(sources)} to ${basename(dest)}`;
   try {
     const u = await tracked(withAdmin(
       () => runJob(api.transfer(op, sources, dest, policy)),
@@ -394,13 +407,22 @@ export async function transferTo(op: "copy" | "move", sources: string[], dest: s
     ));
     const created = u.created;
     const t = activeTab();
+    // Items the user skipped (open in another program…) stay where they were, selected there.
+    const failed = (u.failed ?? []).map(([p]) => p);
+    const failedKeys = new Set(failed.map(pathKey));
+    const done = sources.filter((s) => !failedKeys.has(pathKey(s)));
     if (samePath(t.p, dest)) selectAfterReload(t, created);
+    else if (failed.length && samePath(t.p, parent(failed[0]))) selectAfterReload(t, failed);
     // Everything skipped: say so, and there's nothing to undo.
     if (!created.length && !(u.replaced ?? []).length && !(u.pairs ?? []).length) {
-      toast(u.skipped ? `Skipped ${plural(u.skipped, "item")}: already in ${basename(dest)}` : "Nothing to do");
+      toast(failed.length ? `Nothing was ${op === "move" ? "moved" : "copied"} · ${plural(failed.length, "item")} skipped`
+        : u.skipped ? `Skipped ${plural(u.skipped, "item")}: already in ${basename(dest)}` : "Nothing to do");
       return;
     }
-    const skippedNote = u.skipped ? ` · skipped ${u.skipped}` : "";
+    const skipped = u.skipped + failed.length;
+    const skippedNote = skipped ? ` · skipped ${skipped}` : "";
+    // The undo step names what was actually done, not what was asked for.
+    const label = failed.length ? `${op === "move" ? "Move" : "Copy"} ${describe(done)} to ${basename(dest)}` : asked;
     const replaced = u.replaced ?? [];
     const pairs = u.pairs ?? [];
     const restoreReplaced = () => (replaced.length ? unrecycle(replaced) : Promise.resolve([]));
@@ -419,8 +441,8 @@ export async function transferTo(op: "copy" | "move", sources: string[], dest: s
           if (overwrote.length) await destroy(overwrote);
           await restoreReplaced();
         },
-        redo: () => runJob(api.transfer("copy", sources, dest, policy)),
-      }, `Copied ${describe(sources)} to ${basename(dest)}${skippedNote}`);
+        redo: () => runJob(api.transfer("copy", done, dest, policy)),
+      }, `Copied ${describe(done)} to ${basename(dest)}${skippedNote}`);
     } else {
       remapShelf(new Map(pairs.map(([from, to]) => [pathKey(from), to])));
       record({
@@ -431,11 +453,11 @@ export async function transferTo(op: "copy" | "move", sources: string[], dest: s
           await restoreReplaced();
           return back;
         },
-        redo: () => runJob(api.transfer("move", sources, dest, policy)),
-      }, `Moved ${describe(sources)} to ${basename(dest)}${skippedNote}`);
+        redo: () => runJob(api.transfer("move", done, dest, policy)),
+      }, `Moved ${describe(done)} to ${basename(dest)}${skippedNote}`);
     }
   } catch (e) {
-    fail(`${label} failed`, e);
+    fail(`${asked} failed`, e);
   }
 }
 
@@ -568,7 +590,17 @@ export async function newFolder(t: Tab) {
       () => api.createFolder(t.p),
       async () => (await shellJob({ kind: "newFolder", dir: t.p, name: "New folder" })).created[0],
     ));
-    record({ label: "New folder", undo: () => recycle([p]) });
+    // Still empty when undone: removed outright (nothing to lose), and redo makes it again.
+    // With something in it, it goes to the Recycle Bin and redo brings it back.
+    let removed = false;
+    record({
+      label: "New folder",
+      undo: async () => {
+        removed = await api.removeEmptyFolder(p);
+        if (!removed) await recycle([p]);
+      },
+      redo: () => (removed ? api.createFolder(parent(p)!, basename(p)) : unrecycle([p])),
+    });
     selectAfterReload(t, [p], true);
   } catch (e) {
     if (!(e instanceof Declined)) toast(friendly(String(e)), "error");
@@ -592,7 +624,7 @@ export async function newFile(t: Tab, name: string, content?: string) {
       () => api.createFile(t.p, name, content),
       async () => (await shellJob({ kind: "newFile", dir: t.p, name })).created[0],
     ));
-    record({ label: `New ${name}`, undo: () => recycle([p]) });
+    record({ label: `New ${name}`, undo: () => recycle([p]), redo: () => unrecycle([p]) });
     selectAfterReload(t, [p], true);
   } catch (e) {
     if (!(e instanceof Declined)) toast(friendly(String(e)), "error");
@@ -604,6 +636,25 @@ export async function newFile(t: Tab, name: string, content?: string) {
 /** Puts Recycle Bin items (their `$Recycle.Bin` paths) back where they were deleted from. */
 export async function restoreFromBin(items: string[]) {
   if (!items.length) return;
+  // Something with the same name is back where an item came from: Windows would restore it
+  // under a new name, so ask first rather than doing that without a word.
+  const binned = activeTab().entries[0]().filter((e) => e.origin && items.some((p) => samePath(p, e.path)));
+  const originals = binned.map((e) => `${e.origin!.replace(/\\$/, "")}\\${e.name}`);
+  // Taken by something there now, or by another item restored with this one (deleted twice).
+  const twice = originals.filter((p, i) => originals.findIndex((q) => samePath(p, q)) !== i);
+  const taken = [...(await stillThere(originals)), ...twice];
+  if (taken.length) {
+    const one = taken.length === 1;
+    const name = basename(taken[0]);
+    const dot = binned[originals.findIndex((p) => samePath(p, taken[0]))]?.isDir ? -1 : name.lastIndexOf(".");
+    const copyName = dot > 0 ? `${name.slice(0, dot)} - Copy${name.slice(dot)}` : `${name} - Copy`;
+    const ok = await ask({
+      title: one ? `“${name}” is already in ${basename(parent(taken[0]) ?? "")}` : `${plural(taken.length, "item")} already have their name taken where they were`,
+      message: `Ferret can restore ${one ? "it" : "them"} next to what's there now, under ${one ? "a new name" : "new names"} like “${copyName}”. Nothing there is replaced.`,
+      confirmLabel: "Keep both",
+    });
+    if (ok === null) return;
+  }
   try {
     const u = await tracked(withAdmin(
       () => runJob(api.shellOp({ kind: "restore", items }, false)),
@@ -787,9 +838,26 @@ export async function openInVscode(path: string) {
 }
 
 export async function copyPaths(paths: string[], quoted = true) {
-  const text = paths.map((p) => (quoted ? `"${p}"` : p)).join("\r\n");
-  await navigator.clipboard.writeText(text);
+  await copyText(paths.map((p) => (quoted ? `"${p}"` : p)).join("\r\n"));
   toast(paths.length === 1 ? "Path copied" : `${paths.length} paths copied`);
+}
+
+/** Puts text on the clipboard, which replaces any files cut or copied there. */
+export async function copyText(text: string) {
+  await navigator.clipboard.writeText(text);
+  setUi("clipboard", null);
+}
+
+/** Drops the "cut" look once the cut items are no longer on the clipboard (something else was
+ *  copied, here or in another app). Runs when the window gets the focus back. */
+export async function syncClipboard() {
+  const mine = ui.clipboard;
+  if (!mine) return;
+  const clip = await api.clipboardReadFiles().catch(() => undefined);
+  if (clip === undefined || ui.clipboard !== mine) return;
+  const same = !!clip && clip.cut === mine.cut && clip.paths.length === mine.paths.length
+    && mine.paths.every((p) => clip.paths.some((q) => samePath(p, q)));
+  if (!same) setUi("clipboard", null);
 }
 
 export async function showNativeMenu(t: Tab, paths: string[], x: number, y: number) {

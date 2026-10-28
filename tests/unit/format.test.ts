@@ -40,6 +40,9 @@ describe("kinds and type labels", () => {
   });
   it("names unknown types after their extension", () => {
     expect(typeLabel(entry("data.zzz"))).toBe("ZZZ file");
+    expect(typeLabel(entry("shot.png"))).toBe("PNG image");
+    expect(typeLabel(entry("photo.jpg"))).toBe("JPEG image");
+    expect(typeLabel(entry("clip.webm"))).toBe("WEBM video");
     expect(typeLabel(entry("README"))).toBe("File");
   });
 });

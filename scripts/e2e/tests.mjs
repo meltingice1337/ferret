@@ -233,7 +233,7 @@ export const tests = [
       assert(icon === "1", `no copy icon on hover (opacity ${icon})`);
       await t.c.send("Input.dispatchMouseEvent", { type: "mousePressed", x: at.x, y: at.y, button: "left", clickCount: 1 });
       await t.c.send("Input.dispatchMouseEvent", { type: "mouseReleased", x: at.x, y: at.y, button: "left", clickCount: 1 });
-      await t.c.waitFor(`document.querySelector(".pv-copied")?.textContent === "Copied"`, { what: "“Copied” by the pointer" });
+      await t.c.waitFor(`document.querySelector(".pv-copied")?.textContent === "Copied"`, { what: "“Copied” next to the path" });
       const copied = execSync(`powershell -NoProfile -Command "Get-Clipboard"`).toString().trim();
       assert(copied === t.p("docs", "notes.txt"), `the clipboard has “${copied}”`);
       await t.c.waitFor(`!document.querySelector(".pv-copied")`, { timeoutMs: 3000, what: "“Copied” to go away" });

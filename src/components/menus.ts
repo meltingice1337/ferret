@@ -12,7 +12,7 @@ import {
   toggleFavorite, ui, updateView, type MenuItem, type Tab,
 } from "../lib/state";
 import {
-  compress, copyPaths, copyToClipboard, deleteItems, duplicate, emptyBin, extractSmart, extractTo, newFile, newFolder,
+  compress, copyPaths, copyText, copyToClipboard, deleteItems, duplicate, emptyBin, extractSmart, extractTo, newFile, newFolder,
   NEW_FILE_TYPES, openFile, openInVscode, openTerminal, paste, purgeFromBin, realPath, redo, redoLabel, restoreFromBin,
   showNativeMenu, startRename, targetsOf, transferTo, transferWithPicker, undo, undoLabel, visibleEntries, zipNameFor,
 } from "../lib/ops";
@@ -164,7 +164,7 @@ export function itemMenu(t: Tab, e: Entry, targets: Entry[], x: number, y: numbe
   // --- paths & places ---
   items.push(
     { label: multi ? "Copy as paths" : "Copy as path", icon: Hash, shortcut: "Ctrl+Shift+C", action: () => copyPaths(paths) },
-    { label: multi ? "Copy names" : "Copy name", icon: Copy, action: () => navigator.clipboard.writeText(targets.map((x) => x.name).join("\r\n")) },
+    { label: multi ? "Copy names" : "Copy name", icon: Copy, action: () => copyText(targets.map((x) => x.name).join("\r\n")) },
   );
   if (single && !archived) {
     items.push({ label: isFavorite(e.path) ? "Remove from favorites" : "Add to favorites", icon: Star, shortcut: "Ctrl+D", action: () => toggleFavorite(e.path, e.isDir) });
@@ -289,7 +289,7 @@ function binItemMenu(t: Tab, e: Entry, targets: Entry[]): MenuItem[] {
     { label: "Delete permanently", icon: Trash2, shortcut: "Del", danger: true, action: () => purgeFromBin(paths) },
     { separator: true },
     { label: targets.length > 1 ? "Copy original paths" : "Copy original path", icon: Hash, action: () => copyPaths(originals) },
-    { label: targets.length > 1 ? "Copy names" : "Copy name", icon: Copy, action: () => navigator.clipboard.writeText(targets.map((x) => x.name).join("\r\n")) },
+    { label: targets.length > 1 ? "Copy names" : "Copy name", icon: Copy, action: () => copyText(targets.map((x) => x.name).join("\r\n")) },
   );
   return items;
 }

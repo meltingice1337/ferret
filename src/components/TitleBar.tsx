@@ -27,10 +27,38 @@ export default function TitleBar() {
     onCleanup(() => window.removeEventListener("resize", sync));
   });
 
-  // Keep the active tab visible when it changes or the strip overflows.
-  createEffect(on(() => [activeId(), tabs().length], () => {
-    requestAnimationFrame(() => strip?.querySelector<HTMLElement>(".tab.active")?.scrollIntoView({ inline: "nearest", block: "nearest" }));
-  }));
+  // Keep the active tab visible when it changes, or the strip gets narrower.
+  const showActive = () => {
+    const el = strip?.querySelector<HTMLElement>(".tab.active");
+    if (!el) return;
+    const s = strip.getBoundingClientRect(), r = el.getBoundingClientRect();
+    if (r.left < s.left) strip.scrollLeft -= s.left - r.left;
+    else if (r.right > s.right) strip.scrollLeft += Math.min(r.right - s.right, r.left - s.left);
+  };
+  createEffect(on(() => [activeId(), tabs().length], () => requestAnimationFrame(showActive)));
+
+  /** Keys on a focused tab: ←/→ (Home/End) open the next tab and keep the focus on the strip,
+   *  Enter goes to its files, Delete closes it. */
+  const tabKey = (e: KeyboardEvent, i: number) => {
+    if (e.ctrlKey || e.altKey || e.metaKey) return;
+    const list = tabs();
+    const to = e.key === "ArrowRight" ? (i + 1) % list.length : e.key === "ArrowLeft" ? (i - 1 + list.length) % list.length
+      : e.key === "Home" ? 0 : e.key === "End" ? list.length - 1 : -1;
+    const focusActive = () => requestAnimationFrame(() => strip.querySelector<HTMLElement>(".tab.active")?.focus());
+    if (to >= 0) {
+      e.preventDefault();
+      setActiveId(list[to].id);
+      persistSession();
+      focusActive();
+    } else if (e.key === "Enter" || e.key === " ") {
+      e.preventDefault();
+      fileList()?.focus({ preventScroll: true });
+    } else if (e.key === "Delete" && list.length > 1) {
+      e.preventDefault();
+      closeTab(list[i].id);
+      focusActive();
+    }
+  };
 
   const tabMenu = (e: MouseEvent, id: number, path: string) => {
     e.preventDefault();
@@ -48,7 +76,7 @@ export default function TitleBar() {
   return (
     <div class="titlebar" data-tauri-drag-region>
       <div class="tabs" data-tauri-drag-region>
-        <div class="tabs-scroll" ref={(el) => {
+        <div class="tabs-scroll" role="tablist" ref={(el) => {
           strip = el;
           const update = () => {
             el.classList.toggle("more-left", el.scrollLeft > 2);
@@ -56,7 +84,7 @@ export default function TitleBar() {
             setOverflowing(el.scrollWidth > el.clientWidth + 2);
           };
           el.addEventListener("scroll", update);
-          new ResizeObserver(() => requestAnimationFrame(update)).observe(el);
+          new ResizeObserver(() => requestAnimationFrame(() => { showActive(); update(); })).observe(el);
           new MutationObserver(update).observe(el, { childList: true });
         }} data-tauri-drag-region
           onWheel={(e) => { if (Math.abs(e.deltaY) > Math.abs(e.deltaX)) { strip.scrollLeft += e.deltaY; e.preventDefault(); } }}>
@@ -65,6 +93,11 @@ export default function TitleBar() {
               <div
                 class="tab"
                 classList={{ active: tab.id === activeId() }}
+                // Tab reaches the open tab; the arrow keys go through the others, Delete closes one.
+                role="tab"
+                aria-selected={tab.id === activeId()}
+                tabIndex={tab.id === activeId() ? 0 : -1}
+                onKeyDown={(e) => tabKey(e, i())}
                 title={paneOf(tab).p}
                 data-index={i()}
                 data-tab-id={tab.id}
@@ -87,7 +120,7 @@ export default function TitleBar() {
                 </Show>
                 <span class="tab-label">{isSearch(paneOf(tab).p) ? searchTitle(paneOf(tab).p) : basename(paneOf(tab).p) || "…"}</span>
                 <Show when={tab.split[0]()}><span class="tab-split" title="Split view"><Columns2 size={12} /></span></Show>
-                <button class="tab-close" title="Close tab (Ctrl+W)"
+                <button class="tab-close" title="Close tab (Ctrl+W)" tabIndex={-1}
                   onMouseDown={(e) => e.stopPropagation()}
                   onClick={() => closeTab(tab.id)}><X size={13} /></button>
               </div>
@@ -113,11 +146,11 @@ export default function TitleBar() {
         </span>
       </Show>
       <div class="winctl">
-        <button title="Minimize" onClick={() => win.minimize()}><Minus size={15} /></button>
-        <button title={maximized() ? "Restore down" : "Maximize"} onClick={() => win.toggleMaximize()}>
+        <button title="Minimize" tabIndex={-1} onClick={() => win.minimize()}><Minus size={15} /></button>
+        <button title={maximized() ? "Restore down" : "Maximize"} tabIndex={-1} onClick={() => win.toggleMaximize()}>
           <Show when={maximized()} fallback={<Square size={12} />}><Copy size={12} class="flip-x" /></Show>
         </button>
-        <button class="close" title="Close" onClick={() => win.close()}><X size={16} /></button>
+        <button class="close" title="Close" tabIndex={-1} onClick={() => win.close()}><X size={16} /></button>
       </div>
     </div>
   );

@@ -81,6 +81,25 @@ fn search_fuzzy_only_when_scarce() {
 }
 
 #[test]
+fn search_ignores_accents() {
+    let ix = build(
+        r"C:\",
+        &[r"qa\café ñ 日本語 файл.txt", r"qa\cafe menu.txt", r"trips\München\", r"trips\Kraków 2024.jpg", r"docs\Straße.pdf", r"docs\notes.txt"],
+    );
+    // Typed without accents: the accented names are found too, under the plain ones.
+    let r = names(&ix, "cafe");
+    assert_eq!(r, vec![r"C:\qa\cafe menu.txt", r"C:\qa\café ñ 日本語 файл.txt"]);
+    assert_eq!(names(&ix, "munchen"), vec![r"C:\trips\München"]);
+    assert_eq!(names(&ix, "krakow ext:jpg"), vec![r"C:\trips\Kraków 2024.jpg"]);
+    assert_eq!(names(&ix, "strasse"), vec![r"C:\docs\Straße.pdf"]);
+    // In a folder, and with the accent typed (exact, and other accents of the same letter).
+    assert_eq!(names(&ix, r"cafe in:C:\qa"), vec![r"C:\qa\cafe menu.txt", r"C:\qa\café ñ 日本語 файл.txt"]);
+    assert_eq!(names(&ix, "café"), vec![r"C:\qa\café ñ 日本語 файл.txt"]);
+    // Other scripts are left alone.
+    assert_eq!(names(&ix, "файл"), vec![r"C:\qa\café ñ 日本語 файл.txt"]);
+}
+
+#[test]
 fn search_filters() {
     let ix = build(r"C:\", TREE);
     assert_eq!(names(&ix, "type:folder node"), vec![r"C:\dev\node", r"C:\dev\node_modules", r"C:\dev\my-node-app"]);

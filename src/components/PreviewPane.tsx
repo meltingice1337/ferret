@@ -1,8 +1,8 @@
 import { Check, ChevronLeft, ChevronRight, Copy, ExternalLink, Maximize2, X } from "../lib/icons";
 import { createEffect, createMemo, createSignal, For, on, onCleanup, onMount, Show } from "solid-js";
 import { Portal } from "solid-js/web";
-import { formatDate, formatSize, kindOf, typeLabel } from "../lib/format";
-import { openFile } from "../lib/ops";
+import { formatDate, formatSize, kindOf, plural, typeLabel } from "../lib/format";
+import { copyText, openFile } from "../lib/ops";
 import { basename, isRecycle, pathKey } from "../lib/path";
 import { fileList, activeTab, openEntry, persistSession, previewSpace, setUi, ui } from "../lib/state";
 import type { Entry } from "../lib/types";
@@ -43,7 +43,7 @@ function folderEntry(path: string): Entry {
   return { name: isRecycle(path) ? "Recycle Bin" : basename(path), path, isDir: true, isSymlink: false, hidden: false, size: 0, modified: null, created: null, ext: "", inArchive: false };
 }
 
-/** The details' path: copied on click, with "Copied" shown by the pointer for a moment. */
+/** The details' path: copied on click, with "Copied" shown next to it for a moment. */
 function CopyPath(props: { path: string }) {
   const [copied, setCopied] = createSignal<{ x: number; y: number; ok: boolean } | null>(null);
   let timer: number | undefined;
@@ -51,9 +51,11 @@ function CopyPath(props: { path: string }) {
   // Another item: nothing left over from copying the last one.
   createEffect(on(() => props.path, () => { clearTimeout(timer); setCopied(null); }, { defer: true }));
   const copy = (e: MouseEvent) => {
-    // Kept inside the window (the pane sits at its right edge).
-    const at = { x: Math.min(Math.max(e.clientX, 50), window.innerWidth - 50), y: e.clientY - 10 };
-    navigator.clipboard.writeText(props.path).then(() => true, () => false).then((ok) => {
+    // On the clicked line, left of the path (over its "Path" label), so it doesn't cover the
+    // values around it.
+    const r = (e.currentTarget as HTMLElement).getBoundingClientRect();
+    const at = { x: Math.max(r.left - 8, 70), y: e.clientY };
+    copyText(props.path).then(() => true, () => false).then((ok) => {
       setCopied({ ...at, ok });
       clearTimeout(timer);
       timer = window.setTimeout(() => setCopied(null), 1200);
@@ -100,14 +102,37 @@ function MetaList(props: { entry: Entry; extra: Meta[] }) {
   );
 }
 
+/** Several items selected: how many and how big, shown above the one being previewed. */
+function useSelectionSummary() {
+  return createMemo(() => {
+    const t = activeTab();
+    const sel = t?.selection[0]() ?? [];
+    if (sel.length < 2) return null;
+    const keys = new Set(sel.map(pathKey));
+    let size = 0, files = 0;
+    for (const e of t.entries[0]()) if (!e.isDir && keys.has(pathKey(e.path))) { files++; size += e.size; }
+    const total = files ? ` · ${formatSize(size)}${files < sel.length ? ` in ${plural(files, "file")}` : ""}` : "";
+    return `${plural(sel.length, "item")} selected${total}`;
+  });
+}
+
 export default function PreviewPane() {
   const focused = useFocusedEntry(140);
+  const summary = useSelectionSummary();
   const shown = () => focused() ?? (activeTab() ? folderEntry(activeTab().p) : null);
   const [meta, setMeta] = createSignal<Meta[]>([]);
   // A different item eases in once it's on screen. Pictures fade by themselves once decoded
   // (ImageView), since the previous one stays up until then.
   let body: HTMLDivElement | undefined;
   const swapped = (image: boolean) => !image && enter(body, "lift", 180, "preview");
+  // The next item can take away what had the focus here (a file's Open button, when a folder
+  // comes next), which would leave it on nothing: it stays in the pane instead.
+  let pane!: HTMLElement;
+  let had: Element | null = null;
+  createEffect(on(shown, () => requestAnimationFrame(() => {
+    const a = document.activeElement;
+    if (had && !had.isConnected && (!a || a === document.body)) pane.focus({ preventScroll: true });
+  }), { defer: true }));
 
   const startResize = (e: MouseEvent) => {
     e.preventDefault();
@@ -119,8 +144,9 @@ export default function PreviewPane() {
   };
 
   return (
-    <aside class="preview" style={{ width: `${previewSpace()}px` }}>
+    <aside class="preview" ref={pane} tabIndex={-1} style={{ width: `${previewSpace()}px` }} onFocusIn={(e) => (had = e.target as Element)}>
       <div class="preview-resizer" onMouseDown={startResize} />
+      <Show when={summary()}><div class="pv-multi" role="status">{summary()}</div></Show>
       <Show when={shown()}>
         {(e) => (
           <>

@@ -3,8 +3,8 @@ import { createEffect, createMemo, createResource, createSignal, For, Index, on,
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { api, fileUrl, thumbUrl } from "../../lib/api";
 import { formatDate, formatSize, languageName, plural, typeLabel } from "../../lib/format";
-import { isRecycle, parent } from "../../lib/path";
-import { fsTick, isDark } from "../../lib/state";
+import { isRecycle, isWsl, parent } from "../../lib/path";
+import { activeTab, fsTick, isDark } from "../../lib/state";
 import { enter } from "../../lib/motion";
 import type { Entry, VideoInfo } from "../../lib/types";
 import FileIcon from "../FileIcon";
@@ -50,7 +50,7 @@ export function CodeView(props: { path: string; name: string; ext: string; setMe
   const lang = () => langFor(props.name, props.ext);
   // The language loads while the file is read, not after.
   prepare(lang());
-  const [data] = createResource(() => props.path, async (p) => (props.text !== undefined ? { text: props.text, truncated: false, binary: false, encoding: "UTF-8", size: props.text.length } : api.readText(p, props.large ? 4 * 1024 * 1024 : 1024 * 1024)));
+  const [data] = createResource(() => props.path, async (p) => (props.text !== undefined ? { text: props.text, truncated: false, binary: false, encoding: "UTF-8", size: props.text.length, lines: null } : api.readText(p, props.large ? 4 * 1024 * 1024 : 1024 * 1024)));
   const [html, setHtml] = createSignal<string | null>(null);
   // The text shows plain only when the colors are slow, so it doesn't flash plain first.
   const [late, setLate] = createSignal(false);
@@ -63,9 +63,9 @@ export function CodeView(props: { path: string; name: string; ext: string; setMe
     const d = data();
     if (!d || d.binary) return;
     const body = d.text.replace(/\r?\n$/, "");
-    const lines = body.split("\n").length;
+    const lines = body ? body.split("\n").length : 0;
     props.setMeta([
-      { label: "Lines", value: `${lines.toLocaleString()}${d.truncated ? "+" : ""}` },
+      { label: "Lines", value: d.lines ? d.lines.toLocaleString() : `${lines.toLocaleString()}${d.truncated ? "+" : ""}` },
       { label: "Encoding", value: d.encoding },
       { label: "Language", value: languageName(props.ext) || prettyLang(lang()) },
     ]);
@@ -413,6 +413,9 @@ function videoMeta(v: VideoInfo): Meta[] {
 export function VideoView(props: { path: string; setMeta: SetMeta; large?: boolean }) {
   const [failed, setFailed] = createSignal(false);
   const [started, setStarted] = createSignal(!!props.large);
+  // Quick Look plays a video right away, without sound until it's turned on; one started with
+  // its Play button has its sound.
+  let clicked = false;
   createEffect(on(() => props.path, () => { setFailed(false); setStarted(!!props.large); }));
   // The details come from Windows, so they show before the video plays. A video Windows can't
   // read gets the player's (size and length) once it plays, if the player can.
@@ -426,13 +429,14 @@ export function VideoView(props: { path: string; setMeta: SetMeta; large?: boole
       </div>
     }>
       <Show when={started()} fallback={
-        <button class="pv-poster" onClick={() => setStarted(true)} title="Play">
+        <button class="pv-poster" onClick={() => { clicked = true; setStarted(true); }} title="Play">
           <img src={thumbUrl(props.path, 512)} alt="" onError={(e) => (e.currentTarget.style.opacity = "0")} />
           <span class="pv-play"><Play size={26} fill="currentColor" /></span>
         </button>
       }>
         <video
           class="pv-video"
+          ref={(el) => { if (!clicked) el.muted = true; }}
           src={fileUrl(props.path)}
           controls
           autoplay
@@ -451,14 +455,31 @@ export function VideoView(props: { path: string; setMeta: SetMeta; large?: boole
 export function AudioView(props: { path: string; setMeta: SetMeta; large?: boolean }) {
   const [cover, setCover] = createSignal(true);
   createEffect(on(() => props.path, () => setCover(true)));
+  // Tags (title, artist, album…) as Windows reads them; the player's length until they come.
+  const [tags] = createResource(() => props.path, (p) => api.audioInfo(p).catch(() => null));
+  createEffect(() => {
+    const t = tags();
+    if (!t) return;
+    const rows: Meta[] = [];
+    const add = (label: string, value: string | number) => { if (value) rows.push({ label, value: String(value) }); };
+    add("Title", t.title);
+    add("Artist", t.artist);
+    add("Album", t.album);
+    if (t.albumArtist !== t.artist) add("Album artist", t.albumArtist);
+    add("Year", t.year);
+    add("Track", t.track);
+    if (t.durationMs) add("Duration", fmtDuration(t.durationMs / 1000));
+    if (t.bitrate) add("Bitrate", bitrate(t.bitrate));
+    if (rows.length) props.setMeta(rows);
+  });
   return (
     <div class="pv-audio">
       <Show when={cover()} fallback={<div class="pv-audio-icon"><FileIcon entry={{ isDir: false, ext: "mp3", isSymlink: false }} size={72} /></div>}>
         <img class="pv-cover" src={thumbUrl(props.path, 512)} alt="" onError={() => setCover(false)}
           onLoad={(e) => e.currentTarget.naturalWidth <= 1 && setCover(false)} />
       </Show>
-      <audio src={fileUrl(props.path)} controls autoplay={props.large}
-        onLoadedMetadata={(e) => props.setMeta([{ label: "Duration", value: fmtDuration(e.currentTarget.duration) }])} />
+      <audio src={fileUrl(props.path)} controls
+        onLoadedMetadata={(e) => !tags()?.durationMs && props.setMeta([{ label: "Duration", value: fmtDuration(e.currentTarget.duration) }])} />
     </div>
   );
 }
@@ -669,7 +690,10 @@ export function FontView(props: { path: string; name: string }) {
 // ---------- folders ----------
 
 export function FolderView(props: { path: string; setMeta: SetMeta; onOpen: (p: string) => void }) {
-  const [listing] = createResource(() => [props.path, fsTick()] as const, ([p]) => api.listDir(p));
+  // A distro picked in \\wsl.localhost may not be running, and reading it would start it: only
+  // opening it does that (as in Explorer).
+  const distroFromOutside = () => isWsl(props.path) && !parent(props.path) && !isWsl(activeTab().p);
+  const [listing] = createResource(() => !distroFromOutside() && ([props.path, fsTick()] as const), ([p]) => api.listDir(p));
   const summary = createMemo(() => {
     const l = listing();
     if (!l) return null;
@@ -692,7 +716,7 @@ export function FolderView(props: { path: string; setMeta: SetMeta; onOpen: (p: 
   });
   return (
     <Show when={!listing.error} fallback={<ErrorNote>{String(listing.error)}</ErrorNote>}>
-      <Show when={summary()} fallback={<Spinner />}>
+      <Show when={summary()} fallback={distroFromOutside() ? <div class="pv-folder-head">Open the distro to see what's inside</div> : <Spinner />}>
         {(s) => (
           <div class="pv-folder">
             <Show when={s().images.length}>
@@ -815,19 +839,50 @@ export function NoPreview(props: { path: string; entry: Entry; large?: boolean }
 
 // ---------- Word documents ----------
 
-/** .docx rendered as pages (docx-preview, loaded on first use), scaled to fit the pane. */
+/** Page margin left at each side when a narrow pane trims them (px at 100%). */
+const TRIMMED_MARGIN = 24;
+
+/** .docx rendered as pages (docx-preview, loaded on first use), scaled to fit the pane.
+ *  A narrow pane trims the pages' side margins (the lines break where they did) so the text is
+ *  bigger, and Ctrl+wheel zooms. */
 export function DocxView(props: { path: string; entry: Entry; setMeta: SetMeta; large?: boolean }) {
   let box!: HTMLDivElement;
   let host!: HTMLDivElement;
   const [state, setState] = createSignal<"loading" | "ready" | "error">("loading");
   const [zoom, setZoom] = createSignal(1);
+  /** Ctrl+wheel's factor on top of the fitted size. */
+  const [scale, setScale] = createSignal(1);
+  /** Each page's own width and side margins, as docx-preview laid it out. */
+  const layout = new WeakMap<HTMLElement, { w: number; l: number; r: number }>();
   const fit = () => {
-    const page = host?.querySelector<HTMLElement>("section.docx");
-    if (!page || !box) return;
-    setZoom(Math.min(props.large ? 1.25 : 1, (box.clientWidth - 24) / page.offsetWidth));
+    const pages = [...(host?.querySelectorAll<HTMLElement>("section.docx") ?? [])];
+    if (!pages.length || !box) return;
+    for (const s of pages) {
+      if (layout.has(s)) continue;
+      const cs = getComputedStyle(s);
+      layout.set(s, { w: s.offsetWidth, l: parseFloat(cs.paddingLeft) || 0, r: parseFloat(cs.paddingRight) || 0 });
+    }
+    const room = box.clientWidth - 24;
+    const first = layout.get(pages[0])!;
+    const trim = !props.large && room / first.w < 0.6;
+    for (const s of pages) {
+      const o = layout.get(s)!;
+      const l = trim ? Math.min(o.l, TRIMMED_MARGIN) : o.l, r = trim ? Math.min(o.r, TRIMMED_MARGIN) : o.r;
+      s.style.paddingLeft = `${l}px`;
+      s.style.paddingRight = `${r}px`;
+      s.style.width = `${o.w - o.l - o.r + l + r}px`;
+    }
+    setZoom(Math.min(props.large ? 1.25 : 1, room / pages[0].offsetWidth) * scale());
+  };
+  const wheel = (e: WheelEvent) => {
+    if (!e.ctrlKey || state() !== "ready") return;
+    e.preventDefault();
+    setScale((s) => Math.max(0.5, Math.min(4, s * (e.deltaY < 0 ? 1.15 : 1 / 1.15))));
+    fit();
   };
   createEffect(on(() => props.path, async (p) => {
     setState("loading");
+    setScale(1);
     host.replaceChildren();
     try {
       const [{ renderAsync }, data] = await Promise.all([
@@ -854,17 +909,20 @@ export function DocxView(props: { path: string; entry: Entry; setMeta: SetMeta; 
   onCleanup(() => ro.disconnect());
   return (
     <Show when={state() !== "error"} fallback={<ShellThumbView path={props.path} entry={props.entry} large={props.large} />}>
-      <div class="pv-docx" ref={(el) => { box = el; ro.observe(el); }}
-        onClick={(e) => {
-          // Links must never navigate the app itself.
-          const a = (e.target as HTMLElement).closest("a");
-          if (!a) return;
-          e.preventDefault();
-          const href = a.getAttribute("href") ?? "";
-          if (/^https?:\/\//i.test(href)) openUrl(href).catch(() => {});
-        }}>
-        <Show when={state() === "loading"}><Spinner /></Show>
-        <div class="pv-docx-host" ref={host} style={{ zoom: zoom() }} />
+      <div class="pv-docx-frame">
+        <div class="pv-docx" ref={(el) => { box = el; ro.observe(el); }} onWheel={wheel}
+          onClick={(e) => {
+            // Links must never navigate the app itself.
+            const a = (e.target as HTMLElement).closest("a");
+            if (!a) return;
+            e.preventDefault();
+            const href = a.getAttribute("href") ?? "";
+            if (/^https?:\/\//i.test(href)) openUrl(href).catch(() => {});
+          }}>
+          <Show when={state() === "loading"}><Spinner /></Show>
+          <div class="pv-docx-host" ref={host} style={{ zoom: zoom() }} />
+        </div>
+        <Show when={scale() !== 1}><div class="pv-zoom">{Math.round(zoom() * 100)}%</div></Show>
       </div>
     </Show>
   );

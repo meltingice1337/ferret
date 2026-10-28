@@ -3,7 +3,7 @@ import { createResource, createSignal, For, type JSX, Show } from "solid-js";
 import { api } from "../lib/api";
 import { formatDate } from "../lib/format";
 import {
-  applyAppearance, friendly, persistSettings, places, reresolveAll, setSettings, setUi, settings, toast, ui,
+  applyAppearance, friendly, newTab, persistSettings, places, reresolveAll, setSettings, setUi, settings, toast, ui,
 } from "../lib/state";
 import { SECTIONS, setPlaceShown, setSectionShown } from "./Sidebar";
 import type { GroupBy, ProfileName, Settings, SortBy, ViewSettings } from "../lib/types";
@@ -127,7 +127,7 @@ function Appearance() {
         <Seg value={settings.density} onChange={(v) => appearance("density", v)}
           options={[{ value: "comfortable", label: "Comfortable" }, { value: "compact", label: "Compact" }]} />
       </Field>
-      <Field label="Animations" hint="Short transitions between previews, folders and tabs. Also off when Windows' animation effects are">
+      <Field label="Animations" hint="Short transitions between previews, folders and tabs. Also off when Windows' animation effects are off">
         <Toggle checked={settings.animations} onChange={(v) => { setSettings("animations", v); persistSettings(); }} />
       </Field>
     </Card>
@@ -305,7 +305,7 @@ const KEYS: [string, string][] = [
   // Files
   ["Space", "Quick Look"], ["Alt+P", "Preview pane"], ["F2", "Rename"], ["Ctrl+Shift+N", "New folder"],
   ["Del / Shift+Del", "Recycle / delete permanently"], ["Ctrl+Z / Ctrl+Y", "Undo / redo"],
-  ["Alt+Enter", "Properties"], ["Ctrl+Shift+C", "Copy path"], ["Ctrl+D", "Toggle favorite"],
+  ["Alt+Enter", "Properties"], ["Ctrl+Shift+C", "Copy path"], ["Ctrl+D", "Pin the selected item (or this folder) to favorites"],
   // View
   ["Ctrl+1 / Ctrl+2", "List / grid"], ["Ctrl+G", "Cycle grouping"], ["Ctrl+H", "Show hidden"],
   ["Ctrl+wheel", "Grid icon size"], ["Ctrl+,", "Settings"],
@@ -339,7 +339,7 @@ function About() {
       </div>
       <div class="about-actions">
         <button class="btn" title="Ferret's log files, for tracking down problems"
-          onClick={() => api.openLogFolder().catch((e) => toast(String(e), "error"))}>Open logs</button>
+          onClick={() => api.logFolder().then((dir) => { setUi("settingsOpen", false); newTab(dir); }).catch((e) => toast(String(e), "error"))}>Open logs</button>
         <Show when={updater.phase === "available"} fallback={
           <button class="btn" disabled={updater.phase !== "idle" && updater.phase !== "error"} onClick={() => checkForUpdate(true)}>Check for updates</button>
         }>

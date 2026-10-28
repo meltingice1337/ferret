@@ -1,10 +1,11 @@
-import { ArrowLeft, ArrowRight, ArrowUp, ChevronRight, Folder, FolderOpen, ListFilter, PanelLeft, RotateCw, Search, Shapes, Star, X } from "../lib/icons";
-import { createEffect, createMemo, createSignal, For, on, Show } from "solid-js";
+import { AppWindow, ArrowLeft, ArrowRight, ArrowUp, ChevronRight, Copy, Folder, FolderOpen, ListFilter, PanelLeft, Plus, RotateCw, Search, Shapes, Star, X } from "../lib/icons";
+import { createEffect, createMemo, createSignal, For, on, onCleanup, Show } from "solid-js";
 import { api } from "../lib/api";
-import { isRecycle, isWsl, parent, segments } from "../lib/path";
+import { basename, isRecycle, isVirtual, isWsl, parent, segments } from "../lib/path";
+import { copyPaths } from "../lib/ops";
 import {
-  fileList, activeTab, goBack, goForward, goUp, isFavorite, navigate, openMenu, refresh, setUi, sidebarDocked, toast,
-  toggleFavorite, ui, winWidth,
+  fileList, activeTab, goBack, goForward, goToHistory, goUp, isFavorite, navigate, newTab, openMenu, openNewWindow, refocusList, refresh, setUi,
+  sidebarDocked, toast, toggleFavorite, ui, winWidth,
 } from "../lib/state";
 import FileIcon from "./FileIcon";
 import { typeIcon } from "./typeIcons";
@@ -14,6 +15,21 @@ export default function Toolbar() {
   const tab = () => activeTab();
   const canBack = () => tab().hIndex[0]() > 0;
   const canFwd = () => tab().hIndex[0]() < tab().history[0]().length - 1;
+  /** The folders Back (dir -1) or Forward (1) would go through, nearest first, as in Explorer. */
+  const historyMenu = (e: MouseEvent, dir: -1 | 1) => {
+    e.preventDefault();
+    const t = tab();
+    const h = t.history[0]();
+    const steps: number[] = [];
+    for (let i = t.hIndex[0]() + dir; i >= 0 && i < h.length && steps.length < 15; i += dir) steps.push(i);
+    if (!steps.length) return;
+    const r = (e.currentTarget as HTMLElement).getBoundingClientRect();
+    // Each with the folder it's in, so two folders of the same name can be told apart.
+    openMenu(r.left, r.bottom + 4, steps.map((i) => {
+      const up = parent(h[i]);
+      return { label: basename(h[i]) || h[i], detail: up ? basename(up) || up : undefined, title: h[i], icon: Folder, action: () => goToHistory(t, i) };
+    }));
+  };
 
   return (
     <div class="toolbar">
@@ -24,14 +40,16 @@ export default function Toolbar() {
             <PanelLeft size={16} />
           </button>
         </Show>
-        <button class="icon-btn" disabled={!canBack()} title="Back (Alt+←)" onClick={() => goBack(tab())}><ArrowLeft size={16} /></button>
-        <button class="icon-btn" disabled={!canFwd()} title="Forward (Alt+→)" onClick={() => goForward(tab())}><ArrowRight size={16} /></button>
+        <button class="icon-btn" disabled={!canBack()} title="Back (Alt+←) · right-click for history" onClick={() => goBack(tab())}
+          onContextMenu={(e) => historyMenu(e, -1)}><ArrowLeft size={16} /></button>
+        <button class="icon-btn" disabled={!canFwd()} title="Forward (Alt+→) · right-click for history" onClick={() => goForward(tab())}
+          onContextMenu={(e) => historyMenu(e, 1)}><ArrowRight size={16} /></button>
         <button class="icon-btn" disabled={!parent(tab().p)} title="Up (Alt+↑)" onClick={() => goUp(tab())}><ArrowUp size={16} /></button>
-        <button class="icon-btn" title="Refresh (F5)" onClick={() => refresh(tab())}>
+        <button class="icon-btn refresh" title="Refresh (F5)" onClick={() => refresh(tab())}>
           <RotateCw size={15} classList={{ spin: tab().loading[0]() }} />
         </button>
         <button class="icon-btn star" classList={{ on: isFavorite(tab().p) }}
-          title={isFavorite(tab().p) ? "Remove from favorites (Ctrl+D)" : "Add to favorites (Ctrl+D)"}
+          title={isFavorite(tab().p) ? "Remove this folder from favorites" : "Add this folder to favorites (Ctrl+D with nothing selected)"}
           onClick={() => toggleFavorite(tab().p, true)}>
           <Star size={15} fill={isFavorite(tab().p) ? "currentColor" : "none"} />
         </button>
@@ -44,6 +62,10 @@ export default function Toolbar() {
     </div>
   );
 }
+
+/** Keys the path and filter boxes let through to the window: F6, and the tab and window shortcuts. */
+const windowKey = (e: KeyboardEvent) =>
+  e.key === "F6" || ((e.ctrlKey || e.metaKey) && ["t", "w", "n", "tab"].includes(e.key.toLowerCase()));
 
 /** Width of the "…" button that holds folded folders (incl. spacing). */
 const FOLD_W = 30;
@@ -91,6 +113,17 @@ function Breadcrumbs() {
     });
   }));
 
+  const crumbMenu = (e: MouseEvent, path: string) => {
+    if (isVirtual(path)) return;
+    openMenu(e.clientX, e.clientY, [
+      { label: "Open in new tab", icon: Plus, action: () => newTab(path) },
+      { label: "Open in new window", icon: AppWindow, action: () => openNewWindow(path) },
+      { separator: true },
+      { label: "Copy path", icon: Copy, action: () => copyPaths([path], false) },
+      { label: isFavorite(path) ? "Remove from favorites" : "Add to favorites", icon: Star, action: () => toggleFavorite(path, true) },
+    ]);
+  };
+
   const siblingMenu = async (e: MouseEvent, dir: string) => {
     e.stopPropagation();
     const r = (e.currentTarget as HTMLElement).getBoundingClientRect();
@@ -114,7 +147,17 @@ function Breadcrumbs() {
     <div class="crumbs" ref={(el) => {
       bar = el;
       new ResizeObserver(() => fit()).observe(el);
-    }} onClick={() => setUi("editingPath", true)} title="Click to type a path (Ctrl+L)">
+    }} onClick={() => setUi("editingPath", true)} title="Click to type a path (Ctrl+L)"
+      onKeyDown={(e) => {
+        // ← → step along the breadcrumb, ↓ goes back to the files.
+        const btns = [...bar.querySelectorAll<HTMLElement>("button")].filter((b) => b.offsetParent);
+        const i = btns.indexOf(e.target as HTMLElement);
+        if (i < 0 || e.altKey || e.ctrlKey) return;
+        if (e.key === "ArrowLeft" || e.key === "ArrowRight") {
+          e.preventDefault();
+          btns[Math.max(0, Math.min(btns.length - 1, i + (e.key === "ArrowRight" ? 1 : -1)))].focus();
+        } else if (e.key === "ArrowDown") { e.preventDefault(); fileList()?.focus({ preventScroll: true }); }
+      }}>
       <Show when={folded() > 0}>
         <button class="crumb crumb-fold" title="Folders above" onClick={(e) => {
           e.stopPropagation();
@@ -136,7 +179,8 @@ function Breadcrumbs() {
               style={i() === segs().length - 1 && squeeze() !== null ? { "max-width": `${squeeze()}px` } : undefined}
               title={seg.path}
               data-drop={seg.path}
-              onClick={(e) => { e.stopPropagation(); navigate(tab(), seg.path); }}>
+              onClick={(e) => { e.stopPropagation(); navigate(tab(), seg.path); }}
+              onContextMenu={(e) => { e.preventDefault(); e.stopPropagation(); crumbMenu(e, seg.path); }}>
               {/* A drive shows as its letter badge (as in the sidebar), not "C:". */}
               <Show when={i() === 0 && /^[a-z]:$/i.test(seg.label)} fallback={seg.label}>
                 <span class="drive-letter" aria-label={seg.label}>{seg.label[0].toUpperCase()}</span>
@@ -160,12 +204,14 @@ function PathEditor() {
   const cache = new Map<string, { name: string; path: string }[]>();
   let input!: HTMLInputElement;
   let timer: number | undefined;
+  let gone = false;
+  onCleanup(() => { gone = true; });
 
   queueMicrotask(() => { input.focus(); input.select(); });
 
   const close = () => {
     setUi("editingPath", false);
-    requestAnimationFrame(() => { if (!ui.editingPath) fileList()?.focus({ preventScroll: true }); });
+    refocusList();
   };
 
   const suggest = (value: string) => {
@@ -217,7 +263,9 @@ function PathEditor() {
         value={text()}
         spellcheck={false}
         onInput={(e) => { setText(e.currentTarget.value); suggest(e.currentTarget.value); }}
-        onBlur={() => setTimeout(close, 120)}
+        // Late, so a click on a suggestion lands first. Only for this box: after Escape, a quick
+        // Ctrl+L opens a new one, which this one's blur must not close.
+        onBlur={() => setTimeout(() => { if (!gone && document.activeElement !== input) close(); }, 120)}
         onKeyDown={(e) => {
           const list = suggestions();
           if (e.key === "Escape") { e.preventDefault(); close(); }
@@ -231,7 +279,8 @@ function PathEditor() {
             const s = list[pick()];
             submit(s ? s.path : text());
           }
-          e.stopPropagation();
+          // F6 and Ctrl+T/W/Tab/N go on to the window (App).
+          if (!windowKey(e)) e.stopPropagation();
         }}
       />
       <Show when={suggestions().length}>
@@ -300,8 +349,14 @@ function FilterBox() {
           onBlur={() => !tab().filter[0]() && setUi("filterOpen", false)}
           onKeyDown={(e) => {
             if (e.key === "Escape") { e.preventDefault(); close(); fileList()?.focus(); }
-            if (e.key === "Enter" || e.key === "ArrowDown") { e.preventDefault(); fileList()?.focus(); }
-            e.stopPropagation();
+            if (e.key === "Enter" || e.key === "ArrowDown") {
+              e.preventDefault();
+              const files = fileList();
+              files?.focus();
+              // ↓ goes to the first match (Enter too when nothing is selected), as in a search box.
+              if (e.key === "ArrowDown" || !tab().selection[0]().length) files?.dispatchEvent(new KeyboardEvent("keydown", { key: "Home", code: "Home", bubbles: true, cancelable: true }));
+            }
+            if (!windowKey(e)) e.stopPropagation();
           }} />
         <button class="icon-btn tiny" classList={{ on: typeTokens(tab().filter[0]()).length > 0 }} title="Show only a type of file"
           onMouseDown={(e) => e.preventDefault()} onClick={typesMenu}><Shapes size={13} /></button>

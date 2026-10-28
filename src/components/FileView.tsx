@@ -7,14 +7,14 @@ import { addShellEntries, backgroundMenu, fromKeyboard, itemMenu, openKeyboardMe
 import { api, fileUrl, noteVersion, thumbUrl } from "../lib/api";
 import { beginDrag } from "../lib/drag";
 import { formatDate, formatSize, kindOf, plural, timeAgo, typeLabel } from "../lib/format";
-import { emptyBin, isCut, newFolder, renamePath, restoreFromBin, targetsOf, visibleEntries } from "../lib/ops";
+import { emptyBin, isCut, newFolder, renamePath, restoreFromBin, startRename, targetsOf, visibleEntries } from "../lib/ops";
 import { groupEntries, sortEntries, type Group } from "../lib/sortgroup";
 import { entryFilter } from "../lib/filter";
 import { isRecycle, isSearch, isWithin, pathKey, samePath, searchQuery } from "../lib/path";
 import { enter } from "../lib/motion";
 import { openSearchPalette } from "./SearchPalette";
 import { folderSizes, requestFolderSizes, sizeOrder, sizesApply, sizesEpoch, uncounted } from "../lib/foldersizes";
-import { activeTab, ask, fileList, focusPane, goUp, holdKeys, jobsRunning, promptSaveSearch, savedSearch, openEntry, openMenu, persistSettings, releaseKeys, reload, setSettings, setUi, settings, sortBy, takeTypeAhead, toast, ui, updateView, type Tab } from "../lib/state";
+import { activeTab, ask, focusPane, goUp, holdKeys, jobsRunning, promptSaveSearch, savedSearch, openEntry, openMenu, persistSettings, refocusList, releaseKeys, reload, setSettings, setUi, settings, sortBy, takeTypeAhead, toast, ui, updateView, type Tab } from "../lib/state";
 import type { Entry, ListColumn, SortBy } from "../lib/types";
 
 export { GROUP_LABELS, SORT_LABELS } from "./menus";
@@ -42,9 +42,16 @@ export function useThumbPath(entry: () => Entry) {
       const k = kindOf(e);
       return k === "image" || k === "video" ? e.path : null;
     },
-    (p) => api.archiveMaterialize(p).catch(() => null),
+    (p) => api.archiveMaterialize(p).then((file) => ({ of: p, file })).catch(() => null),
   );
-  return () => (entry().inArchive ? real() ?? null : entry().path);
+  // The resource keeps its last value when the entry changes (to one that isn't extracted, or
+  // while the next one is): only use it for the entry it was made from.
+  return () => {
+    const e = entry();
+    if (!e.inArchive) return e.path;
+    const r = real();
+    return r && r.of === e.path ? r.file : null;
+  };
 }
 
 export function Thumb(props: { entry: Entry; size: number; fallbackSize?: number }) {
@@ -114,6 +121,16 @@ export default function FileView(props: { tab: Tab }) {
   const [scrollTop, setScrollTop] = createSignal(0);
   const [band, setBand] = createSignal<null | { x0: number; y0: number; x1: number; y1: number }>(null);
   let scroller!: HTMLDivElement;
+
+  // "Always current": a search isn't a folder that can be watched, so while one is shown it asks
+  // again every few seconds (the drive index answers in milliseconds and follows every change).
+  createEffect(() => {
+    if (!found()) return;
+    const timer = window.setInterval(() => {
+      if (!document.hidden && scroller?.offsetParent && !t.renaming[0]() && !t.loading[0]()) reload(t);
+    }, 2000);
+    onCleanup(() => clearInterval(timer));
+  });
 
   // The listing eases in: from the right into a subfolder, from the left going up, a plain
   // fade for anywhere else and when switching tabs.
@@ -285,8 +302,21 @@ export default function FileView(props: { tab: Tab }) {
     batch(() => { t.selection[1](list.slice(Math.max(0, s), e + 1).map((x) => x.path)); t.cursor[1](to.path); });
   };
 
+  // Slow click, as in Explorer: a click on the name of the item that already was the only one
+  // selected, not followed by a second click (a double click), renames it.
+  let slowTimer: number | undefined;
+  let slowAt: { path: string; x: number; y: number } | null = null;
+  const cancelSlowClick = () => { clearTimeout(slowTimer); slowAt = null; };
+  onCleanup(cancelSlowClick);
+
   const onItemDown = (ev: MouseEvent, e: Entry) => {
+    cancelSlowClick();
     if (t.renaming[0]() === e.path) return;
+    const sel = t.selection[0]();
+    if (ev.button === 0 && ev.detail === 1 && !ev.shiftKey && !ev.ctrlKey && !ev.altKey && !bin() && !e.inArchive && document.activeElement === scroller &&
+        sel.length === 1 && samePath(sel[0], e.path) && (ev.target as HTMLElement).closest(".name, .cell-name")) {
+      slowAt = { path: e.path, x: ev.clientX, y: ev.clientY };
+    }
     // Middle-click: a folder opens in a new tab; on a file it starts autoscroll (lib/autoscroll.ts).
     if (ev.button === 1) { if (e.isDir) { ev.preventDefault(); openEntry(t, e, true); } return; }
     if (ev.button === 2) { if (!isSel(e.path)) selectOnly(e); return; }
@@ -307,6 +337,14 @@ export default function FileView(props: { tab: Tab }) {
 
   const onItemClick = (ev: MouseEvent, e: Entry) => {
     if (ev.button !== 0 || ev.shiftKey || ev.ctrlKey) return;
+    const slow = slowAt;
+    if (slow && slow.path === e.path && ev.detail === 1 && Math.hypot(ev.clientX - slow.x, ev.clientY - slow.y) < 4) {
+      slowTimer = window.setTimeout(() => {
+        const sel = t.selection[0]();
+        if (slowAt === slow && !t.renaming[0]() && sel.length === 1 && samePath(sel[0], e.path) && document.activeElement === scroller) startRename(t);
+        slowAt = null;
+      }, 500);
+    } else slowAt = null;
     // Clicking one of several selected items (without dragging) narrows the selection.
     if (t.selection[0]().length > 1) selectOnly(e);
     if (!settings.doubleClickOpen) openEntry(t, e);
@@ -561,7 +599,9 @@ export default function FileView(props: { tab: Tab }) {
   const showSize = () => !hiddenCol("size");
   const colW = (k: ListColumn) => settings.columnWidths[k] ?? COLUMN_WIDTHS[k];
   const fixedCols = () => ([showDate() && "modified", showType() && "type", showSize() && "size"].filter(Boolean)) as ListColumn[];
-  const columns = () => ["minmax(160px, 1fr)", showOrigin() && "minmax(120px, 0.9fr)", ...fixedCols().map((k) => `${colW(k)}px`)].filter(Boolean).join(" ");
+  // Name keeps 160 px, except in a narrow pane (a split view in a small window), where it gives
+  // way so the headings don't run into each other.
+  const columns = () => [width() < 360 ? "minmax(48px, 1fr)" : "minmax(160px, 1fr)", showOrigin() && "minmax(120px, 0.9fr)", ...fixedCols().map((k) => `${colW(k)}px`)].filter(Boolean).join(" ");
 
   /** Dragging the line at a column's left edge moves that line: the column on its left grows
    *  as this one shrinks (or Name, which takes the rest). */
@@ -589,6 +629,11 @@ export default function FileView(props: { tab: Tab }) {
       window.removeEventListener("mouseup", up);
       document.body.classList.remove("col-resizing");
       persistSettings();
+      // The grip stops at a column's minimum width, so the release can land on a heading, and
+      // its click would sort the list.
+      const swallow = (c: MouseEvent) => { c.stopPropagation(); c.preventDefault(); };
+      window.addEventListener("click", swallow, { capture: true, once: true });
+      setTimeout(() => window.removeEventListener("click", swallow, true));
     };
     window.addEventListener("mousemove", move);
     window.addEventListener("mouseup", up);
@@ -596,19 +641,23 @@ export default function FileView(props: { tab: Tab }) {
   const resetColumns = () => { setSettings("columnWidths", { ...COLUMN_WIDTHS }); persistSettings(); };
   const headingsMenu = (e: MouseEvent) => {
     e.preventDefault();
+    // The menu stays open while columns are switched on and off, so several take one visit.
     const toggle = (k: ListColumn) => {
       setSettings("hiddenColumns", (h) => (h.includes(k) ? h.filter((x) => x !== k) : [...h, k]));
       persistSettings();
+      setUi("menu", "items", items());
     };
-    openMenu(e.clientX, e.clientY, [
+    const col = (label: string, k: ListColumn) => ({ label, checked: !hiddenCol(k), keepOpen: true, action: () => toggle(k) });
+    const items = () => [
       { heading: true, label: "Columns" },
       { label: "Name", checked: true, disabled: true },
-      { label: bin() ? "Date deleted" : "Modified", checked: !hiddenCol("modified"), action: () => toggle("modified") },
-      ...(bin() ? [] : [{ label: "Type", checked: !hiddenCol("type"), action: () => toggle("type") }]),
-      { label: "Size", checked: !hiddenCol("size"), action: () => toggle("size") },
+      col(bin() ? "Date deleted" : "Modified", "modified"),
+      ...(bin() ? [] : [col("Type", "type")]),
+      col("Size", "size"),
       { separator: true },
       { label: "Reset column widths", action: resetColumns },
-    ]);
+    ];
+    openMenu(e.clientX, e.clientY, items());
   };
   const dropAttr = (e: Entry) => (e.isDir && !e.inArchive && !bin() ? e.path : undefined);
   /** Size column: a file's size, or a folder's counted size (dimmed while counting; an
@@ -655,9 +704,10 @@ export default function FileView(props: { tab: Tab }) {
         tabIndex={0}
         data-drop={found() || t.p.match(/\.(zip|7z|rar|tar|gz|xz|zst|bz2|tgz|jar)(\\|$)/i) ? undefined : t.p}
         onScroll={() => setScrollTop(scroller.scrollTop)}
-        onKeyDown={onKeyDown}
+        onKeyDown={(e) => { cancelSlowClick(); onKeyDown(e); }}
         onMouseDown={(e) => {
           const el = e.target as HTMLElement;
+          if (!el.closest(".row, .cell")) cancelSlowClick();
           if (e.button === 0 && (el === scroller || el.classList.contains("files-inner") || el.classList.contains("grid-row"))) {
             scroller.focus({ preventScroll: true });
             startBand(e);
@@ -708,7 +758,7 @@ export default function FileView(props: { tab: Tab }) {
                       <Show when={showOrigin()}>
                         {/* Search results cut the path from the left, keeping the folder names that tell them apart
                             (the left-to-right marks keep "C:\a\b" from reading "a\b\C:" in the right-to-left box). */}
-                        <span class="c-type c-origin" classList={{ tail: found() }} title={e().origin}>{found() ? `‎${e().origin}‎` : e().origin}</span>
+                        <span class="c-type c-origin" classList={{ tail: found() || bin() }} title={e().origin}>{found() || bin() ? `‎${e().origin}‎` : e().origin}</span>
                       </Show>
                       <Show when={showDate()}><span class="c-date">{formatDate(e().modified)}</span></Show>
                       <Show when={showType()}><span class="c-type">{typeLabel(e())}</span></Show>
@@ -787,7 +837,7 @@ function RenameInput(props: { tab: Tab; entry: Entry; grid?: boolean }) {
   let busy = false;
   let closed = false;
   const [error, setError] = createSignal<string | null>(null);
-  const focusList = () => requestAnimationFrame(() => fileList()?.focus({ preventScroll: true }));
+  const focusList = refocusList;
   const close = () => {
     closed = true;
     if (props.tab.renaming[0]() === props.entry.path) props.tab.renaming[1](null);
@@ -802,8 +852,17 @@ function RenameInput(props: { tab: Tab; entry: Entry; grid?: boolean }) {
   /** `keepOpen`: on failure keep editing with the error shown (Enter); otherwise revert (blur). */
   const commit = async (keepOpen: boolean) => {
     if (busy || closed) return;
-    const value = el.value.replace(/[\r\n]/g, "").trim();
+    // Windows drops trailing dots and spaces from names; trim them first, as Explorer does.
+    const value = el.value.replace(/[\r\n]/g, "").trim().replace(/[. ]+$/, "");
     if (!value || value === props.entry.name) return close();
+    // A name Windows won't take: say so, without asking about the extension first.
+    const bad = /[<>:"/\\|?*]/.exec(value);
+    if (bad) {
+      setError(`A name can't contain ${bad[0]}`);
+      if (keepOpen) { el.focus(); selectStem(); }
+      else { toast(`Couldn't rename: a name can't contain ${bad[0]}`, "error"); close(); }
+      return;
+    }
     busy = true;
     // Like Explorer: a changed extension can leave the file opening in the wrong app, or none.
     const ext = (n: string) => { const d = n.lastIndexOf("."); return d > 0 ? n.slice(d).toLowerCase() : ""; };
@@ -939,7 +998,7 @@ function SearchBar(props: { tab: Tab }) {
   return (
     <div class="bin-bar search-bar">
       <Search size={15} />
-      <span class="bin-count">{t.loading[0]() ? "Searching…" : n() >= SEARCH_TAB_LIMIT ? `First ${SEARCH_TAB_LIMIT.toLocaleString()} matches` : n() === 1 ? "1 match" : `${n().toLocaleString()} matches`}</span>
+      <span class="bin-count" title="Always current · F5 searches again">{t.loading[0]() ? "Searching…" : n() >= SEARCH_TAB_LIMIT ? `First ${SEARCH_TAB_LIMIT.toLocaleString()} matches` : n() === 1 ? "1 match" : `${n().toLocaleString()} matches`}</span>
       <code class="search-bar-query" title={q()}>{q()}</code>
       <span class="bin-hint">Always current · F5 searches again</span>
       <button class="btn" onClick={() => openSearchPalette(q())}><Pencil size={14} />Edit search</button>
@@ -956,8 +1015,11 @@ const MIN_COL = 64;
 function ColHead(props: { tab: Tab; k: SortBy; label: string; right?: boolean; grip?: (e: MouseEvent) => void; onReset?: () => void }) {
   const v = () => props.tab.view[0]();
   return (
+    // A click sorts without taking the focus from the list (as in Explorer), so the keys still act
+    // on the files; Tab still reaches the headings.
     <button class="colhead" classList={{ active: v().sortBy === props.k, right: props.right }}
-      onClick={() => sortBy(props.tab, props.k)}>
+      onMouseDown={(e) => e.preventDefault()}
+      onClick={() => { sortBy(props.tab, props.k); refocusList(); }}>
       <Show when={props.grip}>
         <span class="col-grip" title="Drag to resize · double-click to reset"
           onMouseDown={(e) => props.grip!(e)} onClick={(e) => e.stopPropagation()}

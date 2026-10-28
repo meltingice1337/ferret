@@ -85,7 +85,13 @@ export function ConflictDialog() {
                 <For each={c.conflicts.slice(0, 6)}>
                   {(x) => (
                     <div class="conflict">
-                      <div class="conflict-name">{x.name}</div>
+                      <div class="conflict-name">{x.name}
+                        {/* Same size and same time to the second: very likely the same file. */}
+                        <Show when={!x.isDir && x.sourceSize === x.targetSize && x.sourceModified != null
+                          && Math.floor(x.sourceModified / 1000) === Math.floor((x.targetModified ?? 0) / 1000)}>
+                          <span class="same">same size and date</span>
+                        </Show>
+                      </div>
                       <div class="conflict-cols">
                         <div><small>Incoming</small>{x.isDir ? "Folder" : formatSize(x.sourceSize)} · {formatDate(x.sourceModified)}</div>
                         <div><small>Existing</small>{x.isDir ? "Folder" : formatSize(x.targetSize)} · {formatDate(x.targetModified)}

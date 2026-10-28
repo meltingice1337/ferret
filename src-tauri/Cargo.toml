@@ -60,6 +60,9 @@ walkdir = "2"
 minisign-verify = "0.2"
 base64 = "0.22"
 # --- end search ---
+# --- office.rs (spreadsheet and slide previews) ---
+calamine = { version = "0.37", features = ["dates"] }
+roxmltree = "0.21"
 # --- self-update (GitHub Releases) ---
 tauri-plugin-updater = "2"
 tauri-plugin-process = "2"
@@ -123,6 +126,8 @@ windows-core = "0.62"
 quick-xml = "0.42"
 png = "0.18"
 base64 = "0.22"
+# media.rs: 256-colour PNGs (NeuQuant)
+color_quant = "1.1"
 # --- end shell.rs ---
 
 [profile.release]

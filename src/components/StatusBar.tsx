@@ -98,11 +98,11 @@ export default function StatusBar() {
             title="Icon size (Ctrl+wheel)"
             onInput={(e) => updateView(t(), { iconSize: +e.currentTarget.value })} />
         </Show>
-        <button class="sb-btn icon" classList={{ on: !!stripTab()?.split[0]() }} title={stripTab()?.split[0]() ? "Close split view (Ctrl+\\)" : "Split view: two folders side by side (Ctrl+\\)"}
+        <button class="sb-btn icon split-btn" classList={{ on: !!stripTab()?.split[0]() }} title={stripTab()?.split[0]() ? "Close split view (Ctrl+\\)" : "Split view: two folders side by side (Ctrl+\\)"}
           onClick={() => toggleSplit()}>
           <Columns2 size={14} />
         </button>
-        <button class="sb-btn icon" classList={{ on: ui.previewOpen && previewSpace() > 0 }} disabled={!previewSpace()}
+        <button class="sb-btn icon preview-btn" classList={{ on: ui.previewOpen && previewSpace() > 0 }} disabled={!previewSpace()}
           title={previewSpace() ? "Preview pane (Alt+P)" : "Window too narrow for the preview pane: use Quick Look (Space)"}
           onClick={() => { setUi("previewOpen", !ui.previewOpen); persistSession(); }}>
           <PanelRight size={14} />

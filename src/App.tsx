@@ -19,7 +19,7 @@ import "./lib/drag";
 import "./lib/autoscroll";
 import {
   copyPaths, copyToClipboard, deleteItems, emptyBin, newFile, newFolder, openInVscode, openTerminal, paste, redo, redoLabel,
-  startRename, targetsOf, toOtherPane, undo, undoLabel,
+  startRename, syncClipboard, targetsOf, toOtherPane, undo, undoLabel,
 } from "./lib/ops";
 import { fileList, otherPane, stripTab, switchPane, toggleSplit, adminWindow, applyAppearance, elevateWindow, searchTitle, settings, isFavorite, navigate, openNewWindow, persistSettings, places, resetView, setSettings } from "./lib/state";
 import { basename, isRecycle, isSearch, RECYCLE } from "./lib/path";
@@ -110,6 +110,23 @@ function closeTopModal() {
 const modalOpen = () => !!(ui.dialog || ui.conflict || ui.properties || ui.batchRename || ui.media || ui.settingsOpen || ui.quickLook || ui.palette || updater.notesOpen);
 
 const keyboardMenu = () => openKeyboardMenu(activeTab());
+
+/** F6 / Shift+F6, as in Explorer: the keyboard goes to the next area of the window (path bar,
+ *  sidebar, files, preview), to the item that matters there, instead of Tab through each one. */
+function cycleArea(dir: 1 | -1) {
+  const q = (s: string) => document.querySelector<HTMLElement>(s);
+  const areas = [
+    { box: q(".toolbar"), target: () => q(".path-edit input") ?? q(".crumbs .crumb.last") },
+    { box: q(".sidebar"), target: () => q(".sidebar .side-item.active") ?? q(".sidebar .side-item") },
+    { box: q(".panes"), target: () => fileList() },
+    { box: q(".preview"), target: () => q(".preview button, .preview [tabindex='0']") },
+  ].filter((a) => a.box?.offsetParent && a.target());
+  if (!areas.length) return;
+  const here = areas.findIndex((a) => a.box!.contains(document.activeElement));
+  // From anywhere else (the tab strip, nothing), F6 starts at the files.
+  const from = here >= 0 ? here : areas.findIndex((a) => a.box === q(".panes")) - dir;
+  areas[(from + dir + areas.length) % areas.length].target()?.focus({ preventScroll: true });
+}
 
 /** "Downloads - Ferret", "Local Disk (C:) - Ferret (Administrator)"… */
 function windowTitle(path: string) {
@@ -230,8 +247,21 @@ export default function App() {
         if (e.key === "Enter" && !inField) { e.preventDefault(); const tg = targetsOf(t); return setUi("properties", tg.length ? tg.map((x) => x.path) : [t.p]); }
       }
 
+      if (e.key === "F6" && !ctrl && !e.altKey) { e.preventDefault(); return cycleArea(e.shiftKey ? -1 : 1); }
+
       // Split view: Tab gives the keyboard to the other pane.
       if (e.key === "Tab" && !ctrl && !e.altKey && !inField && otherPane()) { e.preventDefault(); return switchPane(); }
+      // Tab past the last control (Shift+Tab before the first) comes round to the other end,
+      // instead of leaving the page with nothing visibly focused.
+      if (e.key === "Tab" && !ctrl && !e.altKey) {
+        const all = [...document.querySelectorAll<HTMLElement>("button, [href], input, select, textarea, [tabindex]")]
+          .filter((el) => el.tabIndex >= 0 && !(el as HTMLButtonElement).disabled && el.offsetParent);
+        const i = all.indexOf(target);
+        if (all.length && (target === document.body || (!e.shiftKey && i === all.length - 1) || (e.shiftKey && i === 0))) {
+          e.preventDefault();
+          return (e.shiftKey ? all[all.length - 1] : all[0]).focus();
+        }
+      }
 
       // ---- file actions (not while typing) ----
       if (!inField) {
@@ -261,7 +291,13 @@ export default function App() {
         if (open) { open.focus(); open.select(); return; }
         return setUi("editingPath", true);
       }
-      if (k === "f") { e.preventDefault(); return setUi("filterOpen", true); }
+      if (k === "f") {
+        e.preventDefault();
+        // Like Ctrl+L: back to the filter box if it's already open, with its text selected.
+        const open = document.querySelector<HTMLInputElement>(".filter input");
+        if (open) { open.focus(); open.select(); return; }
+        return setUi("filterOpen", true);
+      }
       if (k === ",") { e.preventDefault(); return setUi("settingsOpen", true); }
       if (k === "b") { e.preventDefault(); return toggleSidebar(); }
       if (e.code === "Backquote") { e.preventDefault(); return openTerminal(t.p); }
@@ -345,6 +381,8 @@ export default function App() {
     window.addEventListener("keydown", onKey);
     window.addEventListener("mouseup", onMouse);
     window.addEventListener("contextmenu", noMenu);
+    // Something copied in another app replaces a cut made here.
+    window.addEventListener("focus", syncClipboard);
     onCleanup(() => {
       window.removeEventListener("keydown", noReload, true);
       window.removeEventListener("keydown", trapTab, true);
@@ -352,6 +390,7 @@ export default function App() {
       window.removeEventListener("keydown", onHold, true);
       window.removeEventListener("mouseup", onMouse);
       window.removeEventListener("contextmenu", noMenu);
+      window.removeEventListener("focus", syncClipboard);
     });
   });
 

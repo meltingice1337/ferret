@@ -121,6 +121,8 @@ export interface TextPreview {
   binary: boolean;
   encoding: string;
   size: number;
+  /** Lines in the whole file, when only its start was read (and it isn't huge). */
+  lines?: number | null;
 }
 
 export interface OpenWithApp {
@@ -286,6 +288,19 @@ export interface Bootstrap {
   recents: Recent[];
 }
 
+/** A song's tags as Windows reads them (empty / 0 when not set). */
+export interface AudioInfo {
+  title: string;
+  artist: string;
+  album: string;
+  albumArtist: string;
+  year: number;
+  track: number;
+  /** Bits per second. */
+  bitrate: number;
+  durationMs: number;
+}
+
 // ---------- media compression (media.rs) ----------
 
 export interface VideoInfo {
@@ -345,6 +360,8 @@ export interface ImageOpts {
   quality: number;
   /** Longest side in pixels; 0 keeps the size. */
   maxSide: number;
+  /** PNG: down to 256 colours (dithered, transparency kept) when the picture has more. */
+  palette?: boolean;
 }
 
 export interface ImagePreview {

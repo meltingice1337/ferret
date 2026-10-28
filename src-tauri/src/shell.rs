@@ -1311,6 +1311,38 @@ pub async fn clipboard_write_files(paths: Vec<String>, cut: bool) -> Result<(), 
         .map_err(|e| e.to_string())?
 }
 
+/// After a cut is pasted the clipboard lets go of it, as in Explorer; items that weren't
+/// moved (skipped, cancelled) stay cut. Leaves the clipboard alone if it holds something
+/// else by now, and says whether it still held the cut.
+fn clipboard_after_cut_blocking(cut: &[String], left: &[String]) -> Result<bool, String> {
+    let key = |list: &[String]| {
+        let mut v: Vec<String> = list.iter().map(|p| paths::normalize(p).to_lowercase()).collect();
+        v.sort();
+        v
+    };
+    match clipboard_read_blocking()? {
+        Some(c) if c.cut && key(&c.paths) == key(cut) => {}
+        _ => return Ok(false),
+    }
+    if key(left) == key(cut) {
+        return Ok(true);
+    }
+    if left.is_empty() {
+        let _clip = ClipboardGuard::open()?;
+        unsafe { EmptyClipboard() }.map_err(hr_msg)?;
+    } else {
+        clipboard_write_blocking(left, true)?;
+    }
+    Ok(true)
+}
+
+#[tauri::command]
+pub async fn clipboard_after_cut(cut: Vec<String>, left: Vec<String>) -> Result<bool, String> {
+    tauri::async_runtime::spawn_blocking(move || clipboard_after_cut_blocking(&cut, &left))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
 /// Files currently on the clipboard (from Explorer or us); `null` if none.
 #[tauri::command]
 pub async fn clipboard_read_files() -> Result<Option<ClipboardFiles>, String> {

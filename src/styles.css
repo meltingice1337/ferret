@@ -195,8 +195,15 @@ input::selection, textarea::selection { background: color-mix(in oklab, var(--ac
 .tabs-scroll::-webkit-scrollbar { display: none; }
 .tab {
   display: flex; align-items: center; gap: 7px; height: 30px; padding: 0 6px 0 11px;
-  border-radius: 9px 9px 0 0; width: 200px; min-width: 120px; scroll-snap-align: start; color: var(--fg-2);
+  border-radius: 9px 9px 0 0; width: 200px; min-width: 96px; scroll-snap-align: start; color: var(--fg-2);
   position: relative; flex: 0 1 200px;
+}
+/* A narrow window: tabs can shrink further, so the active one fits next to the tab list button. */
+@media (max-width: 560px) { .tab { min-width: 84px; } }
+/* A phone-narrow window: Refresh (F5) and the favorite star (Ctrl+D) step aside so the path, filter
+   and search fit, and the status bar drops split view and the preview pane (no room for either). */
+@media (max-width: 480px) {
+  .toolbar .icon-btn.refresh, .toolbar .icon-btn.star, .status-right .split-btn, .status-right .preview-btn { display: none; }
 }
 .tab:hover { background: var(--hover); color: var(--fg); }
 .tab.active { background: var(--accent-softer); color: var(--fg); box-shadow: inset 0 -2px 0 var(--accent); }
@@ -215,6 +222,7 @@ input::selection, textarea::selection { background: color-mix(in oklab, var(--ac
 .winctl button:last-child { border-top-right-radius: var(--radius); }
 
 .toolbar { display: flex; align-items: center; gap: 8px; padding: 6px 10px; border-top: 1px solid var(--line); border-bottom: 1px solid var(--line); flex: none; }
+.toolbar > .icon-btn, .nav-btns { flex: none; }
 .nav-btns { display: flex; gap: 2px; }
 .icon-btn { display: inline-grid; place-items: center; width: 30px; height: 30px; border-radius: var(--radius-sm); color: var(--fg-2); }
 .icon-btn:hover:not(:disabled) { background: var(--hover); color: var(--fg); }
@@ -262,7 +270,8 @@ input::selection, textarea::selection { background: color-mix(in oklab, var(--ac
   display: grid; height: 32px; padding: 0 18px 0 10px; flex: none; align-items: center;
   border-bottom: 1px solid var(--line); font-size: 12px;
 }
-.colhead { display: flex; align-items: center; gap: 4px; height: 26px; padding: 0 8px; border-radius: 6px; color: var(--fg-3); }
+.colhead { display: flex; align-items: center; gap: 4px; height: 26px; padding: 0 8px; border-radius: 6px; color: var(--fg-3); min-width: 0; }
+.colhead > span:not(.col-grip) { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .colhead:hover { background: var(--hover); color: var(--fg-2); }
 .colhead.active { color: var(--accent-text); }
 .colhead.right { justify-content: flex-end; }
@@ -344,7 +353,7 @@ body.col-resizing, body.col-resizing * { cursor: col-resize !important; user-sel
   height: 36px; flex: none; display: flex; align-items: center; justify-content: space-between; gap: 10px;
   padding: 0 8px 0 14px; border-top: 1px solid var(--line); font-size: 12px; color: var(--fg-2); position: relative;
 }
-.status-left { display: flex; align-items: center; gap: 6px; white-space: nowrap; overflow: hidden; }
+.status-left { display: flex; align-items: center; gap: 6px; white-space: nowrap; overflow: hidden; min-width: 0; }
 .sel-count { color: var(--accent-text); }
 .status-right { display: flex; align-items: center; gap: 4px; }
 .sb-btn { display: inline-flex; align-items: center; gap: 6px; height: 26px; padding: 0 9px; border-radius: 6px; color: var(--fg-2); white-space: nowrap; }
@@ -379,6 +388,7 @@ body.col-resizing, body.col-resizing * { cursor: col-resize !important; user-sel
 .menu-icon { width: 18px; display: inline-grid; place-items: center; flex: none; }
 .menu-label { flex: 1; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .menu-kbd { font-size: 11px; opacity: 0.55; white-space: nowrap; }
+.menu-detail { font-size: 11.5px; color: var(--fg-3); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 200px; }
 .menu-sep { height: 1px; background: var(--line-2); margin: 3px 6px; }
 .menu-heading { padding: 7px 10px 3px; font-size: 10.5px; font-weight: 600; letter-spacing: 0.05em; text-transform: uppercase; color: var(--fg-3); }
 .menu-row { display: flex; align-items: center; gap: 4px; padding: 3px 6px 3px 33px; }
@@ -417,6 +427,12 @@ body.col-resizing, body.col-resizing * { cursor: col-resize !important; user-sel
 .field-label { display: flex; flex-direction: column; gap: 2px; }
 .field-label small { color: var(--fg-3); font-size: 11.5px; }
 .field-control { display: flex; align-items: center; gap: 8px; flex: none; }
+/* No room beside the label: the control goes under it. */
+@media (max-width: 560px) {
+  .field { flex-wrap: wrap; row-gap: 8px; }
+  .field-control { flex: 1 1 auto; justify-content: flex-end; max-width: 100%; }
+  .swatches { max-width: none; }
+}
 .field select { height: 30px; padding: 0 8px; border-radius: 7px; background: var(--raised); border: 1px solid var(--line-2); outline: none; }
 .swatches { display: flex; gap: 6px; flex-wrap: wrap; justify-content: flex-end; max-width: 330px; }
 .swatch { width: 24px; height: 24px; border-radius: 50%; border: 2px solid transparent; box-shadow: inset 0 0 0 1px rgba(0, 0, 0, 0.2); position: relative; }
@@ -442,7 +458,7 @@ body.col-resizing, body.col-resizing * { cursor: col-resize !important; user-sel
 .btn { height: 28px; padding: 0 12px; border-radius: 7px; background: var(--press); }
 .btn:hover { background: var(--line-2); }
 .btn.danger:hover { background: #dc2626; color: #fff; }
-.keys { display: grid; grid-template-columns: 1fr 1fr; gap: 4px 18px; margin-top: 8px; }
+.keys { display: grid; grid-template-columns: repeat(auto-fill, minmax(min(100%, 300px), 1fr)); gap: 4px 18px; margin-top: 8px; }
 .key-row { display: flex; align-items: center; gap: 10px; }
 kbd { font-family: var(--mono); font-size: 11px; padding: 2px 6px; border-radius: 5px; background: var(--raised); border: 1px solid var(--line-2); min-width: 120px; display: inline-block; }
 

@@ -3,7 +3,7 @@ import { untrack } from "solid-js";
 import { createStore } from "solid-js/store";
 import { logCommandFailure } from "./log";
 import type {
-  ArchiveInfo, Bootstrap, ClipboardFiles, Conflict, DefaultManagerStatus, DirListing, Favorite, FolderSize, FolderView, ImageInfo,
+  ArchiveInfo, AudioInfo, Bootstrap, ClipboardFiles, Conflict, DefaultManagerStatus, DirListing, Favorite, FolderSize, FolderView, ImageInfo,
   ImageOpts, ImagePreview, ItemInfo, LaunchTarget, OpenWithApp, Places, Policy, Recent, RecycleInfo, Session, ShellMenuItem, ShellOp,
   Settings, Stats, TextPreview, VideoInfo, VideoJob, VideoSample, ViewSettings,
 } from "./types";
@@ -48,6 +48,7 @@ export const api = {
 
   // ---- file operations ----
   createFolder: (dir: string, name?: string) => invoke<string>("create_folder", { dir, name }),
+  removeEmptyFolder: (path: string) => invoke<boolean>("remove_empty_folder", { path }),
   createFile: (dir: string, name: string, content?: string) => invoke<string>("create_file", { dir, name, content }),
   renameItem: (path: string, newName: string) => invoke<string>("rename_item", { path, newName }),
   checkConflicts: (sources: string[], dest: string) => invoke<Conflict[]>("check_conflicts", { sources, dest }),
@@ -87,6 +88,7 @@ export const api = {
   listOpenWith: (path: string) => invoke<OpenWithApp[]>("list_open_with", { path }),
   openWith: (path: string, appId: string) => invoke<void>("open_with", { path, appId }),
   clipboardWriteFiles: (paths: string[], cut: boolean) => invoke<void>("clipboard_write_files", { paths, cut }),
+  clipboardAfterCut: (cut: string[], left: string[]) => invoke<boolean>("clipboard_after_cut", { cut, left }),
   clipboardReadFiles: () => invoke<ClipboardFiles | null>("clipboard_read_files"),
   openTerminal: (path: string) => invoke<void>("open_terminal", { path }),
   openInVscode: (path: string) => invoke<void>("open_in_vscode", { path }),
@@ -103,6 +105,7 @@ export const api = {
 
   // ---- video / picture compression ----
   videoInfo: (path: string) => invoke<VideoInfo>("video_info", { path }),
+  audioInfo: (path: string) => invoke<AudioInfo>("audio_info", { path }),
   videoSample: (job: VideoJob, atMs: number, lengthMs: number) =>
     invoke<VideoSample | null>("video_sample", { job, atMs, lengthMs }),
   compressVideos: (items: VideoJob[]) => invoke<number>("compress_videos", { items }),
@@ -132,7 +135,7 @@ export const api = {
   sharedState: () => invoke<{ settings: Settings; favorites: Favorite[]; recents: Recent[] }>("shared_state"),
   /** Runs an operation through the Windows shell; `elevate` lets it ask for administrator permission. */
   shellOp: (op: ShellOp, elevate: boolean) => invoke<number>("shell_op", { op, elevate }),
-  openLogFolder: () => invoke<void>("open_log_folder"),
+  logFolder: () => invoke<string>("log_folder"),
 };
 
 /** Each shown file's version (modified time + size). File and thumbnail URLs carry it, so a

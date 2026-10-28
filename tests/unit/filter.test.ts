@@ -24,6 +24,15 @@ describe("folder filter (Ctrl+F)", () => {
     expect(names("holiday")).toEqual(["Holiday photo.jpg", "holiday notes.txt", "Holiday"]);
     expect(names("holiday notes")).toEqual(["holiday notes.txt"]);
   });
+  it("ignores accents, either way", () => {
+    const f = (text: string, name: string) => entryFilter(text)!(entry(name));
+    expect(f("cafe", "Café ñ 日本語 файл.txt")).toBe(true);
+    expect(f("café", "cafe menu.txt")).toBe(true);
+    expect(f("munchen", "München")).toBe(true);
+    expect(f("strasse krakow", "Straße Kraków.jpg")).toBe(true);
+    expect(f("файл", "Café ñ 日本語 файл.txt")).toBe(true);
+    expect(f("cafe", "Coffee.txt")).toBe(false);
+  });
   it("keeps quoted words together", () => {
     expect(names('"holiday photo"')).toEqual(["Holiday photo.jpg"]);
   });

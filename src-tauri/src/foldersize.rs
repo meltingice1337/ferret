@@ -117,7 +117,14 @@ struct Shared {
     /// The home folder, drives and distros are counted in the background (since a tab showed
     /// sizes).
     planning: bool,
+    /// When sizes were last marked out of date (something was copied, moved, deleted…).
+    changed: Option<Instant>,
 }
+
+/// How far behind a change the drive index service can be: it reads the change journal a few
+/// times a second. A size asked for right after a change (Ferret asks as soon as its job ends)
+/// waits until then, or the service would hand back the size from before.
+const JOURNAL_LAG: Duration = Duration::from_millis(800);
 
 struct Running {
     /// Tabs that want it.
@@ -303,6 +310,7 @@ pub fn folder_sizes_invalidate(app: AppHandle, paths: Vec<String>, deep: bool) {
     let changed: Vec<String> = paths.iter().map(|p| paths::key(p)).collect();
     {
         let mut st = sizes().state.lock();
+        st.changed = Some(Instant::now());
         for (key, c) in st.cache.iter_mut() {
             if changed.iter().any(|p| contains(key, p) || (deep && contains(p, key))) {
                 c.stale = true;
@@ -419,6 +427,10 @@ fn from_drive_index(folders: &[(String, String)]) -> HashMap<String, FolderSize>
         return HashMap::new();
     }
     let asked: Vec<String> = on_drives.iter().map(|(_, p)| p.clone()).collect();
+    let changed = sizes().state.lock().changed;
+    if let Some(wait) = changed.and_then(|t| JOURNAL_LAG.checked_sub(t.elapsed())) {
+        std::thread::sleep(wait);
+    }
     let Some(sizes) = crate::search::service_folder_sizes(&asked) else { return HashMap::new() };
     let now = db::now();
     on_drives

@@ -374,6 +374,22 @@ pub fn recents(conn: &Connection, limit: i64) -> rusqlite::Result<Vec<Recent>> {
     Ok(all)
 }
 
+/// `recents` without folders that were deleted or moved away: on a drive that's there, a folder
+/// that isn't. Their rows stay (an unplugged drive's folders come back with it); network and WSL
+/// folders aren't checked (slow, and looking would start a stopped distro).
+pub fn recents_present(conn: &Connection, limit: i64) -> rusqlite::Result<Vec<Recent>> {
+    let gone = |p: &str| match p.get(..3) {
+        Some(root) if root.as_bytes()[1] == b':' && root.ends_with('\\') => {
+            std::path::Path::new(root).exists() && !std::path::Path::new(&paths::for_io(p)).exists()
+        }
+        _ => false,
+    };
+    let mut all = recents(conn, 200)?;
+    all.retain(|r| !gone(&r.path));
+    all.truncate(limit.max(0) as usize);
+    Ok(all)
+}
+
 fn frecency(r: &Recent, now: i64) -> f64 {
     const HOUR: i64 = 3_600_000;
     let age = (now - r.last_opened).max(0);

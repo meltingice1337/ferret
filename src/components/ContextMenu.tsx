@@ -66,6 +66,9 @@ function MenuList(props: ListProps) {
   // Recent pointer positions, to tell "heading for the open submenu" from "browsing this menu".
   let prev: Pt = { x: 0, y: 0 };
   let last: Pt = { x: 0, y: 0 };
+  // As in Windows, a menu that opens under a resting pointer (Shift+F10, the menu key) doesn't
+  // take its highlight from it: items follow the pointer once it moves.
+  let moved = false;
 
   const hasSub = (it: MenuItem) => !!(it.submenu || it.loadSubmenu);
   const actionable = () => props.items.map((it, i) => (!it.separator && !it.heading && !it.row && !it.actions && !it.disabled ? i : -1)).filter((i) => i >= 0);
@@ -122,6 +125,20 @@ function MenuList(props: ListProps) {
     return inTriangle(last, prev, { x: edge, y: sub.top - 8 }, { x: edge, y: sub.bottom + 8 });
   };
 
+  /** The pointer came onto item `index`: highlight it, and open its submenu after a moment. */
+  const hover = (target: HTMLElement, index: number, it: MenuItem) => {
+    clearTimeout(hoverTimer);
+    const go = () => {
+      setFocus(index);
+      if (hasSub(it)) openSub(index, it, target);
+      else setOpen(null);
+    };
+    // Crossing other items on the way to the open submenu doesn't switch away from it.
+    if (open() && open()!.index !== index && aimingAtSub()) { hoverTimer = window.setTimeout(go, 300); return; }
+    setFocus(index);
+    hoverTimer = window.setTimeout(go, hasSub(it) ? 120 : 150);
+  };
+
   const onKeyDown = (e: KeyboardEvent) => {
     if (e.key === "Escape" && !props.root) { e.preventDefault(); e.stopPropagation(); return props.onClose?.(); }
     const idx = actionable();
@@ -136,7 +153,7 @@ function MenuList(props: ListProps) {
       const it = props.items[focus()];
       const node = el.querySelector<HTMLElement>(`:scope > .menu-item[data-i="${focus()}"]`);
       if (hasSub(it)) openSub(focus(), it, node ?? el, true);
-      else if (e.key === "Enter") { closeMenu(); it.action?.(); }
+      else if (e.key === "Enter") { if (!it.keepOpen) closeMenu(); it.action?.(); }
     } else if (e.key === "ArrowLeft" && !props.root) {
       e.preventDefault(); e.stopPropagation();
       props.onClose?.();
@@ -149,13 +166,13 @@ function MenuList(props: ListProps) {
         style={{ left: `${props.x}px`, top: `${props.y}px`, visibility: "hidden" }}
         onContextMenu={(e) => e.preventDefault()} onKeyDown={onKeyDown}
         onMouseEnter={() => props.onEnter?.()}
-        onMouseMove={(e) => { prev = last; last = { x: e.clientX, y: e.clientY }; }}>
+        onMouseMove={(e) => { prev = last; last = { x: e.clientX, y: e.clientY }; if (e.movementX || e.movementY) moved = true; }}>
         <For each={props.items}>
           {(it, i) => (
             <Show when={!it.separator} fallback={<div class="menu-sep" />}>
               <Show when={!it.heading} fallback={<div class="menu-heading">{it.label}</div>}>
                 <Show when={!it.actions} fallback={
-                  <div class="menu-actions" onMouseEnter={() => { clearTimeout(hoverTimer); setOpen(null); setFocus(-1); }}>
+                  <div class="menu-actions" onMouseEnter={() => { if (!moved) return; clearTimeout(hoverTimer); setOpen(null); setFocus(-1); }}>
                     <For each={it.actions}>
                       {(b) => (
                         <button class="menu-action" classList={{ danger: b.danger }} title={b.title} aria-label={b.title} disabled={b.disabled}
@@ -167,7 +184,7 @@ function MenuList(props: ListProps) {
                   </div>
                 }>
                 <Show when={!it.row} fallback={
-                  <div class="menu-row" onMouseEnter={() => setOpen(null)}>
+                  <div class="menu-row" onMouseEnter={() => moved && setOpen(null)}>
                     <span class="menu-row-label">{it.label}</span>
                     <For each={it.row}>
                       {(b) => (
@@ -183,23 +200,17 @@ function MenuList(props: ListProps) {
                     data-i={i()}
                     classList={{ danger: it.danger, focus: focus() === i(), "sub-open": open()?.index === i() }}
                     disabled={it.disabled}
-                    onMouseEnter={(e) => {
-                      clearTimeout(hoverTimer);
-                      const target = e.currentTarget;
-                      const go = () => {
-                        setFocus(i());
-                        if (hasSub(it)) openSub(i(), it, target);
-                        else setOpen(null);
-                      };
-                      // Crossing other items on the way to the open submenu doesn't switch away from it.
-                      if (open() && open()!.index !== i() && aimingAtSub()) { hoverTimer = window.setTimeout(go, 300); return; }
-                      setFocus(i());
-                      hoverTimer = window.setTimeout(go, hasSub(it) ? 120 : 150);
+                    title={it.title}
+                    onMouseEnter={(e) => moved && hover(e.currentTarget, i(), it)}
+                    onMouseMove={(e) => {
+                      if (moved || (!e.movementX && !e.movementY)) return;
+                      moved = true;
+                      hover(e.currentTarget, i(), it);
                     }}
                     onClick={(e) => {
                       clearTimeout(hoverTimer);
                       if (hasSub(it)) return openSub(i(), it, e.currentTarget);
-                      closeMenu();
+                      if (!it.keepOpen) closeMenu();
                       it.action?.();
                     }}
                   >
@@ -213,6 +224,7 @@ function MenuList(props: ListProps) {
                       </Show>
                     </span>
                     <span class="menu-label">{it.label}</span>
+                    <Show when={it.detail}><span class="menu-detail">{it.detail}</span></Show>
                     <Show when={it.shortcut}><span class="menu-kbd">{it.shortcut}</span></Show>
                     <Show when={hasSub(it)}><ChevronRight size={14} class="menu-arrow" /></Show>
                   </button>

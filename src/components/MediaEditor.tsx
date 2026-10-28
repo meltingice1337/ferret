@@ -94,14 +94,17 @@ function Presets<T extends { id: string; label: string; hint: string }>(props: {
   );
 }
 
-function NameField(props: { single: boolean; value: string; ext: string; onInput: (v: string) => void; example: string; error: string | null }) {
+function NameField(props: { single: boolean; value: string; ext: string; onInput: (v: string) => void; example: string; error: string | null; dest?: string }) {
+  // A name that's taken isn't an error (nothing is overwritten), but the file would quietly get
+  // another one: say so.
+  const [taken] = createResource(() => props.dest, (d) => api.resolveInput(d).then((r) => r.kind !== "missing").catch(() => false));
   return (
     <Section title={props.single ? "Save as" : "Name ending"}>
       <div class="mx-name" classList={{ invalid: !!props.error }}>
         <input class="text-input" value={props.value} spellcheck={false} onInput={(e) => props.onInput(e.currentTarget.value)} />
         <span class="mx-ext">{props.ext}</span>
       </div>
-      <p class="mx-hint" classList={{ err: !!props.error }}>{props.error ?? (props.single ? "Saved next to the original, which stays as it is." : `e.g. ${props.example}`)}</p>
+      <p class="mx-hint" classList={{ err: !!props.error }}>{props.error ?? (props.single && taken.latest ? "There's already a file with this name, so this one gets “ (2)” added. Nothing is replaced." : props.single ? "Saved next to the original, which stays as it is." : `e.g. ${props.example}`)}</p>
     </Section>
   );
 }
@@ -204,6 +207,8 @@ const VPRESETS: { id: string; label: string; hint: string; s: VSettings }[] = [
 ];
 const RESOLUTIONS = [2160, 1440, 1080, 720, 540, 480, 360];
 const SAMPLE_MS = 4000;
+/** "4-second", "1.2-second". */
+const secondsLabel = (ms: number) => `${+(ms / 1000).toFixed(1)}-second`;
 
 /** Bits per pixel per frame for the quality slider: 0.01 … 0.12, evenly on a log scale. */
 const bpp = (q: number) => 0.01 * Math.pow(12, q / 100);
@@ -218,7 +223,9 @@ function plan(info: VideoInfo, s: VSettings, trim: [number, number] | null) {
   const ow = even(dw * k), oh = even(dh * k);
   const fps = s.fps && info.fps && s.fps < info.fps - 0.5 ? s.fps : 0;
   const durMs = Math.max(1, trim ? trim[1] - trim[0] : info.durationMs);
-  const audio = info.hasAudio ? s.audio * 1000 : 0;
+  // No more audio than the original had, in a step Windows' AAC encoder takes (96–192 kbps).
+  const srcAudio = info.audioBitrate > 0 ? Math.max(96, ...[96, 128, 160, 192].filter((k) => k * 1000 <= info.audioBitrate * 1.05)) : s.audio;
+  const audio = info.hasAudio ? Math.min(s.audio, srcAudio) * 1000 : 0;
   let vb: number;
   let tooSmall = false;
   if (s.mode === "size") {
@@ -229,8 +236,14 @@ function plan(info: VideoInfo, s: VSettings, trim: [number, number] | null) {
   } else {
     vb = bpp(s.quality) * ow * oh * (fps || info.fps || 30) * (s.hevc ? 0.62 : 1);
   }
-  // Never ask for more than the original had (a short clip "fit to 10 MB" would grow).
-  if (info.videoBitrate > 0) vb = Math.min(vb, info.videoBitrate * (s.hevc ? 0.8 : 1) * Math.min(1, ((ow * oh) / (dw * dh)) * 1.15));
+  // Never ask for more than the original had (a short clip "fit to 10 MB" would grow), and by
+  // quality for less: an already lean video re-encoded at its own bitrate comes out as big and
+  // looks worse, so each step of the slider still saves (Small about half, Balanced a third, High a fifth). When
+  // Windows doesn't say (WebM, some MKV), the file's size over its length tells.
+  const srcVideo = info.videoBitrate > 0 ? info.videoBitrate
+    : info.durationMs > 0 ? (info.size * 8) / (info.durationMs / 1000) - (info.hasAudio ? info.audioBitrate || 128_000 : 0) : 0;
+  const keep = s.mode === "quality" ? 0.42 + s.quality / 200 : 1;
+  if (srcVideo > 0) vb = Math.min(vb, srcVideo * keep * (s.hevc ? 0.8 : 1) * Math.min(1, ((ow * oh) / (dw * dh)) * 1.15));
   vb = Math.round(Math.max(100_000, vb));
   const bytes = ((vb + audio) * durMs) / 8000 * 1.01 + 24_000;
   return { ow, oh, sw: turned ? oh : ow, sh: turned ? ow : oh, dw, dh, fps, vb, audio, durMs, bytes, tooSmall };
@@ -382,8 +395,11 @@ function VideoEditor(props: { paths: string[] }) {
     const c = cur() ?? list[0];
     const pl = plan(c, p.s, trimOf(c));
     const res = `${Math.min(pl.ow, pl.oh)}p`;
-    if (p.s.mode === "size") return `${res} · ${p.hint}`;
     const before = list.reduce((a, i) => a + i.size, 0);
+    if (p.s.mode === "size") {
+      const fits = list.every((i) => i.size <= p.s.targetMb * MiB);
+      return fits ? `${res} · ${list.length > 1 ? "all" : "already"} under ${p.s.targetMb} MB` : `${res} · ${p.hint}`;
+    }
     const after = list.reduce((a, i) => a + plan(i, p.s, trimOf(i)).bytes, 0);
     return after >= before * 0.9 ? `${res} · about the same size` : `${res} · ≈ ${formatSize(after)}`;
   };
@@ -404,6 +420,8 @@ function VideoEditor(props: { paths: string[] }) {
 
   const [sample, setSample] = createSignal<(VideoSample & { key: string; atMs: number; source: string }) | null>(null);
   const [sampling, setSampling] = createSignal(false);
+  /** Length of the sample being made: shorter than SAMPLE_MS when the trim is. */
+  const [sampleLen, setSampleLen] = createSignal(SAMPLE_MS);
   const keyOf = (j: VideoJob) => JSON.stringify({ ...j, dest: "", trimStartMs: 0, trimEndMs: 0 });
   const sampleFresh = () => {
     const sm = sample(), c = cur();
@@ -609,11 +627,14 @@ function VideoEditor(props: { paths: string[] }) {
     const j = jobFor(c);
     const lo = single ? trim()[0] : 0, hi = single ? trim()[1] : c.durationMs;
     const at = Math.round(clamp(time(), lo, Math.max(lo, hi - SAMPLE_MS)));
+    // A trim shorter than a sample gets a sample of just the trim.
+    const len = Math.max(500, Math.min(SAMPLE_MS, hi - at));
+    setSampleLen(len);
     const my = ++sampleSeq;
     setSampleProgress(0);
     setSampling(true);
     try {
-      const r = await api.videoSample(j, at, SAMPLE_MS);
+      const r = await api.videoSample(j, at, len);
       if (r) {
         svid?.pause();
         vid?.pause();
@@ -784,11 +805,11 @@ function VideoEditor(props: { paths: string[] }) {
                     options={[{ value: "orig", label: "Original" }, { value: "split", label: "Compare" }, { value: "sample", label: "Compressed" }]} />
                   <Show when={inSample()}>
                     <span class="mx-ab-note" classList={{ stale: !sampleFresh() }}>
-                      {sampleFresh() ? `${SAMPLE_MS / 1000}-second sample from ${fmtTime(sample()!.atMs, false)}` : "Settings changed since this sample"}
+                      {sampleFresh() ? `${secondsLabel(sample()!.durationMs)} sample from ${fmtTime(sample()!.atMs, false)}` : "Settings changed since this sample"}
                     </span>
                   </Show>
                   <Show when={sampleHere() && view() === "orig" && wanted() !== "orig"}>
-                    <span class="mx-ab-note">Outside the {SAMPLE_MS / 1000}-second sample: the original, until one is made here</span>
+                    <span class="mx-ab-note">Outside the {secondsLabel(sample()?.durationMs ?? SAMPLE_MS)} sample: the original, until one is made here</span>
                   </Show>
                   <Show when={checking()}>
                     <span class="mx-ab-note"><Loader2 class="spin" size={11} /> Checking quality…</span>
@@ -817,7 +838,7 @@ function VideoEditor(props: { paths: string[] }) {
               </Show>
               <Show when={sampling()}>
                 <div class="mx-busy">
-                  <Loader2 class="spin" size={16} /> Encoding a {SAMPLE_MS / 1000}-second sample… <b>{Math.round(sampleProgress() * 100)}%</b>
+                  <Loader2 class="spin" size={16} /> Encoding a {secondsLabel(sampleLen())} sample… <b>{Math.round(sampleProgress() * 100)}%</b>
                   <span class="mx-busy-bar"><span style={{ width: `${sampleProgress() * 100}%` }} /></span>
                 </div>
               </Show>
@@ -935,7 +956,7 @@ function VideoEditor(props: { paths: string[] }) {
             </Show>
           </Section>
           <NameField single={single} value={name()} ext=".mp4" onInput={setName} error={nameError()}
-            example={`${stemOf(props.paths[0])}${name()}.mp4`} />
+            example={`${stemOf(props.paths[0])}${name()}.mp4`} dest={single && !nameError() ? destFor(props.paths[0]) : undefined} />
           <Show when={errors().length}>
             <p class="mx-hint warn"><AlertTriangle size={13} /> {plural(errors().length, "video")} can't be read and will be skipped: {errors().map((e) => basename(e.path)).join(", ")}</p>
           </Show>
@@ -958,14 +979,15 @@ function VideoEditor(props: { paths: string[] }) {
 
 // ---------- pictures ----------
 
-/** "auto": PNG for pictures with transparency, JPEG for the rest (decided per picture). */
-interface ISettings { fmt: "auto" | "jpeg" | "png"; quality: number; maxSide: number }
+/** "auto": PNG for pictures with transparency, JPEG for the rest (decided per picture).
+ *  `palette`: PNGs in 256 colours, the way TinyPNG makes them smaller. */
+interface ISettings { fmt: "auto" | "jpeg" | "png"; quality: number; maxSide: number; palette: boolean }
 
 const IPRESETS: { id: string; label: string; hint: string; s: Omit<ISettings, "fmt"> }[] = [
-  { id: "balanced", label: "Balanced", hint: "2560 px · 82%", s: { quality: 82, maxSide: 2560 } },
-  { id: "web", label: "Web", hint: "1920 px · 78%", s: { quality: 78, maxSide: 1920 } },
-  { id: "small", label: "Small", hint: "1280 px · 70%", s: { quality: 70, maxSide: 1280 } },
-  { id: "best", label: "Best quality", hint: "Full size · 92%", s: { quality: 92, maxSide: 0 } },
+  { id: "balanced", label: "Balanced", hint: "2560 px · 82%", s: { quality: 82, maxSide: 2560, palette: true } },
+  { id: "web", label: "Web", hint: "1920 px · 78%", s: { quality: 78, maxSide: 1920, palette: true } },
+  { id: "small", label: "Small", hint: "1280 px · 70%", s: { quality: 70, maxSide: 1280, palette: true } },
+  { id: "best", label: "Best quality", hint: "Full size · 92%", s: { quality: 92, maxSide: 0, palette: false } },
 ];
 const SIDES = [3840, 2560, 1920, 1600, 1280, 1024, 800];
 
@@ -975,11 +997,11 @@ function ImageEditor(props: { paths: string[] }) {
   const path = () => props.paths[idx()];
   const [info] = createResource(path, (p) => api.imageInfo(p));
   const [all] = createResource(() => (single ? null : props.paths), (ps) => api.folderStats(ps));
-  const [s, setS] = createStore<ISettings>({ fmt: "auto", quality: 82, maxSide: 2560 });
+  const [s, setS] = createStore<ISettings>({ fmt: "auto", quality: 82, maxSide: 2560, palette: true });
   /** Whether the picture on screen comes out as PNG. */
   const png = () => s.fmt === "png" || (s.fmt === "auto" && !!info()?.alpha);
-  const opts = () => ({ png: s.fmt === "png", auto: s.fmt === "auto", quality: s.quality, maxSide: s.maxSide });
-  const preset = () => IPRESETS.find((p) => p.s.quality === s.quality && p.s.maxSide === s.maxSide)?.id ?? null;
+  const opts = () => ({ png: s.fmt === "png", auto: s.fmt === "auto", quality: s.quality, maxSide: s.maxSide, palette: s.palette });
+  const preset = () => IPRESETS.find((p) => p.s.quality === s.quality && p.s.maxSide === s.maxSide && p.s.palette === s.palette)?.id ?? null;
 
   const outSize = () => {
     const i = info();
@@ -1009,7 +1031,7 @@ function ImageEditor(props: { paths: string[] }) {
 
   const fresh = () => {
     const a = after.latest, k = afterKey(), o = opts();
-    return !!a && !!k && !after.loading && k.png === o.png && k.auto === o.auto && k.quality === o.quality && k.maxSide === o.maxSide;
+    return !!a && !!k && !after.loading && k.png === o.png && k.auto === o.auto && k.quality === o.quality && k.maxSide === o.maxSide && k.palette === o.palette;
   };
   const totals = () => {
     const i = info(), a = after.latest;
@@ -1034,7 +1056,7 @@ function ImageEditor(props: { paths: string[] }) {
           <Compare before={before.latest?.dataUrl ?? info()!.preview} after={after.latest?.dataUrl} w={outSize()!.w} h={outSize()!.h}
             busy={after.loading} alpha={info()!.alpha}
             left={`Original · ${formatSize(info()!.size)}`}
-            right={after.latest ? `${png() ? "PNG" : `JPEG ${s.quality}%`} · ${formatSize(after.latest.bytes)}` : "Compressed"} />
+            right={after.latest ? `${png() ? (s.palette ? "PNG · 256 colours" : "PNG") : `JPEG ${s.quality}%`} · ${formatSize(after.latest.bytes)}` : "Compressed"} />
         </Show>
       </Show>
     </div>
@@ -1054,15 +1076,25 @@ function ImageEditor(props: { paths: string[] }) {
                 options={[
                   { value: "auto", label: "Auto", title: "PNG for pictures with transparency, JPEG for the rest" },
                   { value: "jpeg", label: "JPEG", title: "Much smaller; best for photos" },
-                  { value: "png", label: "PNG", title: "Lossless; keeps transparency" },
+                  { value: "png", label: "PNG", title: "Keeps transparency and sharp edges" },
                 ]} />
               <p class="mx-hint">
                 {s.fmt === "auto" ? (single ? `${i().alpha ? "PNG: this picture has transparency" : "JPEG: no transparency to keep"}.` : "Each picture: PNG when it has transparency, otherwise JPEG.")
-                  : s.fmt === "png" ? "Lossless: only resizing makes it smaller." : "Much smaller; best for photos and screenshots."}
+                  : s.fmt === "png" ? "Keeps transparency and sharp edges." : "Much smaller; best for photos and screenshots."}
               </p>
               <Show when={s.fmt === "jpeg" && i().alpha}><p class="mx-hint warn"><AlertTriangle size={13} /> Transparent parts become white in JPEG.</p></Show>
             </Section>
-            <Show when={s.fmt !== "png"}>
+            <Show when={single ? png() : s.fmt !== "jpeg"}>
+              <Section title="PNG colours">
+                <Seg value={s.palette ? "256" : "all"} onChange={(v) => setS("palette", v === "256")}
+                  options={[
+                    { value: "256", label: "256", title: "Like TinyPNG: about half the size" },
+                    { value: "all", label: "All", title: "Lossless" },
+                  ]} />
+                <p class="mx-hint">{s.palette ? "Like TinyPNG: about half the size. Transparency is kept; gradients are dithered." : "Lossless: only resizing makes it smaller (a picture with few colours still shrinks)."}</p>
+              </Section>
+            </Show>
+            <Show when={single ? !png() : s.fmt !== "png"}>
               <Section title="Quality" aside={<span class="mx-val">{s.quality}%</span>}>
                 <div class="mx-slider">
                   <input type="range" min="10" max="100" value={s.quality} onInput={(e) => setS("quality", +e.currentTarget.value)} />
@@ -1083,7 +1115,7 @@ function ImageEditor(props: { paths: string[] }) {
               <p class="mx-hint">Longest side. Phones and most screens show 1920–2560 px.</p>
             </Section>
             <NameField single={single} value={name()} ext={ext()} onInput={setName} error={nameError()}
-              example={`${stemOf(path())}${name()}${png() ? ".png" : ".jpg"}`} />
+              example={`${stemOf(path())}${name()}${png() ? ".png" : ".jpg"}`} dest={single && !nameError() ? destFor(path()) : undefined} />
             <p class="mx-hint mx-privacy">Location, camera and other details stored in the file aren't copied.</p>
           </>
         );

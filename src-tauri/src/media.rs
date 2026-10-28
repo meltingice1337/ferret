@@ -153,6 +153,41 @@ pub async fn video_info(path: String) -> Result<VideoInfo, String> {
     blocking(move || probe_video(&path)).await
 }
 
+/// A song's tags as Windows reads them (ID3, MP4, FLAC, WMA…), for the preview's details.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AudioInfo {
+    title: String,
+    artist: String,
+    album: String,
+    album_artist: String,
+    year: u32,
+    track: u32,
+    /// Bits per second.
+    bitrate: u32,
+    duration_ms: u64,
+}
+
+#[tauri::command]
+pub async fn audio_info(path: String) -> Result<AudioInfo, String> {
+    blocking(move || {
+        let file = open_file(&path)?;
+        let m = file.Properties().and_then(|p| p.GetMusicPropertiesAsync()).and_then(|op| op.join()).map_err(hr)?;
+        let text = |r: windows::core::Result<HSTRING>| r.map(|h| h.to_string().trim().to_string()).unwrap_or_default();
+        Ok(AudioInfo {
+            title: text(m.Title()),
+            artist: text(m.Artist()),
+            album: text(m.Album()),
+            album_artist: text(m.AlbumArtist()),
+            year: m.Year().unwrap_or(0),
+            track: m.TrackNumber().unwrap_or(0),
+            bitrate: m.Bitrate().unwrap_or(0),
+            duration_ms: m.Duration().map_or(0, |d| (d.Duration / 10_000).max(0) as u64),
+        })
+    })
+    .await
+}
+
 #[derive(Deserialize, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct VideoJob {
@@ -184,6 +219,9 @@ fn failure_text(r: TranscodeFailureReason, hevc: bool) -> String {
 
 /// One transcode. `tick` gets the progress (0–1) about ten times a second and
 /// returns false to cancel.
+/// How long a transcode may go without progress before it counts as stuck.
+const TRANSCODE_STALL: Duration = Duration::from_secs(15);
+
 fn transcode(j: &VideoJob, info: &VideoInfo, dest: &Path, hardware: bool, tick: &mut dyn FnMut(f64) -> bool) -> Result<(), String> {
     let src = open_file(&j.source)?;
     let dir = dest.parent().ok_or("Invalid destination")?;
@@ -229,7 +267,16 @@ fn transcode(j: &VideoJob, info: &VideoInfo, dest: &Path, hardware: bool, tick: 
         if let Some(end) = j.trim_end_ms.filter(|&e| e > start && e < info.duration_ms) {
             t.SetTrimStopTime(TimeSpan { Duration: end as i64 * 10_000 }).map_err(hr)?;
         }
-        let prep = t.PrepareFileTranscodeAsync(&src, &out, &profile).and_then(|op| op.join()).map_err(hr)?;
+        let prep_op = t.PrepareFileTranscodeAsync(&src, &out, &profile).map_err(hr)?;
+        let asked = std::time::Instant::now();
+        while prep_op.Status().map_err(hr)? == AsyncStatus::Started {
+            if asked.elapsed() > TRANSCODE_STALL {
+                let _ = prep_op.Cancel();
+                return Err("Windows' video encoder stopped responding".into());
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        let prep = prep_op.GetResults().map_err(hr)?;
         if !prep.CanTranscode().map_err(hr)? {
             return Err(failure_text(prep.FailureReason().map_err(hr)?, j.hevc));
         }
@@ -241,7 +288,20 @@ fn transcode(j: &VideoJob, info: &VideoInfo, dest: &Path, hardware: bool, tick: 
             Ok(())
         }))
         .map_err(hr)?;
+        // Now and then Windows' transcoder stops making progress (seen on short samples with
+        // the hardware encoder): give up after a while, so the caller retries in software
+        // instead of waiting forever.
+        let mut seen = pct.load(Ordering::Relaxed);
+        let mut moved = std::time::Instant::now();
         loop {
+            let now = pct.load(Ordering::Relaxed);
+            if now != seen {
+                seen = now;
+                moved = std::time::Instant::now();
+            } else if moved.elapsed() > TRANSCODE_STALL {
+                let _ = op.Cancel();
+                return Err("Windows' video encoder stopped responding".into());
+            }
             match op.Status().map_err(hr)? {
                 AsyncStatus::Completed => break,
                 AsyncStatus::Canceled => return Err("Cancelled".into()),
@@ -506,6 +566,9 @@ pub struct ImageOpts {
     pub quality: u32,
     /// Longest side in pixels; 0 keeps the size.
     pub max_side: u32,
+    /// PNG: down to 256 colours when the picture has more (see `encode_indexed`).
+    #[serde(default)]
+    pub palette: bool,
 }
 
 fn out_size(d: &Decoded, max_side: u32) -> (u32, u32) {
@@ -539,6 +602,11 @@ fn encode(d: &Decoded, o: ImageOpts) -> Result<(Vec<u8>, u32, u32), String> {
         let sc = unsafe { f.CreateBitmapScaler() }.map_err(hr)?;
         unsafe { sc.Initialize(&src, w, h, WICBitmapInterpolationModeHighQualityCubic) }.map_err(hr)?;
         src = sc.cast_source()?;
+    }
+    if o.png {
+        if let Some(bytes) = encode_indexed(&f, &src, w, h, o.palette)? {
+            return Ok((bytes, w, h));
+        }
     }
     // JPEG has no transparency: transparent parts become white, not black.
     let keep_alpha = o.png && d.alpha;
@@ -593,6 +661,153 @@ fn encode(d: &Decoded, o: ImageOpts) -> Result<(Vec<u8>, u32, u32), String> {
     Ok((read_stream(&stream)?, w, h))
 }
 
+/// PNG with a palette of at most 256 colours, transparency included. Exact (lossless) when the
+/// picture has that few (logos, icons, flat screenshots); with `reduce`, picked to fit the picture
+/// (NeuQuant) and dithered, which is what pngquant and TinyPNG do: often a third of the size.
+/// None when the picture has more colours and `reduce` is off (full colour then).
+fn encode_indexed(f: &IWICImagingFactory, src: &IWICBitmapSource, w: u32, h: u32, reduce: bool) -> Result<Option<Vec<u8>>, String> {
+    let conv = unsafe { f.CreateFormatConverter() }.map_err(hr)?;
+    unsafe { conv.Initialize(src, &GUID_WICPixelFormat32bppBGRA, WICBitmapDitherTypeNone, None, 0.0, WICBitmapPaletteTypeCustom) }.map_err(hr)?;
+    let mut px = vec![0u8; w as usize * h as usize * 4];
+    unsafe { conv.CopyPixels(std::ptr::null(), w * 4, &mut px) }.map_err(hr)?;
+    let (colors, indices) = match exact_palette(&px) {
+        Some(found) => found,
+        None if reduce => quantize(&px, w as usize, h as usize),
+        None => return Ok(None),
+    };
+    let palette = unsafe { f.CreatePalette() }.map_err(hr)?;
+    unsafe { palette.InitializeCustom(&colors) }.map_err(hr)?;
+    let bmp = unsafe { f.CreateBitmapFromMemory(w, h, &GUID_WICPixelFormat8bppIndexed, w, &indices) }.map_err(hr)?;
+    unsafe { bmp.SetPalette(&palette) }.map_err(hr)?;
+
+    let stream = unsafe { SHCreateMemStream(None) }.ok_or("Out of memory")?;
+    let enc = unsafe { f.CreateEncoder(&GUID_ContainerFormatPng, std::ptr::null()) }.map_err(hr)?;
+    unsafe { enc.Initialize(&stream, WICBitmapEncoderNoCache) }.map_err(hr)?;
+    let mut frame = None;
+    let mut bag: Option<IPropertyBag2> = None;
+    unsafe { enc.CreateNewFrame(&mut frame, &mut bag) }.map_err(hr)?;
+    let frame = frame.ok_or("Encoder failed")?;
+    unsafe { frame.Initialize(bag.as_ref()) }.map_err(hr)?;
+    unsafe { frame.SetSize(w, h) }.map_err(hr)?;
+    let mut fmt = GUID_WICPixelFormat8bppIndexed;
+    unsafe { frame.SetPixelFormat(&mut fmt) }.map_err(hr)?;
+    if fmt != GUID_WICPixelFormat8bppIndexed {
+        return Ok(None);
+    }
+    unsafe { frame.SetPalette(&palette) }.map_err(hr)?;
+    unsafe { frame.WriteSource(&bmp.cast_source()?, std::ptr::null()) }.map_err(hr)?;
+    unsafe { frame.Commit() }.map_err(hr)?;
+    unsafe { enc.Commit() }.map_err(hr)?;
+    Ok(Some(read_stream(&stream)?))
+}
+
+/// The picture's colours (WIC's ARGB, which is BGRA bytes read as one number) and each pixel's
+/// index into them, if there are at most 256. Fully transparent pixels count as one colour.
+fn exact_palette(bgra: &[u8]) -> Option<(Vec<u32>, Vec<u8>)> {
+    let mut seen: std::collections::HashMap<u32, u8> = std::collections::HashMap::new();
+    let mut colors: Vec<u32> = Vec::new();
+    let mut indices = Vec::with_capacity(bgra.len() / 4);
+    let mut last: Option<(u32, u8)> = None;
+    for p in bgra.chunks_exact(4) {
+        let c = if p[3] == 0 { 0 } else { u32::from_le_bytes([p[0], p[1], p[2], p[3]]) };
+        let k = match last {
+            Some((lc, lk)) if lc == c => lk,
+            _ => match seen.get(&c) {
+                Some(&k) => k,
+                None if colors.len() == 256 => return None,
+                None => {
+                    colors.push(c);
+                    seen.insert(c, (colors.len() - 1) as u8);
+                    (colors.len() - 1) as u8
+                }
+            },
+        };
+        last = Some((c, k));
+        indices.push(k);
+    }
+    Some((colors, indices))
+}
+
+/// 256 colours for a picture with more (NeuQuant), and each pixel's index, with Floyd–Steinberg
+/// dithering (damped a little, as pngquant does) so gradients and soft shadows don't band. It
+/// works on premultiplied colour, as pngquant does, so how see-through a pixel is counts for more
+/// than the colour of what barely shows. Opaque and see-through pixels get colours of their own
+/// (and one clear entry): opaque ones stay opaque, and soft edges get enough shades of alpha. For
+/// see-through ones colour counts for a third (SOFT): otherwise an even veil, all one alpha, comes
+/// out in whichever entry matches its colour best, however see-through that one is.
+fn quantize(bgra: &[u8], w: usize, h: usize) -> (Vec<u32>, Vec<u8>) {
+    use color_quant::NeuQuant;
+    const SOFT: u8 = 3;
+    let pm: Vec<u8> = bgra.chunks_exact(4).flat_map(|p| {
+        let k = |c: u8| ((c as u32 * p[3] as u32 + 127) / 255) as u8;
+        [k(p[0]), k(p[1]), k(p[2]), p[3]]
+    }).collect();
+    let (mut solid, mut soft) = (Vec::new(), Vec::new());
+    for p in pm.chunks_exact(4) {
+        match p[3] {
+            255 => solid.extend_from_slice(p),
+            0 => {}
+            _ => soft.extend_from_slice(&[p[0] / SOFT, p[1] / SOFT, p[2] / SOFT, p[3]]),
+        }
+    }
+    let (ns, nf) = (solid.len() / 4, soft.len() / 4);
+    // A see-through pixel varies in alpha too, so it gets about three times an opaque one's share.
+    let soft_n = if nf == 0 { 0 } else if ns == 0 { 255 } else { (255 * nf * 3 / (ns + nf * 3)).clamp(16, 160) };
+    let nets = [(soft_n < 255).then(|| NeuQuant::new(10, 255 - soft_n, &solid)), (soft_n > 0).then(|| NeuQuant::new(10, soft_n, &soft))];
+    let mut maps: Vec<Vec<u8>> = nets.iter().map(|n| n.as_ref().map(|n| n.color_map_rgba()).unwrap_or_default()).collect();
+    maps[0].chunks_exact_mut(4).for_each(|c| c[3] = 255);
+    maps[1].chunks_exact_mut(4).for_each(|c| {
+        c[3] = c[3].clamp(1, 254);
+        for ch in 0..3 {
+            c[ch] = (c[ch] as u32 * SOFT as u32).min(c[3] as u32) as u8;
+        }
+    });
+    let offset = [0, maps[0].len() / 4];
+    let clear = (maps[0].len() + maps[1].len()) / 4;
+    let colors = maps.concat().chunks_exact(4).map(|c| {
+        let k = |v: u8| ((v as u32 * 255 + c[3] as u32 / 2) / c[3] as u32).min(255) as u8;
+        u32::from_le_bytes([k(c[0]), k(c[1]), k(c[2]), c[3]])
+    }).chain(Some(0)).collect();
+    let mut indices = vec![0u8; w * h];
+    let mut cur = vec![[0f32; 4]; w + 2];
+    let mut next = vec![[0f32; 4]; w + 2];
+    for y in 0..h {
+        for x in 0..w {
+            let i = (y * w + x) * 4;
+            let a = pm[i + 3];
+            if a == 0 {
+                indices[y * w + x] = clear as u8;
+                continue; // nothing shows, so no error to carry
+            }
+            let e = cur[x + 1];
+            let mut want = [0u8; 4];
+            for ch in 0..4 {
+                want[ch] = (pm[i + ch] as f32 + e[ch]).round().clamp(0.0, 255.0) as u8;
+            }
+            let set = (a < 255) as usize;
+            want[3] = if set == 0 { 255 } else { want[3].clamp(1, 254) };
+            // Premultiplied colour can't be brighter than its alpha.
+            for ch in 0..3 {
+                want[ch] = want[ch].min(want[3]);
+            }
+            let key = if set == 0 { want } else { [want[0] / SOFT, want[1] / SOFT, want[2] / SOFT, want[3]] };
+            let k = nets[set].as_ref().map(|n| n.index_of(&key)).unwrap_or(0);
+            indices[y * w + x] = (offset[set] + k) as u8;
+            let got = &maps[set][k * 4..k * 4 + 4];
+            for ch in 0..4 {
+                let d = (want[ch] as f32 - got[ch] as f32) * 0.875;
+                cur[x + 2][ch] += d * 7.0 / 16.0;
+                next[x][ch] += d * 3.0 / 16.0;
+                next[x + 1][ch] += d * 5.0 / 16.0;
+                next[x + 2][ch] += d / 16.0;
+            }
+        }
+        std::mem::swap(&mut cur, &mut next);
+        next.iter_mut().for_each(|e| *e = [0.0; 4]);
+    }
+    (colors, indices)
+}
+
 fn data_url(bytes: &[u8], png: bool) -> String {
     format!("data:image/{};base64,{}", if png { "png" } else { "jpeg" }, base64::engine::general_purpose::STANDARD.encode(bytes))
 }
@@ -615,7 +830,7 @@ pub async fn image_info(path: String) -> Result<ImageInfo, String> {
     blocking(move || {
         let size = std::fs::metadata(&path).map_err(|e| e.to_string())?.len();
         let d = decode(&path)?;
-        let (bytes, ..) = encode(&d, ImageOpts { png: d.alpha, auto: false, quality: 92, max_side: 2048 })?;
+        let (bytes, ..) = encode(&d, ImageOpts { png: d.alpha, auto: false, quality: 92, max_side: 2048, palette: false })?;
         Ok(ImageInfo { path: path.clone(), size, width: d.width, height: d.height, alpha: d.alpha, format: d.format.clone(), preview: data_url(&bytes, d.alpha) })
     })
     .await
@@ -780,11 +995,11 @@ mod tests {
         let d = decode(&src).unwrap();
         // Stored 3200×2400 on its side, tagged to be shown upright.
         assert_eq!((d.width, d.height, d.alpha), (2400, 3200, false));
-        let (bytes, w, h) = encode(&d, ImageOpts { png: false, auto: false, quality: 70, max_side: 1600 }).unwrap();
+        let (bytes, w, h) = encode(&d, ImageOpts { png: false, auto: false, quality: 70, max_side: 1600, palette: false }).unwrap();
         assert_eq!((w, h), (1200, 1600));
         assert!(bytes.starts_with(&[0xFF, 0xD8]) && bytes.len() < std::fs::metadata(&src).unwrap().len() as usize);
         // Lower quality → smaller file.
-        let (small, ..) = encode(&d, ImageOpts { png: false, auto: false, quality: 30, max_side: 1600 }).unwrap();
+        let (small, ..) = encode(&d, ImageOpts { png: false, auto: false, quality: 30, max_side: 1600, palette: false }).unwrap();
         assert!(small.len() < bytes.len());
     }
 
@@ -793,9 +1008,9 @@ mod tests {
         let Some(src) = fixture("logo-transparent.png") else { return };
         let d = decode(&src).unwrap();
         assert!(d.alpha);
-        let (png, ..) = encode(&d, ImageOpts { png: true, auto: false, quality: 0, max_side: 0 }).unwrap();
+        let (png, ..) = encode(&d, ImageOpts { png: true, auto: false, quality: 0, max_side: 0, palette: false }).unwrap();
         assert!(png.starts_with(b"\x89PNG"));
-        let (jpg, w, h) = encode(&d, ImageOpts { png: false, auto: false, quality: 90, max_side: 0 }).unwrap();
+        let (jpg, w, h) = encode(&d, ImageOpts { png: false, auto: false, quality: 90, max_side: 0, palette: false }).unwrap();
         assert_eq!((w, h), (1600, 1000));
         // Decode the JPEG back: the transparent corner must be white, not black.
         let _com = ComGuard::init();
@@ -810,6 +1025,72 @@ mod tests {
         unsafe { conv.CopyPixels(&rc, 4, &mut px) }.unwrap();
         assert!(px[0] > 240 && px[1] > 240 && px[2] > 240, "corner {px:?}");
     }
+    /// BGRA (straight alpha) of an encoded picture.
+    fn pixels_of(bytes: &[u8]) -> (Vec<u8>, u32, u32) {
+        let _com = ComGuard::init();
+        let f = factory().unwrap();
+        let stream = unsafe { SHCreateMemStream(Some(bytes)) }.unwrap();
+        let dec = unsafe { f.CreateDecoderFromStream(&stream, std::ptr::null(), WICDecodeMetadataCacheOnDemand) }.unwrap();
+        let frame = unsafe { dec.GetFrame(0) }.unwrap();
+        let (mut w, mut h) = (0, 0);
+        unsafe { frame.GetSize(&mut w, &mut h) }.unwrap();
+        let conv = unsafe { f.CreateFormatConverter() }.unwrap();
+        unsafe { conv.Initialize(&frame, &GUID_WICPixelFormat32bppBGRA, WICBitmapDitherTypeNone, None, 0.0, WICBitmapPaletteTypeCustom) }.unwrap();
+        let mut px = vec![0u8; (w * h * 4) as usize];
+        unsafe { conv.CopyPixels(std::ptr::null(), w * 4, &mut px) }.unwrap();
+        (px, w, h)
+    }
+
+    /// A PNG with few colours keeps them exactly in a palette; one with many goes down to 256
+    /// colours when asked, smaller, with its soft transparency kept.
+    #[test]
+    fn palette_pngs() {
+        let full = ImageOpts { png: true, auto: false, quality: 0, max_side: 0, palette: false };
+        // Three colours and transparency: exact either way.
+        let (w, h) = (64u32, 48u32);
+        let flat: Vec<u8> = (0..w * h).flat_map(|i| match i % 3 { 0 => [0, 0, 255, 255], 1 => [0, 128, 0, 255], _ => [0, 0, 0, 0] }).collect();
+        let d = Decoded { key: (String::new(), None), width: w, height: h, pixels: flat.clone(), alpha: true, format: "PNG".into() };
+        let (bytes, ..) = encode(&d, full).unwrap();
+        assert_eq!(pixels_of(&bytes).0, flat, "exact palette is lossless");
+
+        let Some(src) = fixture("logo-transparent.png") else { return };
+        let d = decode(&src).unwrap();
+        let (big, ..) = encode(&d, full).unwrap();
+        let t = std::time::Instant::now();
+        let (small, w, h) = encode(&d, ImageOpts { palette: true, ..full }).unwrap();
+        println!("logo: full colour {} KB, 256 colours {} KB in {:?}", big.len() / 1024, small.len() / 1024, t.elapsed());
+        assert!(small.len() * 10 < big.len() * 7, "at least 30% smaller");
+        let (a, ..) = pixels_of(&big);
+        let (b, ..) = pixels_of(&small);
+        let soft = a.chunks_exact(4).filter(|p| p[3] > 0 && p[3] < 255).count();
+        let soft_kept = b.chunks_exact(4).filter(|p| p[3] > 0 && p[3] < 255).count();
+        assert!(soft == 0 || soft_kept * 2 > soft, "soft edges kept: {soft_kept} of {soft}");
+        // Opaque and clear pixels stay so; colour and (over 4 × 4 blocks, as dithering spreads
+        // it) alpha come out close.
+        let (mut err, mut n) = (0u64, 0u64);
+        for (p, q) in a.chunks_exact(4).zip(b.chunks_exact(4)) {
+            assert!(!(p[3] == 255 || p[3] == 0) || p[3] == q[3], "alpha {} → {}", p[3], q[3]);
+            if p[3] == 255 {
+                err += (0..3).map(|c| (p[c] as i32 - q[c] as i32).unsigned_abs() as u64).sum::<u64>();
+                n += 3;
+            }
+        }
+        let (w, h) = (w as usize, h as usize);
+        let block = |px: &[u8], bx: usize, by: usize| (0..16).map(|k| px[((by * 4 + k / 4) * w + bx * 4 + k % 4) * 4 + 3] as i32).sum::<i32>() / 16;
+        let (mut blocks, mut off, mut far, mut worst) = (0, 0, 0, 0);
+        for by in 0..h / 4 {
+            for bx in 0..w / 4 {
+                let d = (block(&a, bx, by) - block(&b, bx, by)).abs();
+                blocks += 1;
+                off += (d > 12) as usize;
+                far += (d > 24) as usize;
+                worst = worst.max(d);
+            }
+        }
+        println!("  mean colour error {:.2}; 4 × 4 blocks with alpha off by > 12: {off}, > 24: {far} of {blocks} (worst {worst})", err as f64 / n.max(1) as f64);
+        assert!(err < n * 8 && off * 100 < blocks && far * 1000 < blocks);
+    }
+
     #[test]
     fn rotated_photo_decodes_quickly() {
         // Rotating straight off the decoder took ~28 s for this 7.7 MP picture (debug build).
@@ -817,7 +1098,7 @@ mod tests {
         *LAST.lock().unwrap() = None;
         let t = std::time::Instant::now();
         let d = decode(&src).unwrap();
-        encode(&d, ImageOpts { png: false, auto: false, quality: 82, max_side: 2560 }).unwrap();
+        encode(&d, ImageOpts { png: false, auto: false, quality: 82, max_side: 2560, palette: false }).unwrap();
         assert!(t.elapsed() < Duration::from_secs(3), "took {:?}", t.elapsed());
     }
 }

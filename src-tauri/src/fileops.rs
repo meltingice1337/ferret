@@ -100,6 +100,13 @@ pub fn create_folder(dir: String, name: Option<String>) -> Res<String> {
     Ok(p)
 }
 
+/// Undo of "New folder": removes the folder only if it's still empty (nothing to lose, so it
+/// doesn't clutter the Recycle Bin). False when there's something in it, or it can't go.
+#[tauri::command]
+pub fn remove_empty_folder(path: String) -> bool {
+    fs::remove_dir(io(&paths::normalize(&path))).is_ok()
+}
+
 #[tauri::command]
 pub fn create_file(dir: String, name: String, content: Option<String>) -> Res<String> {
     validate_name(&name)?;
@@ -312,7 +319,10 @@ fn copy_tree(src: &Path, dst: &Path, policy: Policy, ctx: &JobCtx, report: bool)
 fn can_create_folder(dir: &str) -> bool {
     let probe = io(&join(dir, &format!(".ferret-probe-{}", std::process::id())));
     match fs::create_dir(&probe) {
-        Ok(()) => fs::remove_dir(&probe).is_ok() || true,
+        Ok(()) => {
+            let _ = fs::remove_dir(&probe);
+            true
+        }
         Err(e) => e.kind() == std::io::ErrorKind::AlreadyExists,
     }
 }
@@ -377,6 +387,9 @@ pub fn transfer(app: AppHandle, op: String, sources: Vec<String>, dest: String, 
     Ok(jobs::spawn(&app, if moving { "move" } else { "copy" }, &label, move |ctx| {
         let sources: Vec<String> = sources.iter().map(|s| paths::normalize(s)).collect();
 
+        // Like the delete job: an item that can't be moved or copied (open in another program,
+        // say) pauses the job with Try again / Skip / Skip all / Cancel; the others still go.
+        let mut skip_all = false;
         // Fast path: same-volume moves are renames.
         let mut pending = Vec::new();
         for s in &sources {
@@ -397,11 +410,31 @@ pub fn transfer(app: AppHandle, op: String, sources: Vec<String>, dest: String, 
                 let target_exists = fs::symlink_metadata(io(&target)).is_ok();
                 let src_is_dir = io(s).is_dir();
                 if !target_exists || (policy == Policy::Replace && !src_is_dir) {
-                    if target_exists {
-                        displace(&io(&target), ctx)?;
-                    }
                     ctx.set_current(&name);
-                    if fs::rename(io(s), io(&target)).is_ok() {
+                    // A file is renamed or it isn't moved: copying one that can't be renamed (open
+                    // in another program) would only leave a second copy behind.
+                    let mut copy_instead = false;
+                    let moved = per_item(ctx, &mut skip_all, s, || {
+                        if !src_is_dir && let Some(why) = move_blocker(&io(s)) {
+                            return Err(why);
+                        }
+                        if fs::symlink_metadata(io(&target)).is_ok() {
+                            displace(&io(&target), ctx)?;
+                        }
+                        match fs::rename(io(s), io(&target)) {
+                            Ok(()) => Ok(()),
+                            // Another volume mounted in a folder: copy it over instead.
+                            Err(e) if src_is_dir || e.raw_os_error() == Some(17) => {
+                                copy_instead = true;
+                                Ok(())
+                            }
+                            Err(e) => Err(move_blocker(&io(s)).unwrap_or_else(|| format!("Couldn't move “{name}”: {e}"))),
+                        }
+                    })?;
+                    if !moved {
+                        continue;
+                    }
+                    if !copy_instead {
                         ctx.pair(s.clone(), target.clone());
                         ctx.created(target);
                         continue;
@@ -422,19 +455,87 @@ pub fn transfer(app: AppHandle, op: String, sources: Vec<String>, dest: String, 
         ctx.set_totals(bytes, files);
 
         for (s, target) in pending {
-            ctx.check()?;
-            let tp = io(&target);
-            // A file replacing a folder (or vice versa) can't merge: displace the whole item.
-            if policy == Policy::Replace && tp.exists() && (io(&s).is_dir() != tp.is_dir() || !io(&s).is_dir()) {
-                displace(&tp, ctx)?;
-            }
-            copy_tree(&io(&s), &tp, policy, ctx, true)?;
-            if moving {
-                remove_any(&io(&s)).map_err(|e| format!("Copied, but couldn't remove {s}: {e}"))?;
-            }
+            let (src, tp) = (io(&s), io(&target));
+            let src_is_dir = src.is_dir();
+            let mut copied = false;
+            per_item(ctx, &mut skip_all, &s, || {
+                if !copied {
+                    // Moving a file that can't be removed afterwards would leave two copies.
+                    if moving && !src_is_dir && let Some(why) = move_blocker(&src) {
+                        return Err(why);
+                    }
+                    // A file replacing a folder (or vice versa) can't merge: displace the whole item.
+                    if policy == Policy::Replace && tp.exists() && (src_is_dir != tp.is_dir() || !src_is_dir) {
+                        displace(&tp, ctx)?;
+                    }
+                    copy_tree(&src, &tp, policy, ctx, true)?;
+                    copied = true;
+                }
+                // Try again only retries the removal: the copy is already there.
+                if moving {
+                    remove_any(&src).map_err(|e| match move_blocker(&src) {
+                        Some(why) => format!("Copied, but couldn't remove the original: {why}"),
+                        None if src_is_dir => format!("Copied, but couldn't remove all of “{}”: something inside it is open in another program", file_name(&s)),
+                        None => format!("Copied, but couldn't remove “{}”: {e}", file_name(&s)),
+                    })?;
+                }
+                Ok(())
+            })?;
         }
         Ok(())
     }))
+}
+
+/// Runs one item of a job, asking Try again / Skip / Skip all / Cancel when it fails (Skip all:
+/// the rest fail without asking). Ok(false) when the item was skipped; Err when the job is cancelled.
+fn per_item(ctx: &JobCtx, skip_all: &mut bool, item: &str, mut run: impl FnMut() -> Res<()>) -> Res<bool> {
+    loop {
+        ctx.check()?;
+        let Err(why) = run() else { return Ok(true) };
+        // Cancelled while it ran: nothing to ask about.
+        ctx.check()?;
+        if *skip_all {
+            ctx.failed(item, why);
+            return Ok(false);
+        }
+        match ctx.ask(why.clone()).as_str() {
+            "retry" => continue,
+            "skip" => {
+                ctx.failed(item, why);
+                return Ok(false);
+            }
+            "skipAll" => {
+                *skip_all = true;
+                ctx.failed(item, why);
+                return Ok(false);
+            }
+            _ => {
+                ctx.mark_cancelled();
+                return Err("Cancelled".into());
+            }
+        }
+    }
+}
+
+/// Whether a file can't be moved away from where it is because it's open in another program
+/// that doesn't allow that (asking Windows for delete access tells, without changing anything).
+/// Anything else is left to the move itself: shares and WSL answer such probes unevenly.
+fn move_blocker(p: &Path) -> Option<String> {
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::OpenOptionsExt;
+        const DELETE: u32 = 0x0001_0000;
+        const SHARE_ALL: u32 = 0x7;
+        if let Err(e) = fs::OpenOptions::new().access_mode(DELETE).share_mode(SHARE_ALL).open(p)
+            && matches!(e.raw_os_error(), Some(32) | Some(33))
+        {
+            let name = p.file_name().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
+            return Some(format!("“{name}” is open in another program"));
+        }
+    }
+    #[cfg(not(windows))]
+    let _ = p;
+    None
 }
 
 /// Undo for a move: puts each moved item back where it came from.
@@ -664,12 +765,23 @@ pub async fn restore_from_trash(items: Vec<String>) -> Res<Vec<String>> {
         #[cfg(windows)]
         {
             let pick = latest_in_trash(&items)?;
-            let restored: Vec<String> = pick.iter().map(|i| paths::normalize(&i.original_path().to_string_lossy())).collect();
+            let original = |i: &trash::TrashItem| paths::normalize(&i.original_path().to_string_lossy());
+            let mut restored: Vec<String> = pick.iter().map(original).collect();
             // Restoring into a protected folder needs the elevated path.
-            if let Some(dir) = pick.iter().map(|i| i.original_parent.to_string_lossy().into_owned()).find(|d| crate::shellops::needs_admin_write(d)) {
+            if let Some(dir) = pick.iter().map(|i| paths::normalize(&i.original_parent.to_string_lossy())).find(|d| crate::shellops::needs_admin_write(d)) {
                 return Err(format!("elevate:You'll need administrator permission to restore into “{}”", file_name(&dir)));
             }
-            trash::os_limited::restore_all(pick).map_err(err)?;
+            // The shell can't restore to a path this long; those go back directly.
+            let (long, pick): (Vec<_>, Vec<_>) = pick.into_iter().partition(|i| crate::shellops::too_long_for_shell(&original(i)));
+            for i in &long {
+                let to = crate::shellops::restore_direct(&paths::normalize(&i.id.to_string_lossy()), &original(i))?;
+                if let Some(r) = restored.iter_mut().find(|r| paths::key(r) == paths::key(&original(i))) {
+                    *r = to;
+                }
+            }
+            if !pick.is_empty() {
+                trash::os_limited::restore_all(pick).map_err(err)?;
+            }
             log::info!("restored from Recycle Bin: {}", crate::logging::paths(&restored));
             Ok(restored)
         }
@@ -844,7 +956,12 @@ pub struct TextPreview {
     binary: bool,
     encoding: String,
     size: u64,
+    /// Lines in the whole file when only its start was read (counted up to TEXT_COUNT_MAX).
+    lines: Option<u64>,
 }
+
+/// Files up to this size get their lines counted when the preview shows only their start.
+const TEXT_COUNT_MAX: u64 = 512 * 1024 * 1024;
 
 fn looks_binary(bytes: &[u8]) -> bool {
     let sample = &bytes[..bytes.len().min(8192)];
@@ -861,15 +978,15 @@ fn looks_binary(bytes: &[u8]) -> bool {
 pub async fn read_text(path: String, max_bytes: Option<u64>) -> Res<TextPreview> {
     tauri::async_runtime::spawn_blocking(move || {
         let max = max_bytes.unwrap_or(2 * 1024 * 1024);
-        let f = fs::File::open(io(&path)).map_err(err)?;
+        let mut f = fs::File::open(io(&path)).map_err(err)?;
         let size = f.metadata().map_err(err)?.len();
         let mut buf = Vec::with_capacity(max.min(size) as usize);
-        f.take(max).read_to_end(&mut buf).map_err(err)?;
+        (&mut f).take(max).read_to_end(&mut buf).map_err(err)?;
         let truncated = size > max;
 
         let (enc, bom) = encoding_rs::Encoding::for_bom(&buf).unwrap_or((encoding_rs::UTF_8, 0));
         if bom == 0 && looks_binary(&buf) {
-            return Ok(TextPreview { text: String::new(), truncated, binary: true, encoding: "binary".into(), size });
+            return Ok(TextPreview { text: String::new(), truncated, binary: true, encoding: "binary".into(), size, lines: None });
         }
         let (text, encoding) = if bom > 0 {
             let (t, _, _) = enc.decode(&buf);
@@ -887,7 +1004,22 @@ pub async fn read_text(path: String, max_bytes: Option<u64>) -> Res<TextPreview>
                 }
             }
         };
-        Ok(TextPreview { text, truncated, binary: false, encoding, size })
+        // Cut short: the rest is only counted, so the preview can say how long the file is.
+        // (Byte counting fits UTF-8 and the one-byte encodings, not UTF-16.)
+        let lines = (truncated && bom == 0 && size <= TEXT_COUNT_MAX).then(|| {
+            let mut n = memchr::memchr_iter(b'\n', &buf).count() as u64;
+            let mut last = buf.last().copied();
+            let mut chunk = vec![0u8; 1 << 20];
+            while let Ok(got) = f.read(&mut chunk) {
+                if got == 0 {
+                    break;
+                }
+                n += memchr::memchr_iter(b'\n', &chunk[..got]).count() as u64;
+                last = Some(chunk[got - 1]);
+            }
+            n + u64::from(last.is_some_and(|b| b != b'\n'))
+        });
+        Ok(TextPreview { text, truncated, binary: false, encoding, size, lines })
     })
     .await
     .map_err(err)?

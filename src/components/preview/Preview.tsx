@@ -10,6 +10,7 @@ import {
   ArchiveView, AudioView, CodeView, CsvView, DocxView, ErrorNote, FolderView, FontView, ImageView, JsonView,
   MarkdownView, NoPreview, PdfView, ShellThumbView, VideoView, type Meta,
 } from "./renderers";
+import { SheetView, SlidesView } from "./office";
 
 const TEXTISH = new Set(["code", "text", "data"]);
 const SHELL_THUMB = new Set(["doc", "sheet", "exe"]);
@@ -87,6 +88,8 @@ function viewOf(e: Entry) {
   if (e.ext === "md" || e.ext === "markdown") return "markdown";
   if (TEXTISH.has(kind)) return "code";
   if (/^(docx|docm|dotx)$/.test(e.ext)) return "docx";
+  if (/^(xlsx|xlsm|xltx|xltm|xlsb|xls|xla|ods)$/.test(e.ext)) return "sheet";
+  if (/^(pptx|pptm|potx|potm|ppsx|ppsm)$/.test(e.ext)) return "slides";
   if (SHELL_THUMB.has(kind)) return "shell";
   return "other";
 }
@@ -123,6 +126,8 @@ function View(props: { e: Entry; path: string; large?: boolean; setMeta: (m: Met
       <Match when={view() === "docx"}>
         <DocxView path={path()} entry={e()} setMeta={setMeta} large={props.large} />
       </Match>
+      <Match when={view() === "sheet"}><SheetView path={path()} setMeta={setMeta} large={props.large} /></Match>
+      <Match when={view() === "slides"}><SlidesView path={path()} setMeta={setMeta} large={props.large} /></Match>
       <Match when={view() === "shell"}><ShellThumbView path={path()} entry={e()} large={props.large} /></Match>
     </Switch>
   );

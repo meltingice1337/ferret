@@ -42,9 +42,14 @@ export const languageName = (ext: string) => LANGUAGE[ext.toLowerCase()] ?? "";
 
 export const plural = (n: number, word: string) => `${n.toLocaleString()} ${word}${n === 1 ? "" : "s"}`;
 
+/** Format names that aren't just the extension in capitals. */
+const FORMAT_NAME: Record<string, string> = { jpg: "JPEG", jpeg: "JPEG", jfif: "JPEG", tif: "TIFF", tiff: "TIFF", m4a: "AAC" };
+
 export function typeLabel(e: Entry): string {
   if (!e.isDir && EXT_LABEL[e.ext]) return EXT_LABEL[e.ext];
   const k = kindOf(e);
+  // "PNG image", "MP4 video": as in Explorer, the format tells same-kind files apart.
+  if (k === "image" || k === "video" || k === "audio") return `${FORMAT_NAME[e.ext] ?? e.ext.toUpperCase()} ${KIND_LABEL[k].toLowerCase()}`;
   if (k === "other") return e.ext ? `${e.ext.toUpperCase()} file` : "File";
   if (k === "code" && languageName(e.ext)) return `${languageName(e.ext)} source`;
   if (k === "code" || k === "data") return `${e.ext.toUpperCase()} ${k === "code" ? "source" : "file"}`;

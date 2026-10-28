@@ -24,6 +24,7 @@
   height: 36px; padding: 0 10px; border-radius: 8px; text-align: left; color: var(--fg-2);
 }
 .palette-item.cmd { grid-template-columns: 20px auto 1fr auto; }
+.palette-item.file { grid-template-columns: 20px var(--name-w, minmax(120px, auto)) 1fr auto; }
 .palette-item.active { background: var(--accent-soft); color: var(--fg); }
 .palette-name { color: var(--fg); white-space: pre; overflow: hidden; text-overflow: ellipsis; max-width: 340px; }
 .palette-name mark { background: none; color: var(--accent); font-weight: 700; }
@@ -130,3 +131,15 @@
   font-family: var(--mono); font-size: 11.5px; padding: 1px 6px; border-radius: 5px; background: var(--hover); color: var(--fg-2); white-space: nowrap;
 }
 .palette-help-keys { padding: 10px 8px 0; font-size: 11.5px; color: var(--fg-3); line-height: 2; }
+
+/* A narrow window: the type chips wrap instead of running off the edge, and where a result
+   lives goes under its name instead of being squeezed beside it. */
+@media (max-width: 640px) {
+  .palette-types { flex-wrap: wrap; }
+  .palette-item.file { grid-template-columns: 20px minmax(0, 1fr) auto auto; height: auto; min-height: 42px; padding: 4px 10px; row-gap: 1px; }
+  .palette-item.file > :first-child { grid-row: 1 / span 2; }
+  .palette-item.file .palette-name { grid-column: 2; grid-row: 1; max-width: none; }
+  .palette-item.file .palette-path { grid-column: 2; grid-row: 2; }
+  .palette-item.file .palette-meta { grid-column: 3; grid-row: 1 / span 2; }
+  .palette-item.file .palette-reveal { grid-column: 4; grid-row: 1 / span 2; }
+}

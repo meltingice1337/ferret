@@ -130,6 +130,72 @@ pub fn list_following(dir: &str) -> Result<(String, Vec<Entry>), String> {
     Err(format!("denied:{}", paths::normalize(dir)))
 }
 
+/// The server in a path that names only a server (`\\nas`, `\\wsl.localhost`), which Windows
+/// can't list as a folder: Explorer shows its shared folders (or, for WSL, the distros).
+pub fn server_root(p: &str) -> Option<&str> {
+    let rest = p.strip_prefix(r"\\")?.trim_end_matches('\\');
+    (!rest.is_empty() && !rest.contains('\\') && !rest.starts_with(['?', '.'])).then_some(rest)
+}
+
+/// What's in a server root, as folders: the installed WSL distros for `\\wsl.localhost` (and
+/// `\\wsl$`), otherwise the server's shared folders (without the hidden ones, like C$).
+pub fn list_server(server: &str) -> Result<Vec<Entry>, String> {
+    let folder = |name: String, path: String| Entry {
+        name, path, is_dir: true, is_symlink: false, hidden: false, size: 0, modified: None, created: None,
+        ext: String::new(), in_archive: false, origin: None,
+    };
+    if server.eq_ignore_ascii_case("wsl.localhost") || server.eq_ignore_ascii_case("wsl$") {
+        return Ok(crate::places::wsl_distros().into_iter().map(|d| {
+            let path = format!(r"\\{server}\{}", d.name);
+            folder(d.name, path)
+        }).collect());
+    }
+    shares(server).map(|names| names.into_iter().map(|n| {
+        let path = format!(r"\\{server}\{n}");
+        folder(n, path)
+    }).collect())
+}
+
+#[cfg(windows)]
+fn shares(server: &str) -> Result<Vec<String>, String> {
+    use windows::Win32::Storage::FileSystem::{NetShareEnum, SHARE_INFO_1, STYPE_DISKTREE, STYPE_MASK, STYPE_SPECIAL};
+    #[link(name = "netapi32")]
+    unsafe extern "system" {
+        fn NetApiBufferFree(buffer: *const std::ffi::c_void) -> u32;
+    }
+    const MAX_PREFERRED_LENGTH: u32 = u32::MAX;
+    let name: Vec<u16> = format!(r"\\{server}").encode_utf16().chain([0]).collect();
+    let (mut buf, mut read, mut total) = (std::ptr::null_mut::<u8>(), 0u32, 0u32);
+    let st = unsafe { NetShareEnum(windows::core::PCWSTR(name.as_ptr()), 1, &mut buf, MAX_PREFERRED_LENGTH, &mut read, &mut total, None) };
+    if st != 0 {
+        return Err(match st {
+            5 => format!("Access denied: “{server}” doesn't list its shared folders to you"),
+            53 | 1222 | 2114 => format!("Can't reach “{server}”"),
+            _ => format!("Can't list the shared folders of “{server}” (error {st})"),
+        });
+    }
+    let mut out = Vec::new();
+    if !buf.is_null() {
+        let items = unsafe { std::slice::from_raw_parts(buf as *const SHARE_INFO_1, read as usize) };
+        for s in items {
+            let kind = s.shi1_type.0;
+            if kind & STYPE_MASK.0 == STYPE_DISKTREE.0 && kind & STYPE_SPECIAL.0 == 0
+                && let Ok(n) = unsafe { s.shi1_netname.to_string() }
+            {
+                out.push(n);
+            }
+        }
+        unsafe { NetApiBufferFree(buf as *const _) };
+    }
+    out.sort_by_key(|n| n.to_lowercase());
+    Ok(out)
+}
+
+#[cfg(not(windows))]
+fn shares(server: &str) -> Result<Vec<String>, String> {
+    Err(format!("Can't list the shared folders of “{server}”"))
+}
+
 pub fn join(dir: &str, name: &str) -> String {
     if dir.ends_with('\\') {
         format!("{dir}{name}")

@@ -205,3 +205,43 @@ fn bench_3m() {
         println!("| `{q}` | {:.2} | {:.2} |", pct(&mut per[i], 0.5), pct(&mut per[i], 0.95));
     }
 }
+
+/// What leaving accents out costs: the same 2.4M-entry drive with and without accented names
+/// (ACCENTED, default 600k: a lot more than a real drive has),
+/// `cargo test --release bench_accents -- --ignored --nocapture`.
+#[test]
+#[ignore]
+fn bench_accents() {
+    let words = ["Résumé", "Café", "Mañana", "Größe", "Kraków", "Ελληνικά", "Ångström", "Façade", "Žurnal", "Naïve"];
+    let n: u32 = std::env::var("ACCENTED").ok().and_then(|v| v.parse().ok()).unwrap_or(600_000);
+    let mut accented = synth(r"C:\", 2_400_000, 0x9E37_79B9_7F4A_7C15);
+    for i in 0..n {
+        let name = format!("{} {} {i}.docx", words[i as usize % words.len()], words[(i as usize / 7) % words.len()]);
+        accented.insert(0, &name, 0, 1000, 1_700_000_000);
+    }
+    let plain = synth(r"C:\", 2_400_000, 0x9E37_79B9_7F4A_7C15);
+    println!("\n| query | plain p50 ms | accented p50 ms | hits |");
+    println!("|---|---:|---:|---:|");
+    let req = |q: &str| SearchRequest { query: q.into(), limit: 50, ..Default::default() };
+    let time = |eng: &Engine, q: &str| {
+        let mut v = Vec::new();
+        let mut total = 0;
+        for i in 0..23 {
+            eng.clear_cache();
+            let t = Instant::now();
+            total = eng.search(&req(q)).total;
+            if i >= 3 {
+                v.push(t.elapsed().as_secs_f64() * 1e3);
+            }
+        }
+        (pct(&mut v, 0.5), total)
+    };
+    let (a, b) = (Engine::new(), Engine::new());
+    a.add_volume(Volume::new(plain, true));
+    b.add_volume(Volume::new(accented, true));
+    for q in ["node", "resume", "cafe 12", "grosse", "zqxj", "invoice 2024", "ext:pdf invoice"] {
+        let (pa, _) = time(&a, q);
+        let (pb, n) = time(&b, q);
+        println!("| `{q}` | {pa:.2} | {pb:.2} | {n} |");
+    }
+}

@@ -108,6 +108,60 @@ pub fn lower(s: &str) -> Vec<u8> {
     v
 }
 
+/// The name without accents, for searches typed without them: Latin letters with a diacritic
+/// become their base letter (é → e, ł → l, ș → s), ligatures their letters (æ → ae, ß → ss).
+/// Everything else is kept, lower-cased. Not length-preserving: only for comparing.
+pub fn fold_into(s: &[u8], out: &mut Vec<u8>) {
+    out.clear();
+    let Ok(s) = std::str::from_utf8(s) else {
+        out.extend_from_slice(s);
+        return;
+    };
+    let mut tmp = [0u8; 4];
+    for c in s.chars() {
+        if c.is_ascii() {
+            out.push(c.to_ascii_lowercase() as u8);
+            continue;
+        }
+        let c = c.to_lowercase().next().unwrap_or(c);
+        match fold_char(c) {
+            Some(base) => out.extend_from_slice(base.as_bytes()),
+            None => out.extend_from_slice(c.encode_utf8(&mut tmp).as_bytes()),
+        }
+    }
+}
+
+fn fold_char(c: char) -> Option<&'static str> {
+    Some(match c {
+        'à'..='å' | 'ā' | 'ă' | 'ą' => "a",
+        'æ' => "ae",
+        'ç' | 'ć' | 'ĉ' | 'ċ' | 'č' => "c",
+        'ð' | 'ď' | 'đ' => "d",
+        'è'..='ë' | 'ē' | 'ĕ' | 'ė' | 'ę' | 'ě' => "e",
+        'ƒ' => "f",
+        'ĝ' | 'ğ' | 'ġ' | 'ģ' => "g",
+        'ĥ' | 'ħ' => "h",
+        'ì'..='ï' | 'ĩ' | 'ī' | 'ĭ' | 'į' | 'ı' => "i",
+        'ĳ' => "ij",
+        'ĵ' => "j",
+        'ķ' | 'ĸ' => "k",
+        'ĺ' | 'ļ' | 'ľ' | 'ŀ' | 'ł' => "l",
+        'ñ' | 'ń' | 'ņ' | 'ň' | 'ŉ' | 'ŋ' => "n",
+        'ò'..='ö' | 'ø' | 'ō' | 'ŏ' | 'ő' => "o",
+        'œ' => "oe",
+        'ŕ' | 'ŗ' | 'ř' => "r",
+        'ś' | 'ŝ' | 'ş' | 'š' | 'ș' | 'ſ' => "s",
+        'ß' => "ss",
+        'ţ' | 'ť' | 'ŧ' | 'ț' => "t",
+        'þ' => "th",
+        'ù'..='ü' | 'ũ' | 'ū' | 'ŭ' | 'ů' | 'ű' | 'ų' => "u",
+        'ŵ' => "w",
+        'ý' | 'ÿ' | 'ŷ' => "y",
+        'ź' | 'ż' | 'ž' => "z",
+        _ => return None,
+    })
+}
+
 /// Original bytes with control chars replaced (same length as `lower`).
 fn sanitize_into(s: &str, out: &mut Vec<u8>) {
     out.extend(s.bytes().map(|b| if b < 0x20 { b'?' } else { b }));

@@ -9,6 +9,7 @@ mod jobs;
 mod listing;
 mod logging;
 mod media;
+mod office;
 mod paths;
 mod places;
 mod protocol;
@@ -153,10 +154,11 @@ pub fn run() {
             commands::clear_recents,
             commands::set_backdrop,
             commands::drag_icon,
-            logging::open_log_folder,
+            logging::log_folder,
             jobs::cancel_job,
             jobs::answer_job,
             fileops::create_folder,
+            fileops::remove_empty_folder,
             fileops::create_file,
             fileops::rename_item,
             fileops::check_conflicts,
@@ -185,6 +187,7 @@ pub fn run() {
             shell::list_open_with,
             shell::open_with,
             shell::clipboard_write_files,
+            shell::clipboard_after_cut,
             shell::clipboard_read_files,
             shell::open_terminal,
             shell::open_in_vscode,
@@ -198,10 +201,13 @@ pub fn run() {
             archive::archive_unlock,
             // media.rs (video / picture compression)
             media::video_info,
+            media::audio_info,
             media::compress_videos,
             media::video_sample,
             media::image_info,
             media::image_preview,
+            office::sheet_preview,
+            office::slides_preview,
             media::compress_images,
             media::media_release,
             // search (whole-disk index)

@@ -43,7 +43,7 @@ pub async fn bootstrap(state: State<'_, AppState>) -> Res<Bootstrap> {
             session: db::kv_get(c, "session"),
             places,
             favorites: db::favorites(c)?,
-            recents: db::recents(c, 12)?,
+            recents: db::recents_present(c, 12)?,
         })
     })
 }
@@ -59,7 +59,7 @@ pub struct SharedState {
 /// What other Ferret windows may have changed (re-read when a window gets focus).
 #[tauri::command]
 pub fn shared_state(state: State<'_, AppState>) -> Res<SharedState> {
-    with_db(&state, |c| Ok(SharedState { settings: db::load_settings(c), favorites: db::favorites(c)?, recents: db::recents(c, 12)? }))
+    with_db(&state, |c| Ok(SharedState { settings: db::load_settings(c), favorites: db::favorites(c)?, recents: db::recents_present(c, 12)? }))
 }
 
 #[tauri::command]
@@ -97,6 +97,12 @@ pub async fn list_dir(state: State<'_, AppState>, path: String) -> Res<DirListin
         let q = query.clone();
         let entries = tauri::async_runtime::spawn_blocking(move || crate::search::list_matches(&q)).await.map_err(err)?;
         let path = format!("{}{query}", crate::search::SEARCH_PREFIX);
+        let resolved = with_db(&state, |c| Ok(db::resolve_view(c, &db::load_settings(c), &path, None)))?;
+        return Ok(DirListing { path, entries, resolved });
+    }
+    if let Some(server) = listing::server_root(&path).map(str::to_string) {
+        let path = format!(r"\\{server}");
+        let entries = tauri::async_runtime::spawn_blocking(move || listing::list_server(&server)).await.map_err(err)??;
         let resolved = with_db(&state, |c| Ok(db::resolve_view(c, &db::load_settings(c), &path, None)))?;
         return Ok(DirListing { path, entries, resolved });
     }
@@ -174,6 +180,10 @@ pub async fn resolve_input(input: String, current: Option<String>) -> Res<Resolv
                 .or_else(places::default_distro)
                 .ok_or("No WSL distro installed")?;
             s = format!("{}{}", paths::wsl_root(&distro), s.replace('/', "\\"));
+        }
+        // A server on its own (`\\nas`, `\\wsl.localhost`) lists its shared folders.
+        if let Some(server) = listing::server_root(&s) {
+            return Ok(ResolvedInput { path: format!(r"\\{server}"), kind: "dir" });
         }
         let path = paths::long_form(&s);
         let kind = match std::fs::metadata(paths::for_io(&path)) {
@@ -277,7 +287,7 @@ pub fn reorder_favorites(state: State<'_, AppState>, paths: Vec<String>) -> Res<
 pub fn push_recent(state: State<'_, AppState>, path: String) -> Res<Vec<db::Recent>> {
     with_db(&state, |c| {
         db::push_recent(c, &path)?;
-        db::recents(c, 12)
+        db::recents_present(c, 12)
     })
 }
 
@@ -285,7 +295,7 @@ pub fn push_recent(state: State<'_, AppState>, path: String) -> Res<Vec<db::Rece
 pub fn remove_recent(state: State<'_, AppState>, path: String) -> Res<Vec<db::Recent>> {
     with_db(&state, |c| {
         db::remove_recent(c, &path)?;
-        db::recents(c, 12)
+        db::recents_present(c, 12)
     })
 }
 

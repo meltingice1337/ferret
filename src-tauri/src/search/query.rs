@@ -12,7 +12,7 @@
 //! 4. when a query refines the previous one (same filters, every old token is
 //!    contained in a new one) only the cached candidate records are re-checked.
 
-use super::index::{decode_idx, flags::*, lower, FastMap, FastSet, Index, HDR, NONE};
+use super::index::{decode_idx, flags::*, fold_into, lower, FastMap, FastSet, Index, HDR, NONE};
 use memchr::memmem::Finder;
 use memchr::{memchr, memrchr};
 use nucleo_matcher::pattern::{Atom, AtomKind, CaseMatching, Normalization, Pattern};
@@ -415,6 +415,8 @@ const FUZZY_MAX: i32 = 3_000;
 /// folder > fuzzy (tier 0). Gaps exceed every other adjustment incl. frecency.
 const NAME_TIER: i32 = 50_000;
 const PATH_TIER: i32 = 20_000;
+/// A match found only with the accents left out ranks under the same match with them.
+const FOLD_PENALTY: i32 = 500;
 const DIR_BONUS: i32 = 300;
 const HIDDEN_PENALTY: i32 = 400;
 const DEPTH_STEP: i32 = 40;
@@ -560,6 +562,20 @@ fn folder_pred(p: &[u8], prefix: bool) -> Option<(FolderPred, Vec<u8>)> {
 
 fn glob_literal(g: &[u8]) -> &[u8] {
     g.split(|&b| b == b'*' || b == b'?').max_by_key(|s| s.len()).unwrap_or(&[])
+}
+
+/// The first byte from 0x80 up (part of a non-ASCII character), 16 bytes at a time.
+fn find_high(h: &[u8]) -> Option<usize> {
+    const HIGH: u128 = u128::from_ne_bytes([0x80; 16]);
+    let mut i = 0;
+    while i + 16 <= h.len() {
+        let w = u128::from_ne_bytes(h[i..i + 16].try_into().unwrap());
+        if w & HIGH != 0 {
+            break;
+        }
+        i += 16;
+    }
+    h[i..].iter().position(|&b| b >= 0x80).map(|p| i + p)
 }
 
 fn is_subsequence(needle: &[u8], hay: &[u8]) -> bool {
@@ -877,6 +893,9 @@ struct Compiled<'q> {
     rank: Vec<usize>,
     /// Single-token query: that token is always in the name.
     sole: Option<usize>,
+    /// The plain tokens without accents, when names with accented letters are also matched
+    /// that way (`cafe` finds `café`): plain-token queries on volumes that have such names.
+    folded: Vec<SubT>,
 }
 
 impl<'q> Compiled<'q> {
@@ -947,6 +966,19 @@ impl<'q> Compiled<'q> {
             Pre::All
         };
         let sole = (subs.len() == 1 && name_subs.is_empty() && globs.is_empty()).then_some(0);
+        // Bytes from 0x80 up are only ever in non-ASCII names (record headers stay below).
+        let accented = ixs.iter().any(|ix| ix.byte_freq[0x80..].iter().any(|&n| n > 0));
+        let folded = if accented && !subs.is_empty() && name_subs.is_empty() && globs.is_empty() && path_dirs.is_empty() {
+            let mut buf = Vec::new();
+            subs.iter()
+                .map(|s| {
+                    fold_into(&s.bytes, &mut buf);
+                    SubT { finder: Finder::new(&buf).into_owned(), bytes: std::mem::take(&mut buf) }
+                })
+                .collect()
+        } else {
+            Vec::new()
+        };
         let simple = sole.is_some()
             && path_dirs.is_empty()
             && q.excludes.is_empty()
@@ -969,6 +1001,7 @@ impl<'q> Compiled<'q> {
             pre,
             rank,
             sole,
+            folded,
         }
     }
 
@@ -1512,6 +1545,68 @@ impl<'q> Compiled<'q> {
             self.offer(v, idx, pre, st, sh);
         }
     }
+
+    /// Names with accented letters, compared without accents (`cafe` finds `café`): every
+    /// token in the name, ranked like a substring hit, just under the same hit with the accents
+    /// typed. Records the substring pass already found are skipped.
+    fn fold_chunk(&self, v: &VolCtx, start: usize, end: usize, st: &mut St, sh: &Shared) {
+        let low = &v.ix.low;
+        let hay = &low[start..=end];
+        let last = hay.len() - 1;
+        let mut pos = 0usize;
+        let mut buf = Vec::new();
+        while pos < last {
+            let Some(m) = find_high(&hay[pos..last]) else { break };
+            let p = pos + m;
+            let h = memrchr(0, &hay[..p]).unwrap_or(0);
+            let ne = p + memchr(0, &hay[p..]).unwrap_or(last - p);
+            pos = ne;
+            let (hh, ns, nend) = (start + h, start + h + HDR, start + ne);
+            let name = &low[ns..nend];
+            fold_into(name, &mut buf);
+            if !self.folded.iter().all(|t| t.finder.find(&buf).is_some()) {
+                continue;
+            }
+            let ix = v.ix;
+            let idx = decode_idx(&low[hh + 1..hh + HDR]);
+            if idx as usize >= ix.rec.len() || ix.rec[idx as usize] as usize != hh || self.full_match(v, idx, ns, nend, st) {
+                continue;
+            }
+            // Same filters as `check`, minus the name tokens.
+            let fl = ix.flags[idx as usize];
+            if fl & (DEAD | ROOT) != 0
+                || matches!(self.q.kind, Some(Kind::File) if fl & DIR != 0)
+                || matches!(self.q.kind, Some(Kind::Folder) if fl & DIR == 0)
+                || (!self.exts.is_empty() && (fl & DIR != 0 || !self.exts.iter().any(|e| name.ends_with(e))))
+                || self.excl.iter().any(|e| e.find(name).is_some())
+            {
+                continue;
+            }
+            match &v.scope {
+                Scope::All => {}
+                Scope::Skip => continue,
+                Scope::Under(d) => {
+                    if !in_scope(ix, idx, d, &mut st.scope_memo) {
+                        continue;
+                    }
+                }
+            }
+            if self.path_excluded(v, idx, name, st) {
+                continue;
+            }
+            if self.meta_filters {
+                let i = idx as usize;
+                if !ix.has_meta || !self.meta_ok(ix.size[i], ix.mtime[i] as i64, fl & DIR != 0) {
+                    continue;
+                }
+            }
+            let cls: i32 = self.folded.iter().filter_map(|t| best_class(&buf, &buf, &t.bytes, &t.finder)).map(|c| c.0).sum();
+            let in_name = self.folded.iter().map(|t| t.bytes.len()).sum();
+            st.total += 1;
+            let score = self.base_score(cls, in_name, buf.len()) + NAME_TIER - FOLD_PENALTY + self.adjust(v, idx);
+            self.offer(v, idx, score, st, sh);
+        }
+    }
 }
 
 thread_local! {
@@ -1859,8 +1954,30 @@ pub fn run(ixs: &[&Index], q: &Query, opts: &RunOpts, cached: Option<&[Vec<u32>]
         }
     }
 
-    // Fuzzy top-up when substring matches are scarce.
+    // Accented names, compared without accents. They're highlighted like fuzzy hits (the
+    // matcher there folds accents too).
     let mut fuzzy_keys: FastSet<u64> = FastSet::default();
+    if !c.folded.is_empty() {
+        let tasks = chunk_tasks(&vctx);
+        let res: Vec<St> = tasks
+            .par_iter()
+            .map(|&(vol, s, e)| {
+                let mut st = St::new(k, false);
+                c.fold_chunk(&vctx[vol], s, e, &mut st, &sh);
+                st
+            })
+            .collect();
+        for st in res {
+            out.total += st.total;
+            for r in st.top.heap {
+                if top.push(r.0) {
+                    fuzzy_keys.insert(r.0);
+                }
+            }
+        }
+    }
+
+    // Fuzzy top-up when substring matches are scarce.
     if opts.fuzzy && (out.total as usize) < k && c.globs.is_empty() && c.path_dirs.is_empty() && c.sub_len >= 3 {
         let found: FastSet<u64> = top.heap.iter().map(|r| r.0).collect();
         let mut freq = [0u64; 256];

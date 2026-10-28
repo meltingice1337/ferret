@@ -51,6 +51,22 @@ const customize: MenuItem = { label: "Customize sidebar…", icon: SlidersHorizo
 
 export const FAVORITE_COLORS = ["#ef4444", "#f59e0b", "#22c55e", "#06b6d4", "#3b82f6", "#a855f7", "#ec4899"];
 
+/** ↑ ↓ Home End move between the sidebar's items (as in Explorer's navigation pane) instead of
+ *  Tab through each one; Enter opens the one with the focus. */
+function arrowKeys(e: KeyboardEvent) {
+  if (!["ArrowDown", "ArrowUp", "Home", "End"].includes(e.key) || e.altKey || e.ctrlKey || e.shiftKey) return;
+  const at = e.target as HTMLElement;
+  if (at.closest("input, textarea")) return;
+  const items = [...(e.currentTarget as HTMLElement).querySelectorAll<HTMLElement>(".side-item")].filter((el) => el.offsetParent);
+  if (!items.length) return;
+  const i = items.indexOf(at.closest<HTMLElement>(".side-item")!);
+  const step = e.key === "ArrowDown" ? 1 : -1;
+  const next = e.key === "Home" ? 0 : e.key === "End" ? items.length - 1 : i < 0 ? 0 : Math.min(items.length - 1, Math.max(0, i + step));
+  e.preventDefault();
+  items[next].focus();
+  items[next].scrollIntoView({ block: "nearest" });
+}
+
 export default function Sidebar(props: { overlay?: boolean }) {
   const current = () => activeTab()?.p ?? "";
   const shownRecents = () => recents().filter((r) => !samePath(r.path, current())).slice(0, 8);
@@ -85,10 +101,10 @@ export default function Sidebar(props: { overlay?: boolean }) {
 
   return (
     <aside class="sidebar panel" classList={{ overlay: props.overlay }} style={{ width: `${ui.sidebarWidth}px` }}>
-      <div class="sidebar-scroll">
+      <div class="sidebar-scroll" onKeyDown={arrowKeys}>
 
         <Section id="favorites" title="Favorites">
-          <Show when={favorites().length} fallback={<div class="side-empty">Star a folder (Ctrl+D) to pin it here</div>}>
+          <Show when={favorites().length} fallback={<div class="side-empty">Ctrl+D pins the selected item (or the folder you're in) here</div>}>
             <FavoriteList current={current()} />
           </Show>
         </Section>

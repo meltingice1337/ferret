@@ -13,6 +13,15 @@ pub fn is_wsl(p: &str) -> bool {
 /// `\\wsl.localhost`, no trailing slash except on drive roots.
 pub fn normalize(input: &str) -> String {
     let mut s = input.trim().trim_matches('"').replace('/', "\\");
+    // The long-path form (`\\?\C:\…`, `\\?\UNC\server\share\…`), which the Recycle Bin records
+    // for long paths.
+    if let Some(rest) = s.strip_prefix(r"\\?\") {
+        if rest.len() > 4 && rest[..4].eq_ignore_ascii_case("UNC\\") {
+            s = format!(r"\\{}", &rest[4..]);
+        } else if rest.as_bytes().get(1) == Some(&b':') {
+            s = rest.to_string();
+        }
+    }
     let lower = s.to_ascii_lowercase();
     if lower.starts_with(r"\\wsl$\") {
         s = format!("{WSL_PREFIX}{}", &s[7..]);
@@ -94,6 +103,8 @@ mod tests {
         assert_eq!(normalize(r"c:\Users\"), r"C:\Users");
         assert_eq!(normalize(r"\\wsl$\Arch\home\"), r"\\wsl.localhost\Arch\home");
         assert_eq!(normalize("C:/a/b"), r"C:\a\b");
+        assert_eq!(normalize(r"\\?\c:\a\b"), r"C:\a\b");
+        assert_eq!(normalize(r"\\?\UNC\server\share\x"), r"\\server\share\x");
     }
 
     #[test]

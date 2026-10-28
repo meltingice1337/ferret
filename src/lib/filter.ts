@@ -3,6 +3,15 @@
 import { FILE_WORDS, findType } from "./filetypes";
 import type { Entry } from "./types";
 
+/** Lower case without accents, so `cafe` finds "Café" and `munchen` "München" (as search does). */
+export function fold(s: string): string {
+  const l = s.toLowerCase();
+  // Plain ASCII (most names) has nothing to fold.
+  if (!/[^\x20-\x7e]/.test(l)) return l;
+  return l.normalize("NFD").replace(/\p{M}/gu, "")
+    .replace(/[ßæœøłđıĳþ]/g, (c) => ({ ß: "ss", æ: "ae", œ: "oe", ø: "o", ł: "l", đ: "d", ı: "i", ĳ: "ij", þ: "th" })[c] ?? c);
+}
+
 /** A test for the filter text, or null when it filters nothing. Types and extensions add up
  *  (`type:image ext:pdf` = images or PDFs); words must all be in the name. A type that isn't
  *  known (yet, while typing) is ignored. */
@@ -15,7 +24,7 @@ export function entryFilter(text: string): ((e: Entry) => boolean) | null {
   let typed = false;
   for (const m of text.matchAll(/"([^"]*)"?|(\S+)/g)) {
     if (m[1] !== undefined) {
-      if (m[1].trim()) words.push(m[1].toLowerCase());
+      if (m[1].trim()) words.push(fold(m[1]));
       continue;
     }
     const tok = m[2];
@@ -31,13 +40,13 @@ export function entryFilter(text: string): ((e: Entry) => boolean) | null {
       }
       continue;
     }
-    if (tok.startsWith("!") && tok.length > 1) not.push(tok.slice(1).toLowerCase());
-    else words.push(tok.toLowerCase());
+    if (tok.startsWith("!") && tok.length > 1) not.push(fold(tok.slice(1)));
+    else words.push(fold(tok));
   }
   if (!typed && !words.length && !not.length) return null;
   return (e) => {
     if (typed && !((folders && e.isDir) || (files && !e.isDir) || (!e.isDir && exts.has(e.ext.toLowerCase())))) return false;
-    const name = e.name.toLowerCase();
+    const name = fold(e.name);
     return words.every((w) => name.includes(w)) && !not.some((w) => name.includes(w));
   };
 }

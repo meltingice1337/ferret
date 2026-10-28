@@ -467,6 +467,26 @@ fn info_file(recycled: &str) -> Option<String> {
         .then(|| join(&dir, &format!("$I{}", &name[2..])))
 }
 
+/// The shell can't parse or create a path this long (MAX_PATH, counting the NUL), though
+/// Ferret and the Recycle Bin can hold items there.
+pub fn too_long_for_shell(p: &str) -> bool {
+    p.encode_utf16().count() >= 260
+}
+
+/// Puts a recycled item back without the shell, for an original path too long for it: renames
+/// the `$R` data to where it came from (the Recycle Bin is on the same drive) and removes its
+/// `$I` record, which is what the Recycle Bin's own restore does. Recreates a missing folder and
+/// keeps both (“ - Copy”) when the name is taken, as the shell's restore does. Returns the new path.
+pub fn restore_direct(recycled: &str, original: &str) -> Res<String> {
+    let dir = paths::parent(original).ok_or_else(|| format!("Can't restore to “{original}”"))?;
+    let name = file_name(original);
+    fs::create_dir_all(paths::for_io(&dir)).map_err(|e| format!("“{name}”: {e}"))?;
+    let to = join(&dir, &fileops::unique_name(&dir, &name, true));
+    fs::rename(paths::for_io(recycled), paths::for_io(&to)).map_err(|e| format!("“{name}”: {e}"))?;
+    drop_info_files(&[recycled.to_string()]);
+    Ok(to)
+}
+
 /// The copy engine moves/deletes only the `$R` item and leaves its `$I`
 /// companion behind (also for the Recycle Bin's own shell items), so remove
 /// the `$I` files of items that are gone. Best effort: an orphaned `$I` file
@@ -1117,7 +1137,7 @@ pub fn perform(op: &ShellOp, owner: Option<HWND>, elevate: bool, report: &dyn Re
 }
 
 fn run(op: &ShellOp, owner: Option<HWND>, elevate: bool, report: &dyn Report) -> Res<()> {
-    let plan = plan(op, report)?;
+    let mut plan = plan(op, report)?;
     let n = plan.actions.len() as u64;
 
     // Totals: real bytes for copy/move (the shell's own units aren't bytes), else items.
@@ -1132,6 +1152,9 @@ fn run(op: &ShellOp, owner: Option<HWND>, elevate: bool, report: &dyn Report) ->
         report.totals(bytes_total, if bytes_total > 0 { files } else { n });
     } else {
         report.totals(0, n);
+    }
+    if plan.mode == Mode::Restore {
+        restore_long(&mut plan, report)?;
     }
     if plan.actions.is_empty() {
         return blocked_result(&plan);
@@ -1304,6 +1327,22 @@ fn confirm_on_disk(plan: &Plan, shared: &Shared, report: &dyn Report) {
         }
         report.file_done();
     }
+}
+
+/// Restores the items whose original path is too long for the shell directly, and leaves the
+/// rest of the plan to it.
+fn restore_long(plan: &mut Plan, report: &dyn Report) -> Res<()> {
+    let target = |a: &Action| join(a.dest.as_deref().unwrap_or_default(), a.name.as_deref().unwrap_or_default());
+    let (long, rest): (Vec<Action>, Vec<Action>) = std::mem::take(&mut plan.actions).into_iter().partition(|a| too_long_for_shell(&target(a)));
+    plan.actions = rest;
+    for a in &long {
+        let src = a.src.clone().unwrap_or_default();
+        let to = restore_direct(&src, &target(a))?;
+        report.created(&to);
+        report.pair(&src, &to);
+        report.file_done();
+    }
+    Ok(())
 }
 
 fn blocked_result(plan: &Plan) -> Res<()> {
@@ -1850,6 +1889,35 @@ mod tests {
         assert!(!exists(&recycled), "$R file should be gone");
         assert!(!exists(&info), "$I file should be gone");
         assert!(in_bin(&f).is_empty());
+    }
+
+    /// An item whose path is too long for the shell goes to the Recycle Bin and back, by
+    /// Restore and by undo, also when its folders are gone.
+    #[test]
+    fn restores_long_paths() {
+        let bin = BinGuard::default();
+        let t = TempDir::new("restore-long");
+        let top = "L".repeat(150);
+        let f = t.write(&format!("{top}\\{}\\{}.txt", "M".repeat(150), unique("ferret-long")), "deep");
+        assert!(too_long_for_shell(&f));
+        for undo in [false, true] {
+            trash::delete(paths::for_io(&f)).unwrap();
+            assert!(!exists(&f));
+            let listed = in_bin(&f);
+            assert_eq!(listed.len(), 1, "the bin lists it under its own path");
+            let recycled = bin.track(&paths::normalize(&listed[0].id.to_string_lossy()));
+            fs::remove_dir_all(t.p(&top)).unwrap();
+            if undo {
+                let back = tauri::async_runtime::block_on(fileops::restore_from_trash(vec![f.clone()])).unwrap();
+                same(&back, &[f.clone()]);
+            } else {
+                let (r, g) = run_op(ShellOp::Restore { items: vec![recycled.clone()] });
+                r.unwrap();
+                same(&g.created, &[f.clone()]);
+            }
+            assert_eq!(read(&f), "deep");
+            assert!(!exists(&recycled) && !exists(&info_file(&recycled).unwrap()));
+        }
     }
 
     #[test]

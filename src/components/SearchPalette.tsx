@@ -15,7 +15,7 @@ import {
   setUi, settings, toast, ui,
 } from "../lib/state";
 import { api } from "../lib/api";
-import { openFile } from "../lib/ops";
+import { copyText, openFile } from "../lib/ops";
 
 export interface Hit {
   path: string;
@@ -140,6 +140,8 @@ interface Suggestion {
 
 /** What the next Ctrl+K opens with (a search tab's "Edit search"). */
 let seed = "";
+/** "This folder" was the last scope picked. */
+let lastScoped = false;
 export function openSearchPalette(query = "") {
   seed = query;
   setUi("palette", null);
@@ -178,7 +180,8 @@ function filterValues(key: string, value: string, complete: (token: string) => v
   const before = parts.length ? `${parts.join(",")},` : "";
   const finish = (v: string) => () => complete(`${key}:${before}${v}`);
   if (k === "type" || k === "kind") {
-    const types = [...FILE_TYPES, findType("pdf")!, findType("sheet")!, FOLDERS, { id: "file", label: "Files", words: [], suggest: [], exts: [] }];
+    // Folders and files first: they're what type:f is most often after.
+    const types = [FOLDERS, { id: "file", label: "Files", words: [], suggest: [], exts: [] }, ...FILE_TYPES, findType("pdf")!, findType("sheet")!];
     return types
       .filter((t) => !cur || t.id.startsWith(cur) || t.words.some((w) => w.startsWith(cur)))
       .map((t) => ({
@@ -256,13 +259,21 @@ function SearchHelp(props: { onType: (id: string) => void; onInsert: (token: str
 export default function SearchPalette(props: { mode: "files" | "commands"; commands: PaletteCommand[] }) {
   const [text, setText] = createSignal(props.mode === "commands" ? ">" : seed);
   seed = "";
-  const [scoped, setScoped] = createSignal(false);
+  // The scope picked last time (in this window), where there's a folder to search.
+  const [scoped, pickScope] = createSignal(lastScoped && !isVirtual(activeTab().p));
+  const setScoped = (on: boolean) => { lastScoped = on; pickScope(on); };
   const [res, setRes] = createSignal<SearchResults | null>(null);
   const [status, setStatus] = createSignal<SearchStatus | null>(null);
   const [pick, setPick] = createSignal(0);
   const [busy, setBusy] = createSignal(false);
   let input!: HTMLInputElement;
   let list!: HTMLDivElement;
+
+  // One width for every result's name (the longest, within limits), so the paths line up.
+  createEffect(on(res, () => requestAnimationFrame(() => {
+    const names = [...list.querySelectorAll<HTMLElement>(".palette-item.file .palette-name")].map((n) => n.scrollWidth);
+    list.style.setProperty("--name-w", `${Math.min(340, Math.max(120, ...names))}px`);
+  })));
 
   const commandMode = () => text().startsWith(">");
   const query = () => (commandMode() ? text().slice(1).trim() : text().trim());
@@ -329,9 +340,11 @@ export default function SearchPalette(props: { mode: "files" | "commands"; comma
   };
   // ---- searches inside files: they need a folder, the one open unless an `in:` names one ----
   const contentSearch = () => !commandMode() && CONTENT.test(fullQuery());
-  /** The folder a search inside files reads: "This folder", or the open one when there's no `in:`. */
-  const contentFolder = () => (contentSearch() && (scoped() || !IN_FILTER.test(fullQuery())) ? activeTab().p : null);
-  const searchFolder = () => (scoped() ? activeTab().p : contentFolder());
+  /** An `in:` in the box names the folder itself; "This folder" has nothing to add to it. */
+  const ownFolder = () => !commandMode() && IN_FILTER.test(fullQuery());
+  /** The folder a search inside files reads when no `in:` names one: the open one. */
+  const contentFolder = () => (contentSearch() && !ownFolder() ? activeTab().p : null);
+  const searchFolder = () => (ownFolder() ? null : scoped() ? activeTab().p : contentFolder());
 
   // ---- search history and saved searches ----
   /** The search as a tab sees it: "This folder" (or the folder a search inside files reads)
@@ -349,7 +362,8 @@ export default function SearchPalette(props: { mode: "files" | "commands"; comma
   };
   const useQuery = (q: string) => {
     setTypeChip(null);
-    setScoped(false);
+    // A remembered search carries its own folder; the scope picked for the next Ctrl+K stays.
+    pickScope(false);
     setText(q);
     queueMicrotask(() => { input.focus(); input.setSelectionRange(q.length, q.length); });
   };
@@ -412,7 +426,10 @@ export default function SearchPalette(props: { mode: "files" | "commands"; comma
     if (r?.results.length) {
       rows.push({
         icon: FolderSearch,
-        main: r.more ? <>Open every match in a tab</> : <>Open all {r.total > 2000 ? "2,000+" : r.total.toLocaleString()} matches in a tab</>,
+        // A search tab lists up to 2,000 (FileView's SEARCH_TAB_LIMIT).
+        main: r.more ? <>Open every match in a tab</>
+          : r.total > 2000 ? <>Open the first 2,000 of {r.total.toLocaleString()} matches in a tab</>
+          : r.total === 1 ? <>Open the match in a tab</> : <>Open all {r.total.toLocaleString()} matches in a tab</>,
         detail: "Ctrl+Shift+Enter",
         apply: openAsTab,
       });
@@ -422,6 +439,13 @@ export default function SearchPalette(props: { mode: "files" | "commands"; comma
 
   /** Results are numbered after the suggestions. */
   const offset = () => suggestions().rows.length;
+  /** The suggestion Tab takes: a completion (picked, or the first one). Saved and recent
+   *  searches and "Open … in a tab" aren't, so Tab there switches the scope as the footer says. */
+  const tabRow = () => {
+    const rows = suggestions().rows;
+    const s = rows[pick() < offset() ? pick() : 0];
+    return s && !s.actions && s.apply !== openAsTab ? s : null;
+  };
   /** Adds a filter from the help to the box, its value selected to type over. */
   const insertFilter = (token: string, value: string) => {
     const base = text().trim() === "?" ? "" : text().trimEnd();
@@ -537,7 +561,7 @@ export default function SearchPalette(props: { mode: "files" | "commands"; comma
     if (e.altKey && /^[0-9]$/.test(e.key) && !commandMode()) { e.preventDefault(); pickType(CHIPS[+e.key]); }
     else if (e.key === "Escape") { e.preventDefault(); if (helpOpen()) setHelpOpen(false); else if (!ui.menu) close(); }
     else if (e.key === "Backspace" && typeChip() && input.selectionStart === 0 && input.selectionEnd === 0) { e.preventDefault(); setTypeChip(null); }
-    else if (e.key === "Tab" && offset()) { e.preventDefault(); suggestions().rows[pick() < offset() ? pick() : 0].apply(); }
+    else if (e.key === "Tab" && tabRow()) { e.preventDefault(); tabRow()!.apply(); }
     else if (e.key === "ArrowDown") { e.preventDefault(); if (n) setPick((p) => (p + 1) % n); }
     else if (e.key === "ArrowUp") { e.preventDefault(); if (n) setPick((p) => (p - 1 + n) % n); }
     else if (e.key === "PageDown") { e.preventDefault(); setPick((p) => Math.min(n - 1, p + 8)); }
@@ -553,7 +577,7 @@ export default function SearchPalette(props: { mode: "files" | "commands"; comma
   const resultMenu = (e: MouseEvent, i: number, h: Hit) => {
     e.preventDefault();
     setPick(i);
-    const copy = (text: string, what: string) => navigator.clipboard.writeText(text).then(() => toast(`${what} copied`));
+    const copy = (text: string, what: string) => copyText(text).then(() => toast(`${what} copied`));
     openMenu(e.clientX, e.clientY, [
       { label: h.isDir ? "Open folder" : "Open", icon: ExternalLink, shortcut: "Enter", action: () => activate(i, "open") },
       { label: h.isDir ? "Show in parent folder" : "Show in folder", icon: FolderOpen, shortcut: "Alt+Enter", action: () => {
@@ -601,7 +625,7 @@ export default function SearchPalette(props: { mode: "files" | "commands"; comma
               value={text()}
               placeholder={commandMode() ? "Type a command…" : scoped() ? `Search in ${basename(activeTab().p)}…` : "Search files and folders everywhere…"}
               spellcheck={false}
-              onInput={(e) => setText(e.currentTarget.value)}
+              onInput={(e) => { setText(e.currentTarget.value); setHelpOpen(false); }}
               onKeyDown={onKey}
             />
             <Show when={busy()}><LoaderCircle size={15} class="spin muted" /></Show>
@@ -617,11 +641,12 @@ export default function SearchPalette(props: { mode: "files" | "commands"; comma
                 onClick={() => { const open = showHelp(); if (text().trim() === "?") setText(""); setHelpOpen(!open); input.focus(); }}>
                 <CircleHelp size={15} />
               </button>
-              <button class="palette-scope" classList={{ on: scoped() || !!contentFolder() }} disabled={!!contentFolder()}
-                title={contentFolder() ? "Searches inside files read this folder (or the one named with in:)" : "Toggle scope (Tab)"}
+              <button class="palette-scope" classList={{ on: scoped() || !!contentFolder() || ownFolder() }} disabled={!!contentFolder() || ownFolder()}
+                title={ownFolder() ? "The in: filter picks the folder" : contentFolder() ? "Searches inside files read this folder (or the one named with in:)" : "Toggle scope (Tab)"}
                 onClick={() => { setScoped(!scoped()); input.focus(); }}>
                 {/* A search inside files reads the open folder even when "Everywhere" is picked. */}
-                {scoped() || contentFolder() ? <><FolderSearch size={13} /> This folder</> : <><HardDrive size={13} /> Everywhere</>}
+                {ownFolder() ? <><FolderSearch size={13} /> in: folder</>
+                  : scoped() || contentFolder() ? <><FolderSearch size={13} /> This folder</> : <><HardDrive size={13} /> Everywhere</>}
               </button>
             </Show>
             <button class="icon-btn tiny" title="Close (Esc)" onClick={close}><X size={14} /></button>
@@ -663,7 +688,7 @@ export default function SearchPalette(props: { mode: "files" | "commands"; comma
                           </span>
                         )}
                       </For>
-                      <Show when={i() === pick() && !s.actions}><kbd>Tab</kbd></Show>
+                      <Show when={i() === pick() && tabRow() === s}><kbd>Tab</kbd></Show>
                     </button>
                   </>
                 )}
@@ -749,7 +774,7 @@ export default function SearchPalette(props: { mode: "files" | "commands"; comma
                 <Show when={res()} fallback={<>↑↓ choose · Enter open · <b>Alt+Enter show in folder</b> · Ctrl+Enter new tab · ? filters · Tab scope</>}>
                   {(r) => r().source === "content"
                     ? <>{r().total.toLocaleString()}{r().more ? "+" : ""} {r().total === 1 && !r().more ? "file has" : "files have"} it · {(r().scanned ?? 0).toLocaleString()} files read ·{(r().tookUs / 1000).toFixed(r().tookUs < 10_000 ? 1 : 0)} ms</>
-                    : <>{r().total.toLocaleString()} matches · {(r().tookUs / 1000).toFixed(r().tookUs < 10_000 ? 1 : 0)} ms{r().partial ? " · indexing" : ""}</>}
+                    : <>{r().total === 1 ? "1 match" : `${r().total.toLocaleString()} matches`} · {(r().tookUs / 1000).toFixed(r().tookUs < 10_000 ? 1 : 0)} ms{r().partial ? " · indexing" : ""}</>}
                 </Show>
               </span>
               <span class="palette-status">

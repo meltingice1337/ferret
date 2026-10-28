@@ -46,6 +46,8 @@ pub fn plugin<R: Runtime>() -> TauriPlugin<R> {
         .level_for("reqwest", LevelFilter::Warn)
         .level_for("rustls", LevelFilter::Warn)
         .level_for("notify", LevelFilter::Warn)
+        // A line per formula it skips in an .xls.
+        .level_for("calamine", LevelFilter::Warn)
         .build()
 }
 
@@ -90,9 +92,11 @@ pub fn paths<S: AsRef<str>>(items: &[S]) -> String {
     out
 }
 
+/// The folder with the log files (made if need be), which Settings → Open logs opens in a new
+/// tab: handing it to Windows would open it in whatever the default file manager is.
 #[tauri::command]
-pub fn open_log_folder(app: AppHandle) -> Result<(), String> {
+pub fn log_folder(app: AppHandle) -> Result<String, String> {
     let dir = app.path().app_log_dir().map_err(|e| e.to_string())?;
     std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
-    tauri_plugin_opener::open_path(dir, None::<&str>).map_err(|e| e.to_string())
+    Ok(dir.to_string_lossy().into_owned())
 }

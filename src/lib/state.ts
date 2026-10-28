@@ -5,7 +5,7 @@ import { api } from "./api";
 import { invalidateFolderSizes } from "./foldersizes";
 import { onColor } from "./format";
 import { log } from "./log";
-import { basename, isArchiveName, isRecycle, isSearch, isVirtual, parent, pathKey, samePath, searchQuery } from "./path";
+import { basename, isArchiveName, isRecycle, isSearch, isVirtual, isWsl, parent, pathKey, samePath, searchQuery } from "./path";
 import type {
   Entry, Favorite, LaunchTarget, Places, ProfileName, Recent, ResolvedView, Session, Settings, ViewSettings, ViewSource,
 } from "./types";
@@ -61,8 +61,11 @@ export async function elevateWindow(open?: string) {
   // The backend closes this window once the elevated one is on screen.
 }
 
-/** Opens another Ferret window (elevated if this one is, like any program it starts). */
+/** Opens another Ferret window (elevated if this one is, like any program it starts), by default
+ *  at the folder this one shows, like Explorer's Ctrl+N. */
 export function openNewWindow(path?: string) {
+  const here = activeTab()?.p;
+  path ??= here && !isVirtual(here) ? here : undefined;
   api.newWindow(path).catch((e) => toast(`Couldn't open a new window: ${e}`, "error"));
 }
 /** Bumped whenever a folder listing changes (previews of folders re-read). */
@@ -101,6 +104,12 @@ export interface MenuItem {
   /** Submenu built on first hover (e.g. "Open with" apps). */
   loadSubmenu?: () => Promise<MenuItem[]>;
   action?: () => void;
+  /** Running it leaves the menu open (check items toggled several at a time). */
+  keepOpen?: boolean;
+  /** Dim text after the label (where a folder is, to tell same-named ones apart). */
+  detail?: string;
+  /** Tooltip. */
+  title?: string;
 }
 
 export interface ToastAction {
@@ -240,6 +249,10 @@ export function ask(req: Omit<DialogRequest, "resolve">): Promise<string | null>
 
 let toastSeq = 0;
 export function toast(text: string, kind: "info" | "error" = "info", action?: ToastAction) {
+  showToast(text, kind, action);
+}
+/** toast(), returning the toast's id for dismissToast. */
+export function showToast(text: string, kind: "info" | "error" = "info", action?: ToastAction) {
   const id = ++toastSeq;
   // What the user was told, next to the raw error the backend logged.
   if (kind === "error") log.warn(`error shown: ${text}`);
@@ -247,6 +260,7 @@ export function toast(text: string, kind: "info" | "error" = "info", action?: To
   if (action && /Recycle Bin$/.test(text)) setUi("toasts", (t) => t.filter((x) => !(x.action && /Recycle Bin$/.test(x.text))));
   setUi("toasts", (t) => [...t.slice(-3), { id, text, kind, action }]);
   setTimeout(() => dismissToast(id), kind === "error" ? 6000 : action ? 6000 : 2600);
+  return id;
 }
 /** Turns raw OS error text into something readable. */
 export function friendly(text: string) {
@@ -329,6 +343,12 @@ export function otherPane(): Tab | null {
 export const fileList = () =>
   document.querySelector<HTMLElement>(`.fileview[data-tab="${activeTab()?.id}"] .files`) ?? document.querySelector<HTMLElement>(".files");
 const focusList = () => requestAnimationFrame(() => fileList()?.focus({ preventScroll: true }));
+/** After a box closes, gives the focus back to the list, unless something else took it in the
+ *  meantime (a quick Ctrl+L or F2 after Escape opens the next box before this runs). */
+export const refocusList = () => requestAnimationFrame(() => {
+  const a = document.activeElement;
+  if (!a || a === document.body || !a.isConnected) fileList()?.focus({ preventScroll: true });
+});
 
 /** Opens a second pane next to the tab, at the same folder (Ctrl+\), or closes it. */
 export async function toggleSplit(t = stripTab()) {
@@ -345,9 +365,20 @@ export async function toggleSplit(t = stripTab()) {
   focusList();
 }
 
+/** Closes the second pane. The pane in use stays (the toolbar and preview follow it): when it's
+ *  the second one, the tab takes over its folder, history, view and selection. */
 export function closeSplit(t = stripTab()) {
-  if (!t?.split[0]()) return;
-  batch(() => { t.splitFocused[1](false); t.split[1](null); });
+  const pane = t?.split[0]();
+  if (!t || !pane) return;
+  batch(() => {
+    if (t.splitFocused[0]()) {
+      for (const [k, v] of Object.entries(pane)) {
+        if (k !== "split" && k !== "splitFocused" && Array.isArray(v)) (t as any)[k][1](() => v[0]());
+      }
+    }
+    t.splitFocused[1](false);
+    t.split[1](null);
+  });
   syncWatchers();
   persistSession();
   focusList();
@@ -411,6 +442,11 @@ export async function navigate(
     // Folders Windows keeps closed stay closed: Ferret never changes permissions.
     if (typeof e === "string" && e.startsWith("denied:")) {
       const denied = e.slice("denied:".length);
+      // Inside WSL, Linux decides, as the distro's user: Windows administrator rights don't help.
+      if (isWsl(denied)) {
+        toast(`“${basename(denied)}” is closed to your Linux user. Open it from Linux, with sudo`, "error");
+        return false;
+      }
       if (adminWindow()) {
         toast(`Even administrators can't open “${basename(denied)}”`, "error");
         return false;
@@ -552,6 +588,14 @@ export async function goForward(tab: Tab) {
   const h = tab.history[0]();
   if (i >= h.length - 1) return;
   if (await navigate(tab, h[i + 1], { history: "none" })) tab.hIndex[1](i + 1);
+}
+
+/** Jumps to entry `i` of the tab's history (the Back / Forward buttons' right-click lists). */
+export async function goToHistory(tab: Tab, i: number) {
+  const h = tab.history[0]();
+  if (i < 0 || i >= h.length || i === tab.hIndex[0]()) return;
+  const from = tab.p;
+  if (await navigate(tab, h[i], { history: "none", select: childOf(h[i], from) })) tab.hIndex[1](i);
 }
 
 /** If `from` lives inside `dir`, returns the direct child of `dir` on the way to it. */

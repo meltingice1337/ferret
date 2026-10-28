@@ -227,7 +227,7 @@ fn ms_to_system(ms: i64) -> SystemTime {
     }
 }
 
-fn fnv1a(data: &[u8]) -> u64 {
+pub(crate) fn fnv1a(data: &[u8]) -> u64 {
     let mut h: u64 = 0xcbf2_9ce4_8422_2325;
     for b in data {
         h ^= *b as u64;
@@ -1379,7 +1379,7 @@ fn run_plan(archive: &str, idx: &Index, plan: &Plan, pw: Option<&str>, p: &dyn P
 
 // ───────────────────────────── materialize (archive cache) ─────────────────────────────
 
-fn cache_base() -> PathBuf {
+pub(crate) fn cache_base() -> PathBuf {
     if cfg!(test) {
         std::env::temp_dir().join("ferret-archive-tests").join("cache")
     } else {
