@@ -1,6 +1,6 @@
 [package]
 name = "ferret"
-version = "0.8.3"
+version = "0.9.0"
 description = "Ferret file manager"
 authors = ["Ferret"]
 edition = "2024"
