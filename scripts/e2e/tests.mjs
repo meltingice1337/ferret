@@ -656,6 +656,96 @@ export const tests = [
       await t.c.waitFor(`!document.querySelector(".modal")`, { what: "the dialog to close" });
     },
   },
+  // ---- a server over SSH (the runner's test server: SFTP over a folder of its own) ----
+  {
+    name: "SSH: adds a server from ~/.ssh/config, trusts its key and opens its home folder",
+    async run(t) {
+      await t.c.click("button[title='Add a server (SSH)']");
+      await t.c.waitFor(`!!document.querySelector(".conn-form select")`, { what: "the connection form" });
+      // The config's host, picked as a user picks it.
+      await t.c.eval(`(() => { const s = document.querySelector(".conn-form select"); s.value = "ferret-e2e"; s.dispatchEvent(new Event("change", { bubbles: true })); })()`);
+      await t.c.waitFor(`[...document.querySelectorAll(".conn-form input.text-input")].some((i) => i.value === "127.0.0.1")`, { what: "the form filled in from the config" });
+      await t.c.click(".conn-form button", { text: "Add and connect" });
+      // A server Ferret hasn't seen: its key is shown to trust, and learned in (the tests') known_hosts.
+      await t.c.waitFor(`!!document.querySelector(".remote-prompt .fingerprint")`, { what: "the prompt to trust the server's key", timeoutMs: 15_000 });
+      await t.c.click(".remote-prompt button", { text: "Trust and connect" });
+      await t.c.waitFor(`${tab}?.p === ${JSON.stringify(t.ssh.path)}`, { what: "the server's home folder in the tab", timeoutMs: 15_000 });
+      await t.c.waitFor(`[...document.querySelectorAll(".files .row .name")].some((e) => e.textContent === "readme.txt")`, { what: "the server's files" });
+      const known = readFileSync(join(t.ssh.dir, "known_hosts"), "utf8");
+      assert(known.includes(`[127.0.0.1]:${t.ssh.port} ssh-ed25519 `), `known_hosts: ${known}`);
+      assert(await t.c.eval(`!!document.querySelector(".server-item .server-dot")`), "the sidebar doesn't show it connected");
+    },
+  },
+  {
+    name: "SSH: copies to the server and back, previews and renames there",
+    async run(t) {
+      writeFileSync(t.p("to-server.txt"), "made on Windows\n");
+      await go(t, t.root);
+      await t.c.waitFor(`[...document.querySelectorAll(".files .row .name")].some((e) => e.textContent === "to-server.txt")`, { what: "the file to copy" });
+      await clickRow(t, "to-server.txt");
+      await t.c.key("c", ["Control"]);
+      await go(t, t.ssh.path);
+      await t.c.eval(`${T}.state.fileList()?.focus()`);
+      await t.c.key("v", ["Control"]);
+      let start = Date.now();
+      while (!existsSync(join(t.ssh.home, "to-server.txt")) && Date.now() - start < 10_000) await sleep(150);
+      assert(readFileSync(join(t.ssh.home, "to-server.txt"), "utf8") === "made on Windows\n", "not copied to the server");
+      await t.c.waitFor(`[...document.querySelectorAll(".files .row .name")].some((e) => e.textContent === "to-server.txt")`, { what: "the copy in the list" });
+      // Preview: a copy is downloaded for it.
+      if (!(await t.c.eval(`!!document.querySelector(".preview")`))) await t.c.key("p", ["Alt"]);
+      await clickRow(t, "to-server.txt");
+      await t.c.waitFor(`(document.querySelector(".preview")?.innerText ?? "").includes("made on Windows")`, { what: "the preview", timeoutMs: 10_000 });
+      // Rename (F2) on the server.
+      await t.c.key("F2");
+      await t.c.waitFor(`!!document.querySelector("textarea.rename")`, { what: "the rename box" });
+      await t.c.key("a", ["Control"]);
+      await t.c.type("on-server.txt");
+      await t.c.key("Enter");
+      start = Date.now();
+      while (!existsSync(join(t.ssh.home, "on-server.txt")) && Date.now() - start < 8000) await sleep(150);
+      assert(existsSync(join(t.ssh.home, "on-server.txt")) && !existsSync(join(t.ssh.home, "to-server.txt")), "not renamed on the server");
+      // Back to Windows (a server's files are on Ferret's own clipboard).
+      await t.c.waitFor(`[...document.querySelectorAll(".files .row .name")].some((e) => e.textContent === "on-server.txt")`, { what: "the renamed file" });
+      await clickRow(t, "on-server.txt");
+      await t.c.key("c", ["Control"]);
+      await go(t, t.root);
+      await t.c.eval(`${T}.state.fileList()?.focus()`);
+      await t.c.key("v", ["Control"]);
+      start = Date.now();
+      while (!existsSync(t.p("on-server.txt")) && Date.now() - start < 10_000) await sleep(150);
+      assert(existsSync(t.p("on-server.txt")) && readFileSync(t.p("on-server.txt"), "utf8") === "made on Windows\n", "not copied back from the server");
+    },
+  },
+  {
+    name: "SSH: Delete moves to the server's trash and Ctrl+Z brings it back",
+    async run(t) {
+      await go(t, t.ssh.path);
+      await t.c.waitFor(`[...document.querySelectorAll(".files .row .name")].some((e) => e.textContent === "on-server.txt")`, { what: "the server's file" });
+      await clickRow(t, "on-server.txt");
+      await t.c.key("Delete");
+      const trashed = join(t.ssh.home, ".local", "share", "Trash", "files", "on-server.txt");
+      let start = Date.now();
+      while (!existsSync(trashed) && Date.now() - start < 8000) await sleep(150);
+      assert(existsSync(trashed) && !existsSync(join(t.ssh.home, "on-server.txt")), "not in the server's trash");
+      const info = readFileSync(join(t.ssh.home, ".local", "share", "Trash", "info", "on-server.txt.trashinfo"), "utf8");
+      assert(info.includes("Path=/home/tester/on-server.txt"), `trashinfo: ${info}`);
+      await t.c.eval(`document.querySelector(".files").focus()`);
+      await t.c.key("z", ["Control"]);
+      start = Date.now();
+      while (!existsSync(join(t.ssh.home, "on-server.txt")) && Date.now() - start < 10_000) await sleep(150);
+      assert(existsSync(join(t.ssh.home, "on-server.txt")) && !existsSync(trashed), "undo didn't bring it back");
+    },
+  },
+  {
+    name: "SSH: a closed connection's tab offers Connect, which lists it again",
+    async run(t) {
+      await t.c.eval(`window.__TAURI_INTERNALS__.invoke("remote_disconnect", { id: "ferret-e2e" })`);
+      await t.c.waitFor(`!!document.querySelector(".files-offline")`, { what: "the Connect button" });
+      await t.c.click(".files-offline button", { text: "Connect" });
+      await t.c.waitFor(`[...document.querySelectorAll(".files .row .name")].some((e) => e.textContent === "on-server.txt")`, { what: "the folder listed again", timeoutMs: 15_000 });
+      await go(t, t.root);
+    },
+  },
   {
     name: "no errors in the UI during the run",
     async run(t) {

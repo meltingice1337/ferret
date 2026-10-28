@@ -1,12 +1,42 @@
-//! Windows / UNC / WSL path helpers. Paths are passed around as display strings
-//! (`C:\Users\me`, `\\wsl.localhost\Arch\home`) and keyed case-insensitively,
-//! except WSL paths which keep their case.
+//! Windows / UNC / WSL / server path helpers. Paths are passed around as display strings
+//! (`C:\Users\me`, `\\wsl.localhost\Arch\home`, `\\ssh:\home.local\home\me`) and keyed
+//! case-insensitively, except WSL and server paths which keep their case.
 
 const WSL_PREFIX: &str = r"\\wsl.localhost\";
 
 pub fn is_wsl(p: &str) -> bool {
     let l = p.to_ascii_lowercase();
     l.starts_with(r"\\wsl.localhost\") || l.starts_with(r"\\wsl$\")
+}
+
+/// Folders on servers Ferret connects to (remote/): `\\ssh:\<connection>\home\me` is `/home/me`
+/// on that connection's server. A colon is never part of a Windows server name, so a path like
+/// this that reaches Windows by mistake is turned down at once instead of being looked for on
+/// the network.
+const REMOTE_PREFIX: &str = r"\\ssh:\";
+
+pub fn is_remote(p: &str) -> bool {
+    p.get(..REMOTE_PREFIX.len()).is_some_and(|s| s.eq_ignore_ascii_case(REMOTE_PREFIX))
+}
+
+/// `\\ssh:\home.local\home\me` → `("home.local", "/home/me")`; the connection's root is `/`.
+pub fn remote_parts(p: &str) -> Option<(&str, String)> {
+    if !is_remote(p) {
+        return None;
+    }
+    let rest = &p[REMOTE_PREFIX.len()..];
+    let (id, inside) = rest.split_once('\\').unwrap_or((rest, ""));
+    if id.is_empty() {
+        return None;
+    }
+    let inside = inside.trim_matches('\\');
+    Some((id, if inside.is_empty() { "/".to_string() } else { format!("/{}", inside.replace('\\', "/")) }))
+}
+
+/// The Ferret path of `linux` (an absolute path) on connection `id`.
+pub fn remote_path(id: &str, linux: &str) -> String {
+    let inside = linux.trim_matches('/');
+    if inside.is_empty() { format!("{REMOTE_PREFIX}{id}") } else { format!("{REMOTE_PREFIX}{id}\\{}", inside.replace('/', "\\")) }
 }
 
 /// Canonical display form: backslashes, upper-case drive letter, `\\wsl$` →
@@ -52,7 +82,7 @@ pub fn for_io(p: &str) -> String {
 
 pub fn key(p: &str) -> String {
     let n = normalize(p);
-    if is_wsl(&n) {
+    if is_wsl(&n) || is_remote(&n) {
         n
     } else {
         n.to_lowercase()
@@ -121,6 +151,26 @@ mod tests {
         assert_eq!(key(r"C:\Users\Me"), r"c:\users\me");
         assert_eq!(key(r"\\wsl$\Arch\Home"), r"\\wsl.localhost\Arch\Home");
         assert_eq!(for_io(r"\\wsl.localhost\Arch"), r"\\wsl.localhost\Arch\");
+        assert_eq!(key(r"\\ssh:\home.local\home\Me"), r"\\ssh:\home.local\home\Me");
+    }
+
+    #[test]
+    fn remote_paths() {
+        assert!(is_remote(r"\\ssh:\home.local\home"));
+        assert!(!is_remote(r"\\server\share"));
+        assert_eq!(remote_parts(r"\\ssh:\home.local\home\me"), Some(("home.local", "/home/me".to_string())));
+        assert_eq!(remote_parts(r"\\ssh:\home.local"), Some(("home.local", "/".to_string())));
+        assert_eq!(remote_parts(r"\\ssh:\"), None);
+        assert_eq!(remote_path("home.local", "/home/me"), r"\\ssh:\home.local\home\me");
+        assert_eq!(remote_path("home.local", "/"), r"\\ssh:\home.local");
+        assert_eq!(normalize(r"\\ssh:\home.local\home\"), r"\\ssh:\home.local\home");
+        assert_eq!(parent(r"\\ssh:\home.local\home\me").as_deref(), Some(r"\\ssh:\home.local\home"));
+        assert_eq!(parent(r"\\ssh:\home.local\home").as_deref(), Some(r"\\ssh:\home.local"));
+        assert_eq!(parent(r"\\ssh:\home.local"), None);
+        // Windows turns it down without asking the network.
+        let t = std::time::Instant::now();
+        assert!(std::fs::metadata(r"\\ssh:\home.local\home").is_err());
+        assert!(t.elapsed() < std::time::Duration::from_millis(500));
     }
 }
 

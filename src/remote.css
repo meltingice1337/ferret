@@ -1,0 +1,36 @@
+/* Server connections: the sidebar's Servers section, a tab that isn't connected, the connection
+   form and the questions a connection asks (components/RemoteDialogs.tsx). */
+
+/* ---------- sidebar ---------- */
+.server-dot { width: 7px; height: 7px; border-radius: 50%; background: #22c55e; flex: none; margin-right: 2px; box-shadow: 0 0 0 2px color-mix(in srgb, #22c55e 22%, transparent); }
+.server-dot.connecting { background: var(--accent); box-shadow: none; animation: server-pulse 1s ease-in-out infinite; }
+@keyframes server-pulse { 50% { opacity: 0.3; } }
+.side-add { display: block; width: 100%; text-align: left; cursor: pointer; border-radius: 7px; }
+.side-add:hover { color: var(--fg); background: var(--hover); }
+
+/* ---------- a server folder whose connection isn't open ---------- */
+.files-empty.files-offline { pointer-events: auto; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 12px; }
+
+/* ---------- the connection form ---------- */
+.conn-form .modal-body { padding-top: 4px; }
+.conn-form .field:first-child { border-top: none; }
+.conn-form .field-control { flex: 1 1 auto; justify-content: flex-end; min-width: 0; max-width: 300px; }
+.conn-form .field-control > .text-input { flex: 1; min-width: 0; }
+.conn-form select { min-width: 0; max-width: 100%; }
+.conn-form .conn-host .conn-port { flex: none; width: 76px; font-variant-numeric: tabular-nums; }
+.conn-key .btn { flex: none; }
+.conn-check { cursor: pointer; }
+.conn-check input { flex: none; }
+.conn-test { display: flex; align-items: flex-start; gap: 8px; margin-top: 12px; padding: 9px 11px; border-radius: 8px; font-size: 12.5px; background: var(--hover); color: var(--fg-2); overflow-wrap: anywhere; }
+.conn-test svg { flex: none; margin-top: 1px; }
+.conn-test.ok { color: var(--fg); background: color-mix(in srgb, #22c55e 14%, transparent); }
+.conn-test.bad { color: var(--fg); background: color-mix(in srgb, #ef4444 16%, transparent); }
+.conn-form .modal-actions .conn-test-btn { margin-right: auto; }
+
+/* ---------- questions (password, server key) ---------- */
+.remote-prompt .fingerprint {
+  display: block; margin: 4px 0 2px; padding: 8px 10px; border-radius: 7px; background: var(--hover);
+  font-family: var(--mono); font-size: 12px; overflow-wrap: anywhere; user-select: all;
+}
+.prompt-field { display: flex; flex-direction: column; gap: 4px; margin-top: 8px; font-size: 12.5px; color: var(--fg-2); }
+.prompt-remember { display: flex; align-items: center; gap: 8px; margin-top: 10px; font-size: 12.5px; color: var(--fg-2); cursor: pointer; }

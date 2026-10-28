@@ -1,5 +1,6 @@
 import { createComputed, createEffect, createResource, createSignal, ErrorBoundary, Match, on, onCleanup, Show, Switch } from "solid-js";
 import { noteVersion } from "../../lib/api";
+import { isRemote } from "../../lib/path";
 import { kindOf, typeLabel } from "../../lib/format";
 import { extractSmart, realPath } from "../../lib/ops";
 import { activeTab, friendly, navigate } from "../../lib/state";
@@ -81,7 +82,7 @@ function viewOf(e: Entry) {
   const kind = kindOf(e);
   if (e.isDir) return "folder";
   if (kind === "image") return "image";
-  if (isArchive(e) && !e.inArchive) return "archive";
+  if (isArchive(e) && !e.inArchive && !isRemote(e.path)) return "archive";
   if (kind === "video" || kind === "audio" || kind === "pdf" || kind === "font") return kind;
   if (e.ext === "csv" || e.ext === "tsv") return "csv";
   if (e.ext === "json" || e.ext === "jsonc" || e.ext === "geojson") return "json";

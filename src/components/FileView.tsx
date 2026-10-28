@@ -1,4 +1,4 @@
-import { ArchiveRestore, ArrowDown, ArrowUp, ChevronDown, ChevronRight, LoaderCircle, Pencil, Play, Search, Star, Trash2 } from "../lib/icons";
+import { ArchiveRestore, ArrowDown, ArrowUp, ChevronDown, ChevronRight, LoaderCircle, Pencil, Play, Plug, Search, Star, Trash2 } from "../lib/icons";
 import { batch, createComputed, createEffect, createMemo, createResource, createSignal, For, Match, on, onCleanup, onMount, Show, Switch, untrack } from "solid-js";
 import { Portal } from "solid-js/web";
 import FileIcon from "./FileIcon";
@@ -14,6 +14,7 @@ import { isRecycle, isSearch, isWithin, pathKey, samePath, searchQuery } from ".
 import { enter } from "../lib/motion";
 import { openSearchPalette } from "./SearchPalette";
 import { folderSizes, requestFolderSizes, sizeOrder, sizesApply, sizesEpoch, uncounted } from "../lib/foldersizes";
+import { connectionOf, navigate, OFFLINE } from "../lib/state";
 import { activeTab, ask, focusPane, goUp, holdKeys, jobsRunning, promptSaveSearch, savedSearch, openEntry, openMenu, persistSettings, refocusList, releaseKeys, reload, setSettings, setUi, settings, sortBy, takeTypeAhead, toast, ui, updateView, type Tab } from "../lib/state";
 import type { Entry, ListColumn, SortBy } from "../lib/types";
 
@@ -816,9 +817,17 @@ export default function FileView(props: { tab: Tab }) {
           </Show>
         </div>
         <Show when={!t.loading[0]() && ordered().length === 0 && rows().length === 0}>
-          <div class="files-empty">
-            {t.filter[0]() ? `Nothing here matches “${t.filter[0]()}”` : t.entries[0]().length ? "Only hidden items here. Press Ctrl+H to show them." : bin() ? "The Recycle Bin is empty" : found() ? "Nothing matches this search right now" : "This folder is empty"}
-          </div>
+          <Show when={t.error[0]() !== OFFLINE} fallback={
+            // A server folder whose connection isn't open: only a click connects.
+            <div class="files-empty files-offline">
+              <span>Not connected to {connectionOf(t.p)?.name ?? "this server"}</span>
+              <button class="btn accent" onClick={() => navigate(t, t.p, { history: "none" })}><Plug size={14} />Connect</button>
+            </div>
+          }>
+            <div class="files-empty">
+              {t.filter[0]() ? `Nothing here matches “${t.filter[0]()}”` : t.entries[0]().length ? "Only hidden items here. Press Ctrl+H to show them." : bin() ? "The Recycle Bin is empty" : found() ? "Nothing matches this search right now" : "This folder is empty"}
+            </div>
+          </Show>
         </Show>
       </div>
       <Show when={stickyHeader()}>

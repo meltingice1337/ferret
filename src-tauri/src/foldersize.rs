@@ -11,8 +11,9 @@
 //! from where it got: a count saves the sizes of the folders inside as it finishes each (those
 //! worth keeping), and it uses recent sizes of folders inside instead of walking them again.
 //!
-//! Two low-priority workers count Windows folders; WSL folders are counted by Linux itself, many
-//! at a time (`wsl_worker`), with Ferret's own Linux program (`WSL_HELPER`) or else with find. A size on screen is counted again (its old value showing meanwhile,
+//! Two low-priority workers count Windows folders; folders in WSL and on SSH servers are counted
+//! by Linux itself, many at a time (`linux_worker`), with Ferret's own Linux program (linux.rs)
+//! or else with find. A size on screen is counted again (its old value showing meanwhile,
 //! marked as refreshing) when it's ten minutes old, when Ferret changed something inside the
 //! folder, or on refresh; other sizes once a day.
 
@@ -25,6 +26,7 @@ use std::time::{Duration, Instant};
 use tauri::{AppHandle, Emitter, Manager};
 
 use crate::commands::AppState;
+use crate::linux::{HELPER_START, Host};
 use crate::{db, paths};
 
 /// Milliseconds after which a size on screen is counted again.
@@ -90,14 +92,14 @@ struct Job {
     refresh: bool,
     /// Asks the count to stop, to make way for a folder on screen (it's queued again).
     stop: Arc<AtomicBool>,
-    /// In a WSL distro: counted by `wsl_worker`.
-    wsl: bool,
+    /// In a WSL distro or on a server: counted by `linux_worker`.
+    linux: bool,
 }
 
 impl Job {
     fn new(path: String, key: String, background: Rank) -> Self {
-        let wsl = paths::is_wsl(&path);
-        Job { path, key, wanted_by: HashSet::new(), background, refresh: false, stop: Arc::default(), wsl }
+        let linux = Host::of(&path).is_some();
+        Job { path, key, wanted_by: HashSet::new(), background, refresh: false, stop: Arc::default(), linux }
     }
 
     fn rank(&self) -> Rank {
@@ -132,7 +134,7 @@ struct Running {
     /// Stops the count.
     stop: Arc<AtomicBool>,
     path: String,
-    wsl: bool,
+    linux: bool,
 }
 
 /// What the counters are doing, for the status bar: sent as `folder-sizes-activity` whenever it
@@ -226,7 +228,7 @@ pub fn folder_sizes(app: AppHandle, requester: u32, paths: Vec<String>, refresh:
             std::thread::spawn(move || worker(app));
         }
         let app = app.clone();
-        std::thread::spawn(move || wsl_worker(app));
+        std::thread::spawn(move || linux_worker(app));
     }
     if dir.is_some() && !st.planning {
         st.planning = true;
@@ -457,14 +459,14 @@ fn background_allowed(path: &str) -> bool {
     within.as_ref().is_none_or(|w| w.iter().any(|root| contains(root, &key)))
 }
 
-/// Where in the queue the next job for a worker (WSL or not) is: the most urgent, first come
+/// Where in the queue the next job for a worker (Linux or not) is: the most urgent, first come
 /// first. Background work waits while a folder containing it, or one inside it, is counted: it
 /// would walk the same folders (and can use that size once it's done).
-fn pick(st: &Shared, wsl: bool) -> Option<usize> {
+fn pick(st: &Shared, linux: bool) -> Option<usize> {
     let mut best: Option<(Rank, usize)> = None;
     for (i, job) in st.queue.iter().enumerate() {
         let rank = job.rank();
-        if job.wsl != wsl || best.is_some_and(|(b, _)| b <= rank) {
+        if job.linux != linux || best.is_some_and(|(b, _)| b <= rank) {
             continue;
         }
         if rank != Rank::Shown && st.running.keys().any(|k| contains(k, &job.key) || contains(&job.key, k)) {
@@ -481,13 +483,13 @@ fn pick(st: &Shared, wsl: bool) -> Option<usize> {
 /// Background counts step aside for folders on screen that wait for a worker: they're asked to
 /// stop, and are queued again to go on later.
 fn make_way(st: &Shared) {
-    let waiting = |wsl: bool| st.queue.iter().filter(|j| j.wsl == wsl && !j.wanted_by.is_empty()).count();
+    let waiting = |linux: bool| st.queue.iter().filter(|j| j.linux == linux && !j.wanted_by.is_empty()).count();
     let background: Vec<&Running> = st.running.values().filter(|r| r.who.is_empty()).collect();
-    let stopping = background.iter().filter(|r| !r.wsl && r.stop.load(Ordering::Relaxed)).count();
+    let stopping = background.iter().filter(|r| !r.linux && r.stop.load(Ordering::Relaxed)).count();
     let mut windows = waiting(false).saturating_sub(st.idle + stopping);
     let linux = waiting(true) > 0;
     for r in background {
-        if r.wsl {
+        if r.linux {
             if linux {
                 r.stop.store(true, Ordering::Relaxed);
             }
@@ -499,7 +501,7 @@ fn make_way(st: &Shared) {
 }
 
 fn start(st: &mut Shared, job: &Job) {
-    let r = Running { who: job.wanted_by.clone(), stop: job.stop.clone(), path: job.path.clone(), wsl: job.wsl };
+    let r = Running { who: job.wanted_by.clone(), stop: job.stop.clone(), path: job.path.clone(), linux: job.linux };
     st.running.insert(job.key.clone(), r);
 }
 
@@ -515,7 +517,7 @@ fn worker(app: AppHandle) {
                     s.wake.wait_for(&mut st, Duration::from_millis(500));
                     continue;
                 }
-                // WSL folders have a worker of their own (wsl_worker).
+                // Linux folders have a worker of their own (linux_worker).
                 if let Some(i) = pick(&st, false) {
                     let job = st.queue.remove(i).expect("pick is in the queue");
                     start(&mut st, &job);
@@ -808,101 +810,6 @@ const HELPER_BACKGROUND_THREADS: &str = "8";
 const SKIP_MAX: usize = 300;
 const HELPER_SKIP_MAX: usize = 20_000;
 
-/// Ferret's Linux program for counting WSL folders (src-tauri/wsl-size), built and embedded with
-/// the app (build.rs; empty if it was built without it). It reads many folders at once, where
-/// find reads one after another: with Linux's cache cleared, 1M files took 1.3 s instead of 27 s
-/// (cached: 0.27 s instead of 3 s). Linked statically, so it runs in any distro.
-///
-/// Each distro gets its own copy, in the user's cache folder there, the first time it's needed
-/// (as VS Code puts its server in ~/.vscode-server). Run from the Windows drive instead, it would
-/// depend on how the distro mounts it, and on Linux seeing the AppData Ferret writes to: a
-/// program started from a packaged (Store) app writes to that app's own copy of AppData.
-const WSL_HELPER: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/ferret-wsl-size"));
-
-/// How Linux starts the helper (its name: $1), at the lowest priority (as the find script runs),
-/// once its SHA-256 is the one Ferret built ($2; "-": not checked). 98: it isn't in this distro
-/// yet; 99: it isn't the one Ferret put there (damaged, or replaced). The check can't stop someone
-/// who already runs as this Linux user (they could change the copy right after it), but the
-/// helper runs with no more rights than theirs, and what it reports is only taken as sizes.
-const WSL_HELPER_START: &str = r#"f="${XDG_CACHE_HOME:-$HOME/.cache}/ferret/$1"; want=$2; shift 2; [ -x "$f" ] || exit 98; if [ "$want" != - ] && command -v sha256sum >/dev/null 2>&1; then s=$(sha256sum "$f") && [ "${s%% *}" = "$want" ] || exit 99; fi; command -v ionice >/dev/null 2>&1 && ionice -c 3 -p $$ >/dev/null 2>&1; command -v nice >/dev/null 2>&1 && exec nice -n 19 "$f" "$@"; exec "$f" "$@""#;
-
-/// How it gets there: from stdin, under its name ($1), once all its bytes ($2) are in. Copies of
-/// other versions go a month after they came (another Ferret, the installed one next to a
-/// development build, may still use one).
-const WSL_HELPER_PLACE: &str = r#"set -e; d="${XDG_CACHE_HOME:-$HOME/.cache}/ferret"; mkdir -p "$d"; t=$(mktemp "$d/.part.XXXXXX"); cat > "$t"; [ $(($(wc -c < "$t"))) -eq "$2" ] || { rm -f "$t"; exit 1; }; chmod 755 "$t"; mv -f "$t" "$d/$1"; find "$d" -maxdepth 1 -name 'ferret-wsl-size-*' ! -name "$1" -mtime +30 -exec rm -f {} + 2>/dev/null || true"#;
-
-/// The helper's SHA-256 (build.rs).
-const WSL_HELPER_SHA256: &str = env!("FERRET_WSL_HELPER_SHA256");
-
-struct Helper {
-    /// Its name in each distro: from its hash, so each version has its own.
-    name: String,
-    sha256: String,
-    bytes: &'static [u8],
-}
-
-fn wsl_helper() -> Option<&'static Helper> {
-    static HELPER: OnceLock<Option<Helper>> = OnceLock::new();
-    HELPER
-        .get_or_init(|| {
-            // Tests: "off" counts with find; "broken" with a helper that can't (for the fallback).
-            #[cfg(debug_assertions)]
-            match std::env::var("FERRET_WSL_HELPER").as_deref() {
-                Ok("off") => return None,
-                Ok("broken") => {
-                    return Some(Helper { name: "ferret-wsl-size-broken".into(), sha256: "-".into(), bytes: &b"exit 42\n"[..] });
-                }
-                _ => {}
-            }
-            if WSL_HELPER.is_empty() {
-                return None;
-            }
-            let name = format!("ferret-wsl-size-{}", &WSL_HELPER_SHA256[..16]);
-            Some(Helper { name, sha256: WSL_HELPER_SHA256.to_string(), bytes: WSL_HELPER })
-        })
-        .as_ref()
-}
-
-/// Puts the helper in a distro (`WSL_HELPER_PLACE`).
-fn place_wsl_helper(distro: &str, name: &str, bytes: &[u8]) -> bool {
-    use std::io::Write;
-    use std::process::Stdio;
-    let spawned = crate::wsl::command(distro, "sh")
-        .args(["-c", WSL_HELPER_PLACE, "sh", name, &bytes.len().to_string()])
-        .stdin(Stdio::piped())
-        .stdout(Stdio::null())
-        .stderr(Stdio::piped())
-        .spawn();
-    let Ok(mut child) = spawned else { return false };
-    let wrote = child.stdin.take().is_some_and(|mut s| s.write_all(bytes).is_ok());
-    match child.wait_with_output() {
-        Ok(out) if wrote && out.status.success() => true,
-        out => {
-            let said = out.map(|o| String::from_utf8_lossy(&o.stderr).trim().to_string()).unwrap_or_default();
-            log::warn!("folder sizes in WSL ({distro}): couldn't put the counting helper there ({said})");
-            false
-        }
-    }
-}
-
-/// The helper in each distro, this run: put there (at first, or after it was found changed: 98,
-/// 99), or not starting there (an ARM distro, a home mounted noexec…: counted with find).
-#[derive(Clone, Copy, PartialEq)]
-enum HelperIn {
-    Placed,
-    Failed,
-}
-
-fn helper_in() -> &'static Mutex<HashMap<String, HelperIn>> {
-    static DISTROS: OnceLock<Mutex<HashMap<String, HelperIn>>> = OnceLock::new();
-    DISTROS.get_or_init(Mutex::default)
-}
-
-/// Is this distro counted with the helper (so far)?
-fn uses_helper(distro: &str) -> bool {
-    wsl_helper().is_some() && helper_in().lock().get(distro) != Some(&HelperIn::Failed)
-}
-
 /// What Linux runs to count a batch of folders (its arguments). `find` walks them in order,
 /// staying on each one's file system (Windows drives under /mnt aren't counted), skipping the
 /// folders in SKIP (sizes known), and listing regular files (sizes counted, as on Windows) and
@@ -990,37 +897,30 @@ fn complaint_path(line: &str) -> Option<&str> {
     rest.rfind(close).map(|i| &rest[..i])
 }
 
-/// Is this distro running? Asked at most once a minute (starting `wsl.exe` takes ~100 ms).
-fn distro_running(distro: &str) -> bool {
-    static SEEN: OnceLock<Mutex<(Option<Instant>, Vec<String>)>> = OnceLock::new();
-    let mut seen = SEEN.get_or_init(Mutex::default).lock();
-    if seen.0.is_none_or(|t| t.elapsed() > Duration::from_secs(60)) {
-        *seen = (Some(Instant::now()), crate::wsl::running());
-    }
-    seen.1.iter().any(|d| d.eq_ignore_ascii_case(distro))
-}
-
-/// Counts WSL folders: those waiting in one distro, at once (see `count_wsl`), on its own so
-/// Linux counting and Windows counting don't wait for each other.
-fn wsl_worker(app: AppHandle) {
+/// Counts Linux folders: those waiting on one system (a WSL distro, a server), at once (see
+/// `count_linux`), on its own so Linux counting and Windows counting don't wait for each other.
+fn linux_worker(app: AppHandle) {
     let s = sizes();
-    let distro_of = |p: &str| crate::wsl::linux_path(p).map(|(d, _)| d);
+    let host_of = |p: &str| Host::of(p).map(|(h, _)| h);
     loop {
-        let (distro, batch) = {
+        let (host, batch) = {
             let mut st = s.state.lock();
             loop {
                 if let Some(first) = pick(&st, true) {
-                    let distro = distro_of(&st.queue[first].path).unwrap_or_default();
+                    let Some(host) = host_of(&st.queue[first].path) else {
+                        st.queue.remove(first);
+                        continue;
+                    };
                     let rank = st.queue[first].rank();
-                    let (most, room) = if uses_helper(&distro) { (HELPER_BATCH, usize::MAX) } else { (WSL_BATCH, WSL_ARGS_CHARS) };
+                    let (most, room) = if crate::linux::helper(&host).is_some() { (HELPER_BATCH, usize::MAX) } else { (WSL_BATCH, WSL_ARGS_CHARS) };
                     let (mut batch, mut chars, mut i): (Vec<Job>, usize, usize) = (Vec::new(), 0, first);
                     while i < st.queue.len() && batch.len() < most && chars < room {
-                        // One distro, one rank (a folder in the background would keep those on
+                        // One system, one rank (a folder in the background would keep those on
                         // screen waiting), and never a folder together with one containing it.
                         let j = &st.queue[i];
-                        let fits = j.wsl
+                        let fits = j.linux
                             && j.rank() == rank
-                            && distro_of(&j.path).as_deref() == Some(distro.as_str())
+                            && host_of(&j.path).as_ref() == Some(&host)
                             && !batch.iter().any(|b| contains(&b.key, &j.key) || contains(&j.key, &b.key));
                         if !fits {
                             i += 1;
@@ -1036,23 +936,24 @@ fn wsl_worker(app: AppHandle) {
                     // otherwise keep every other size waiting until it's done.
                     batch.sort_by_key(|j: &Job| st.cache.get(&j.key).map_or(0, |c| c.size.bytes));
                     report(&app, &st);
-                    break (distro, batch);
+                    break (host, batch);
                 }
                 s.wake.wait(&mut st);
             }
         };
-        // Background counting never starts a distro (`wsl.exe -d` would): the folders of one
-        // that stopped since are dropped.
-        if batch.iter().all(|j| j.wanted_by.is_empty()) && !distro_running(&distro) {
+        // Background counting never starts a distro (`wsl.exe -d` would), and nothing counts on a
+        // server that isn't connected: those folders are dropped.
+        let shown = !batch.iter().all(|j| j.wanted_by.is_empty());
+        if !host.running() && (!shown || matches!(host, Host::Ssh(_))) {
             let mut st = s.state.lock();
             for job in &batch {
                 st.running.remove(&job.key);
             }
             report(&app, &st);
-            log::info!("folder sizes in WSL ({distro}): not running, {} folders left uncounted", batch.len());
+            log::info!("folder sizes in {}: not running, {} folders left uncounted", host.label(), batch.len());
             continue;
         }
-        count_wsl(&app, &distro, batch);
+        count_linux(&app, &host, batch);
     }
 }
 
@@ -1075,14 +976,14 @@ fn unreadable_with_parents(set: &Mutex<HashSet<String>>, path: &str) {
     }
 }
 
-/// Counts a batch of folders in one WSL distro the way Linux would (`WSL_HELPER`, or find:
-/// `WSL_COUNT`), reporting each as soon as it's done, and the folders inside them. One
-/// `wsl.exe` for all of them: starting one takes about 150–200 ms, longer than Linux needs for
-/// most folders (40 folders: 4.4 s one at a time, 0.12 s together). Ending `wsl.exe` ends the
-/// count: a batch in the background stops when a folder on screen waits, and is queued again.
-fn count_wsl(app: &AppHandle, distro: &str, batch: Vec<Job>) {
+/// Counts a batch of folders on one Linux system the way Linux would (the helper, or find:
+/// `WSL_COUNT`), reporting each as soon as it's done, and the folders inside them. One program
+/// for all of them: starting `wsl.exe` takes about 150–200 ms, longer than Linux needs for most
+/// folders (40 folders: 4.4 s one at a time, 0.12 s together), and a server is a round trip
+/// away. Ending it ends the count: a batch in the background stops when a folder on screen
+/// waits, and is queued again.
+fn count_linux(app: &AppHandle, host: &Host, batch: Vec<Job>) {
     use std::io::{BufRead, BufReader, Write};
-    use std::process::Stdio;
     use std::sync::mpsc::{channel, RecvTimeoutError};
     let started = Instant::now();
     let counted_at = db::now();
@@ -1091,7 +992,7 @@ fn count_wsl(app: &AppHandle, distro: &str, batch: Vec<Job>) {
     // apart in the report, so it gets no size.
     let linux: Vec<Option<String>> = batch
         .iter()
-        .map(|j| crate::wsl::linux_path(&j.path).map(|(_, l)| l).filter(|l| !l.contains(['\t', '\n'])))
+        .map(|j| Host::of(&j.path).map(|(_, l)| l).filter(|l| !l.contains(['\t', '\n'])))
         .collect();
     // The order find walks them in, and where each folder is in the batch.
     let order: Vec<usize> = (0..batch.len()).filter(|&i| linux[i].is_some()).collect();
@@ -1101,7 +1002,7 @@ fn count_wsl(app: &AppHandle, distro: &str, batch: Vec<Job>) {
     }
     let position: HashMap<usize, usize> = order.iter().enumerate().map(|(pos, &i)| (i, pos)).collect();
     let mut done = vec![false; batch.len()];
-    let helper = wsl_helper().filter(|_| uses_helper(distro));
+    let helper = crate::linux::helper(host);
 
     // Recent sizes of folders inside, used instead of walking those again (find skips them):
     // the biggest ones. Each adds to the folders containing it (`extra`, by Linux folder).
@@ -1110,7 +1011,7 @@ fn count_wsl(app: &AppHandle, distro: &str, batch: Vec<Job>) {
         let Some(root) = linux[i].as_deref() else { continue };
         let below = if root == "/" { "/".to_string() } else { format!("{root}/") };
         for (_, size) in reusable(app, job) {
-            match crate::wsl::linux_path(&size.path) {
+            match Host::of(&size.path) {
                 Some((_, l)) if l.starts_with(&below) && !l.contains(['\t', '\n']) => skip.push((l, size)),
                 _ => {}
             }
@@ -1133,29 +1034,23 @@ fn count_wsl(app: &AppHandle, distro: &str, batch: Vec<Job>) {
 
     let skipped: Vec<&str> = skip.iter().map(|(l, _)| l.as_str()).collect();
     let roots: Vec<&str> = order.iter().map(|&i| linux[i].as_deref().unwrap_or_default()).collect();
-    let mut command = if let Some(h) = helper {
-        let mut c = crate::wsl::command(distro, "sh");
-        c.args(["-c", WSL_HELPER_START, "sh", &h.name, &h.sha256, "--watch-stdin", "--roots-stdin"]);
-        c.args(["--keep", &KEEP_BYTES.to_string(), &KEEP_FILES.to_string()]);
-        if background {
-            c.args(["--threads", HELPER_BACKGROUND_THREADS]);
+    let keep = [KEEP_BYTES.to_string(), KEEP_FILES.to_string()];
+    let (program, args): (&str, Vec<&str>) = match helper {
+        Some(h) => {
+            let mut a = vec!["-c", HELPER_START, "sh", &h.name, &h.sha256, "--watch-stdin", "--roots-stdin", "--keep", &keep[0], &keep[1]];
+            if background {
+                a.extend(["--threads", HELPER_BACKGROUND_THREADS]);
+            }
+            ("sh", a)
         }
-        c
-    } else {
-        let mut c = crate::wsl::command(distro, "nice");
-        c.args(["-n", "19", "sh", "-s", "--"]).args(&roots);
-        c
+        None => ("nice", ["-n", "19", "sh", "-s", "--"].into_iter().chain(roots.iter().copied()).collect()),
     };
-    let spawned = if order.is_empty() {
-        None
-    } else {
-        command.stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn().ok()
-    };
+    let spawned = if order.is_empty() { None } else { host.spawn(program, &args).ok() };
     let Some(mut child) = spawned else {
         for job in &batch {
             finish(app, job, None, None);
         }
-        log::warn!("folder sizes in WSL ({distro}): couldn't start counting {} folders", batch.len());
+        log::warn!("folder sizes in {}: couldn't start counting {} folders", host.label(), batch.len());
         return;
     };
     // The script for find; for the helper, the folders to count and then those it skips, each
@@ -1303,24 +1198,16 @@ fn count_wsl(app: &AppHandle, distro: &str, batch: Vec<Job>) {
         }
     }
     drop(stdin);
-    let status = child.wait();
-    let ok = status.as_ref().is_ok_and(|s| s.success()) && !stopped;
+    let code = child.wait();
+    let ok = code == Some(0) && !stopped;
     let said = err_thread.and_then(|t| t.join().ok()).unwrap_or_default();
-    // The helper isn't in this distro yet, or isn't the one Ferret put there: put there (once a
-    // run), and the batch counted again. Or it didn't start: the distro is counted with find from
+    // The helper isn't on this system yet, or isn't the one Ferret put there: put there (once a
+    // run), and the batch counted again. Or it didn't start: the system is counted with find from
     // now on, the batch queued again (to be split into the smaller ones find takes).
     if let Some(h) = helper.filter(|_| !helper_ran && !stopped) {
-        let code = status.ok().and_then(|s| s.code());
-        let placed = helper_in().lock().get(distro) == Some(&HelperIn::Placed);
-        if matches!(code, Some(98 | 99)) && !placed && place_wsl_helper(distro, &h.name, h.bytes) {
-            let why = if code == Some(99) { ", replacing a copy that wasn't Ferret's" } else { "" };
-            log::info!("folder sizes in WSL ({distro}): put the counting helper there ({}{why})", h.name);
-            helper_in().lock().insert(distro.to_string(), HelperIn::Placed);
-            return count_wsl(app, distro, batch);
+        if crate::linux::after_failed_start(host, h, code, &format!("{said:?}")) {
+            return count_linux(app, host, batch);
         }
-        let code = code.map_or("none".to_string(), |c| c.to_string());
-        log::warn!("folder sizes in WSL ({distro}): the counting helper didn't start (exit {code}; {said:?}), counting with find");
-        helper_in().lock().insert(distro.to_string(), HelperIn::Failed);
         for job in batch {
             requeue(app, job);
         }
@@ -1342,7 +1229,8 @@ fn count_wsl(app: &AppHandle, distro: &str, batch: Vec<Job>) {
         }
     }
     log::info!(
-        "folder sizes in WSL ({distro}): {total} folders in {:?}{}{}{}{}",
+        "folder sizes in {}: {total} folders in {:?}{}{}{}{}",
+        host.label(),
         started.elapsed(),
         if helper.is_none() { " with find" } else { "" },
         if background { ", in the background" } else { "" },
@@ -1351,17 +1239,20 @@ fn count_wsl(app: &AppHandle, distro: &str, batch: Vec<Job>) {
     );
 }
 
-/// Not every folder gets a size: in WSL, Linux's /proc and /sys describe the running system
-/// rather than hold files (/proc alone "contains" 128 TB), and /mnt/c is the Windows drive
+/// Not every folder gets a size: on Linux, /proc and /sys describe the running system rather
+/// than hold files (/proc alone "contains" 128 TB), and in WSL /mnt/c is the Windows drive
 /// itself, very slow to walk from Linux and counted directly when opened as C:.
 fn countable(path: &str) -> bool {
-    !paths::is_wsl(path) || crate::wsl::linux_path(path).is_none_or(|(_, linux)| countable_in_linux(&linux))
+    match Host::of(path) {
+        Some((host, linux)) => countable_in_linux(&linux, matches!(host, Host::Wsl(_))),
+        None => true,
+    }
 }
 
-fn countable_in_linux(linux: &str) -> bool {
+fn countable_in_linux(linux: &str, wsl: bool) -> bool {
     let first = |p: &str| p.trim_start_matches('/').split('/').next().unwrap_or("").to_string();
     let top = first(linux);
-    let drive = linux.strip_prefix("/mnt/").map(first).is_some_and(|d| d.len() == 1 && d.chars().all(|c| c.is_ascii_alphabetic()));
+    let drive = wsl && linux.strip_prefix("/mnt/").map(first).is_some_and(|d| d.len() == 1 && d.chars().all(|c| c.is_ascii_alphabetic()));
     top != "proc" && top != "sys" && !drive
 }
 
@@ -1390,10 +1281,10 @@ mod tests {
     #[test]
     fn skips_linux_folders_that_hold_no_files() {
         for p in ["/proc", "/proc/1/fd", "/sys", "/sys/fs/cgroup", "/mnt/c", "/mnt/d/Users"] {
-            assert!(!countable_in_linux(p), "{p}");
+            assert!(!countable_in_linux(p, true), "{p}");
         }
         for p in ["/", "/home/me", "/usr", "/process", "/system", "/mnt", "/mnt/wsl", "/mnt/cdrom", "/home/proc"] {
-            assert!(countable_in_linux(p), "{p}");
+            assert!(countable_in_linux(p, true), "{p}");
         }
         assert!(!countable(r"\\wsl.localhost\Ubuntu\proc"));
         assert!(!countable(r"\\wsl$\Ubuntu\mnt\c"));
@@ -1454,7 +1345,7 @@ mod tests {
     }
 
     fn running(path: &str, tab: Option<u32>) -> (String, Running) {
-        let r = Running { who: tab.into_iter().collect(), stop: Arc::default(), path: path.into(), wsl: paths::is_wsl(path) };
+        let r = Running { who: tab.into_iter().collect(), stop: Arc::default(), path: path.into(), linux: Host::of(path).is_some() };
         (paths::key(path), r)
     }
 
@@ -1523,25 +1414,37 @@ mod tests {
         assert!(!wsl_script(&[]).contains("SKIP"));
     }
 
-    /// Runs the WSL count in the first running distro (in /tmp): find's script with each awk
+    /// Runs the Linux count in the first running distro (in /tmp): find's script with each awk
     /// installed there, and the helper, which must agree, then what only the helper gets right:
     /// `cargo test --lib wsl_count_in_linux -- --ignored --nocapture`.
     #[test]
     #[ignore]
     fn wsl_count_in_linux() {
-        use std::io::Write;
         let Some(distro) = crate::wsl::running().into_iter().next() else { return };
+        count_in_linux(&Host::Wsl(distro));
+    }
+
+    /// The same on an SSH server (its /tmp), logging in as `ssh` would:
+    /// `FERRET_TEST_SSH=<a ~/.ssh/config host> cargo test --lib ssh_count_in_linux -- --ignored --nocapture`.
+    #[test]
+    #[ignore]
+    fn ssh_count_in_linux() {
+        let Ok(alias) = std::env::var("FERRET_TEST_SSH") else { return };
+        let id = crate::remote::test_connection(&alias).expect("connects");
+        count_in_linux(&Host::Ssh(id.clone()));
+        crate::remote::block(crate::remote::ssh::disconnect(&id));
+    }
+
+    fn count_in_linux(host: &Host) {
+        use std::io::{Read, Write};
+        println!("{}", host.label());
         let dir = format!("/tmp/ferret-count-{}", std::process::id());
         let sh = |args: &[&str], input: &str| {
-            let mut c = crate::wsl::command(&distro, "sh")
-                .args(args)
-                .stdin(std::process::Stdio::piped())
-                .stdout(std::process::Stdio::piped())
-                .spawn()
-                .unwrap();
+            let mut c = host.spawn("sh", args).unwrap();
             c.stdin.take().unwrap().write_all(input.as_bytes()).unwrap();
-            let out = c.wait_with_output().unwrap();
-            (out.status.code(), String::from_utf8_lossy(&out.stdout).to_string())
+            let mut out = Vec::new();
+            c.stdout.take().unwrap().read_to_end(&mut out).unwrap();
+            (c.wait(), String::from_utf8_lossy(&out).to_string())
         };
         // A symlink to a folder (not followed), and a folder that can't be read (no size).
         let setup = r#"set -e; rm -rf "$1" "$1-other" "$1-odd"; mkdir -p "$1/a/b/c" "$1/a/b/big" "$1/a/skip/deep" "$1/e" "$1/t	ab" "$1/locked" "$1-other"; cd "$1"
@@ -1582,10 +1485,12 @@ mod tests {
             println!("{awk}: ok");
         }
 
-        // The helper, put in the distro under a name of its own (removed at the end).
+        // The helper, put there under a name of its own (removed at the end).
         let helper = format!("ferret-wsl-size-test-{}", std::process::id());
+        let built = crate::linux::helper(host);
+        let sha = built.map(|h| h.sha256.clone()).unwrap_or_default();
         let start = |name: &str, input: &str, roots: &[&str]| {
-            let mut args = vec!["-c", WSL_HELPER_START, "sh", name, WSL_HELPER_SHA256, "--keep", "1048576", "1000", "--"];
+            let mut args = vec!["-c", HELPER_START, "sh", name, &sha, "--keep", "1048576", "1000", "--"];
             args.extend(roots);
             sh(&args, input)
         };
@@ -1595,20 +1500,18 @@ mod tests {
             assert!(out.starts_with("H\t1\n"), "{out}");
             out
         };
-        if WSL_HELPER.is_empty() {
-            println!("helper: not built");
-        } else {
+        if let Some(h) = built {
             assert_eq!(start(&helper, "\n", &[&dir]).0, Some(98), "not there yet");
             // Only once all of it came.
-            let (short, _) = sh(&["-c", WSL_HELPER_PLACE, "sh", &helper, "999999999"], "#!/bin/sh\n");
+            let (short, _) = sh(&["-c", crate::linux::HELPER_PLACE, "sh", &helper, "999999999"], "#!/bin/sh\n");
             assert_ne!(short, Some(0));
             assert_eq!(start(&helper, "\n", &[&dir]).0, Some(98), "a short copy isn't kept");
-            assert!(place_wsl_helper(&distro, &helper, WSL_HELPER));
+            assert!(crate::linux::place_as(host, h, &helper));
             let out = run(&format!("{dir}/a/skip\n\n"), &[&dir, &other]);
             assert_eq!(sorted(&out), want, "helper");
             assert!(out.lines().any(|l| l == format!("E\t{dir}/locked")), "{out}");
             // The folders to count on stdin, as Ferret sends them.
-            let args = ["-c", WSL_HELPER_START, "sh", &helper, WSL_HELPER_SHA256, "--roots-stdin", "--keep", "1048576", "1000"];
+            let args = ["-c", HELPER_START, "sh", &helper, &sha, "--roots-stdin", "--keep", "1048576", "1000"];
             let (code, out) = sh(&args, &format!("{dir}\n{other}\n\n{dir}/a/skip\n\n"));
             assert_eq!(code, Some(0), "{out}");
             assert_eq!(sorted(&out), want, "helper, folders on stdin");
@@ -1627,6 +1530,8 @@ mod tests {
             sh(&["-c", r#"printf x >> "${XDG_CACHE_HOME:-$HOME/.cache}/ferret/$1""#, "sh", &helper], "");
             assert_eq!(start(&helper, "\n", &[&dir]).0, Some(99), "a changed copy");
             println!("helper: ok");
+        } else {
+            println!("helper: not built for this system");
         }
         let clean = r#"chmod 755 "$1/locked"; rm -rf "$1" "$1-other" "$1-odd" "${XDG_CACHE_HOME:-$HOME/.cache}/ferret/$2""#;
         sh(&["-c", clean, "sh", &dir, &helper], "");

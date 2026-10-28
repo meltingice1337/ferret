@@ -3,12 +3,12 @@ import { createMemo, createResource, createSignal, ErrorBoundary, For, onMount, 
 import { api } from "../lib/api";
 import { formatDate, formatSize, plural, typeLabel } from "../lib/format";
 import { batchRename } from "../lib/ops";
-import { basename, parent } from "../lib/path";
-import { activeTab, ASK_ALT, navigate, reload, setUi, toast, ui } from "../lib/state";
+import { basename, displayPath, isRemote, parent } from "../lib/path";
+import { activeTab, ASK_ALT, connectionOf, navigate, reload, setUi, toast, ui } from "../lib/state";
 import type { Entry, Policy } from "../lib/types";
 import { Thumb } from "./FileView";
 
-function Modal(props: { title: string; onClose: () => void; children: JSX.Element; width?: number; class?: string }) {
+export function Modal(props: { title: string; onClose: () => void; children: JSX.Element; width?: number; class?: string }) {
   return (
     <div class="modal-backdrop" onMouseDown={(e) => e.target === e.currentTarget && props.onClose()}>
       <div class={`modal ${props.class ?? ""}`} role="dialog" aria-label={props.title} tabIndex={-1}
@@ -146,6 +146,7 @@ export function PropertiesDialog() {
 function Properties(props: { paths: string[] }) {
   const close = () => setUi("properties", null);
   const single = props.paths.length === 1;
+  const server = () => isRemote(props.paths[0]);
   const [info, { refetch }] = createResource(() => (single ? props.paths[0] : null), (p) => api.itemInfo(p));
   const [stats] = createResource(() => props.paths, (p) => api.folderStats(p));
   const entry = createMemo<Entry | null>(() => {
@@ -179,8 +180,9 @@ function Properties(props: { paths: string[] }) {
           </div>
         </div>
         <dl class="props-grid">
+          <Show when={server()}><Row label="Server">{connectionOf(props.paths[0])?.name ?? ""}</Row></Show>
           <Row label="Location">
-            <button class="link" onClick={() => { close(); navigate(activeTab(), parent(props.paths[0])!, { select: props.paths[0] }); }}>{parent(props.paths[0])}</button>
+            <button class="link" onClick={() => { close(); navigate(activeTab(), parent(props.paths[0])!, { select: props.paths[0] }); }}>{displayPath(parent(props.paths[0]) ?? "")}</button>
           </Row>
           <Row label="Size">
             <Show when={stats()} fallback={<span class="muted">Calculating…</span>}>
@@ -194,21 +196,26 @@ function Properties(props: { paths: string[] }) {
             {(i) => (
               <>
                 <Show when={i().linkTarget}><Row label="Target">{i().linkTarget}</Row></Show>
-                <Row label="Created">{formatDate(i().created)}</Row>
+                {/* SFTP knows no creation time or Windows attributes. */}
+                <Show when={!server()}><Row label="Created">{formatDate(i().created)}</Row></Show>
                 <Row label="Modified">{formatDate(i().modified)}</Row>
                 <Row label="Accessed">{formatDate(i().accessed)}</Row>
-                <Row label="Attributes">
-                  <label class="check"><input type="checkbox" checked={i().readonly} onChange={() => toggleAttr("readonly")} /> Read-only</label>
-                  <label class="check"><input type="checkbox" checked={i().hidden} onChange={() => toggleAttr("hidden")} /> Hidden</label>
-                  <Show when={i().system}><span class="muted">System</span></Show>
-                </Row>
+                <Show when={!server()} fallback={<Show when={i().readonly}><Row label="Access">Read-only for you</Row></Show>}>
+                  <Row label="Attributes">
+                    <label class="check"><input type="checkbox" checked={i().readonly} onChange={() => toggleAttr("readonly")} /> Read-only</label>
+                    <label class="check"><input type="checkbox" checked={i().hidden} onChange={() => toggleAttr("hidden")} /> Hidden</label>
+                    <Show when={i().system}><span class="muted">System</span></Show>
+                  </Row>
+                </Show>
               </>
             )}
           </Show>
         </dl>
         <div class="modal-actions">
-          <button class="btn" onClick={() => api.revealInExplorer(props.paths[0])}><FolderOpen size={14} /> Show in Explorer</button>
-          <button class="btn" onClick={() => api.showProperties(props.paths).catch((e) => toast(String(e), "error"))}><ExternalLink size={14} /> Windows properties…</button>
+          <Show when={!server()}>
+            <button class="btn" onClick={() => api.revealInExplorer(props.paths[0])}><FolderOpen size={14} /> Show in Explorer</button>
+            <button class="btn" onClick={() => api.showProperties(props.paths).catch((e) => toast(String(e), "error"))}><ExternalLink size={14} /> Windows properties…</button>
+          </Show>
           <button class="btn accent" onClick={close}>Close</button>
         </div>
       </div>

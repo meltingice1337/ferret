@@ -9,7 +9,6 @@ use super::index::{flags, Index};
 use parking_lot::Mutex;
 use std::collections::{HashMap, HashSet};
 use std::io::{BufRead, BufReader};
-use std::process::Stdio;
 use std::sync::atomic::Ordering::Relaxed;
 use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
@@ -59,7 +58,7 @@ pub fn refresh() {
             if !engine().volumes().iter().any(|v| v.root.eq_ignore_ascii_case(&root)) {
                 engine().add_volume(Volume::new(Index::new(&root, true), false));
             }
-            let listed = scan(&distro);
+            let listed = scan(&crate::linux::Host::Wsl(distro.clone()), &root, ROOTS);
             let mut st = state().lock();
             st.busy.remove(&distro);
             // A failed listing (no GNU find, say) isn't retried every minute either.
@@ -81,6 +80,9 @@ pub fn refresh() {
 /// for little use; they can still be browsed.
 const ROOTS: &[&str] = &["/home", "/root", "/etc", "/opt", "/srv", "/usr/local"];
 
+/// What a server's index holds besides its user's home (search/remote.rs).
+pub(super) const SERVER_ROOTS: &[&str] = &["/etc", "/opt", "/srv", "/var/www", "/usr/local"];
+
 /// Dependency, cache and tool folders: listed themselves, but their contents (often hundreds
 /// of thousands of files) aren't indexed.
 const SKIP: &[&str] = &[
@@ -88,11 +90,13 @@ const SKIP: &[&str] = &[
     ".rustup", ".nvm", ".gradle", ".m2", ".pyenv", ".rbenv", ".docker", "snap", ".vscode-server", ".cursor-server",
 ];
 
-/// The distro's own files (see ROOTS and SKIP), staying on its file system so mounted
-/// Windows drives aren't walked, as the distro's default user (unreadable folders are left out).
-fn scan(distro: &str) -> Option<Index> {
+/// A Linux system's own files under `roots` (see SKIP), staying on each one's file system so
+/// mounted Windows drives aren't walked, as its user (unreadable folders are left out), as an
+/// index under `root` (the system's Ferret path).
+pub(super) fn scan(host: &crate::linux::Host, root: &str, roots: &[&str]) -> Option<Index> {
     const FMT: &str = r"%y\t%s\t%T@\t%p\0";
-    let mut args: Vec<&str> = ROOTS.to_vec();
+    let mut args: Vec<&str> = vec!["-n", "19", "find"];
+    args.extend(roots);
     args.extend(["-xdev", "("]);
     for (i, name) in SKIP.iter().enumerate() {
         if i > 0 {
@@ -101,16 +105,14 @@ fn scan(distro: &str) -> Option<Index> {
         args.extend(["-name", name]);
     }
     args.extend(["-o", "-path", "*/.local/share", ")", "-prune", "-printf", FMT, "-o", "-printf", FMT]);
-    let mut child = crate::wsl::command(distro, "nice")
-        .args(["-n", "19", "find"])
-        .args(&args)
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .spawn()
-        .ok()?;
-    let mut ix = Index::with_capacity(&crate::paths::wsl_root(distro), true, 200_000, 8 << 20);
+    let mut child = host.spawn("nice", &args).ok()?;
+    // find's complaints (folders it can't read) only need to go somewhere.
+    if let Some(mut e) = child.stderr.take() {
+        std::thread::spawn(move || std::io::copy(&mut e, &mut std::io::sink()));
+    }
+    let mut ix = Index::with_capacity(root, true, 200_000, 8 << 20);
     // Folder (path without the leading "/") → entry; `find` lists a folder before its contents,
-    // and the roots' parents (/, /usr) are added as needed.
+    // and the roots' parents (/, /usr, a home's /home) are added as needed.
     let mut dirs: HashMap<String, u32> = HashMap::from([(String::new(), 0)]);
     let mut reader = BufReader::with_capacity(1 << 20, child.stdout.take()?);
     let mut rec = Vec::new();
@@ -121,9 +123,17 @@ fn scan(distro: &str) -> Option<Index> {
         if let Some((kind, size, mtime, rel)) = parse(&rec) {
             // Linux allows backslashes in names; Windows paths can't show them.
             let (parent_rel, name) = rel.rsplit_once('/').unwrap_or(("", rel));
-            if parent_rel == "usr" && !dirs.contains_key("usr") {
-                let usr = ix.push_unlinked(0, "usr", flags::DIR, 0, 0);
-                dirs.insert("usr".into(), usr);
+            if !dirs.contains_key(parent_rel) && !parent_rel.contains('\\') {
+                let mut at = String::new();
+                for part in parent_rel.split('/') {
+                    let up = dirs[&at];
+                    let next = if at.is_empty() { part.to_string() } else { format!("{at}/{part}") };
+                    if !dirs.contains_key(&next) {
+                        let i = ix.push_unlinked(up, part, flags::DIR, 0, 0);
+                        dirs.insert(next.clone(), i);
+                    }
+                    at = next;
+                }
             }
             if let (Some(&parent), false) = (dirs.get(parent_rel), name.contains('\\')) {
                 let mut fl = match kind {
@@ -142,7 +152,7 @@ fn scan(distro: &str) -> Option<Index> {
         }
         rec.clear();
     }
-    let ok = child.wait().map(|s| s.success() || ix.live() > 1).unwrap_or(false);
+    let ok = child.wait() == Some(0) || ix.live() > 1;
     if !ok || ix.live() <= 1 {
         return None;
     }
@@ -171,7 +181,7 @@ mod tests {
     fn real_distro() {
         let Some(distro) = crate::wsl::running().into_iter().next() else { return };
         let t = std::time::Instant::now();
-        let ix = super::scan(&distro).expect("listing");
+        let ix = super::scan(&crate::linux::Host::Wsl(distro.clone()), &crate::paths::wsl_root(&distro), super::ROOTS).expect("listing");
         let found = ix.resolve(&format!("{}\\home", crate::paths::wsl_root(&distro)));
         println!("{distro}: {} entries in {:?}, /home resolves: {}", ix.live(), t.elapsed(), found.is_some());
         assert!(ix.live() > 100 && found.is_some());

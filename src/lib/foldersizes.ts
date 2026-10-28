@@ -4,7 +4,7 @@ import { listen } from "@tauri-apps/api/event";
 import { createSignal } from "solid-js";
 import { createStore, produce } from "solid-js/store";
 import { api } from "./api";
-import { isVirtual, isWsl, pathKey } from "./path";
+import { isRemote, isVirtual, isWsl, pathKey, remoteParts } from "./path";
 import type { FolderSize } from "./types";
 
 export const [folderSizes, setFolderSizes] = createStore<Record<string, FolderSize>>({});
@@ -61,14 +61,18 @@ function resort() {
 
 export const folderSize = (path: string): FolderSize | undefined => folderSizes[pathKey(path)];
 
-/** Network shares are slow to walk, so they aren't counted. (WSL folders are counted by
- *  Linux itself, which is fast.) */
-export const sizesApply = (dir: string) => !isVirtual(dir) && (isWsl(dir) || !dir.startsWith("\\\\"));
+/** Network shares are slow to walk, so they aren't counted. (WSL folders and those on servers
+ *  Ferret connects to are counted by Linux itself, which is fast.) */
+export const sizesApply = (dir: string) => !isVirtual(dir) && (isWsl(dir) || isRemote(dir) || !dir.startsWith("\\\\"));
 
-/** Why a WSL folder gets no size, if it doesn't: Linux's /proc and /sys describe the running
- *  system rather than hold files (/proc alone "contains" 128 TB), and /mnt/c is the Windows
- *  drive itself, very slow to walk from Linux and counted directly when opened as C:. */
+/** Why a WSL or server folder gets no size, if it doesn't: Linux's /proc and /sys describe the
+ *  running system rather than hold files (/proc alone "contains" 128 TB), and in WSL /mnt/c is
+ *  the Windows drive itself, very slow to walk from Linux and counted directly when opened as C:. */
 export function uncounted(path: string): string | undefined {
+  if (isRemote(path)) {
+    const linux = remoteParts(path)?.linux ?? "";
+    return /^\/(proc|sys)(\/|$)/.test(linux) ? "Linux system information, not files on disk" : undefined;
+  }
   if (!isWsl(path)) return;
   const m = /^\\\\[^\\]+\\[^\\]+\\(.*)$/.exec(path);
   const linux = m ? m[1] : "";

@@ -66,3 +66,23 @@ describe("virtual places", () => {
     expect(isVirtual("C:\\Users")).toBe(false);
   });
 });
+
+describe("server paths", () => {
+  it("names the connection, keeps case and walks up to the server's root", async () => {
+    const { displayPath, isRemote, remoteParts, setRemoteNames } = await import("../../src/lib/path");
+    setRemoteNames((id) => (id === "home.local" ? "Home server" : id));
+    const p = "\\\\ssh:\\home.local\\home\\Darius";
+    expect(isRemote(p)).toBe(true);
+    expect(isRemote("\\\\server\\share")).toBe(false);
+    expect(remoteParts(p)).toEqual({ id: "home.local", linux: "/home/Darius" });
+    expect(remoteParts("\\\\ssh:\\home.local")).toEqual({ id: "home.local", linux: "/" });
+    expect(segments(p).map((s) => s.label)).toEqual(["Home server", "home", "Darius"]);
+    expect(parent(p)).toBe("\\\\ssh:\\home.local\\home");
+    expect(parent("\\\\ssh:\\home.local")).toBeNull();
+    expect(pathKey(p)).toBe(p);
+    expect(samePath(p, p.toLowerCase())).toBe(false);
+    expect(displayPath(p)).toBe("Home server:/home/Darius");
+    expect(displayPath("C:\\Users")).toBe("C:\\Users");
+    setRemoteNames((id) => id);
+  });
+});

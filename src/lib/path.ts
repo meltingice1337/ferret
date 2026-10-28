@@ -1,8 +1,29 @@
-// Paths arrive from the backend already normalized: `C:\a\b`, `\\wsl.localhost\Arch\home`.
+// Paths arrive from the backend already normalized: `C:\a\b`, `\\wsl.localhost\Arch\home`,
+// `\\ssh:\home.local\home\me` (a server's /home/me: remote/ in the backend).
 
 export const isWsl = (p: string) => /^\\\\wsl(\.localhost|\$)\\/i.test(p);
 
-export const pathKey = (p: string) => (isWsl(p) ? p : p.toLowerCase());
+/** On a server Ferret connects to. */
+export const isRemote = (p?: string | null) => !!p && /^\\\\ssh:\\/i.test(p);
+
+/** `\\ssh:\home.local\home\me` → `{ id: "home.local", linux: "/home/me" }`. */
+export function remoteParts(p: string): { id: string; linux: string } | null {
+  if (!isRemote(p)) return null;
+  const [id, ...rest] = p.slice(7).split("\\");
+  return id ? { id, linux: "/" + rest.filter(Boolean).join("/") } : null;
+}
+
+/** A connection's name, by id (state.ts keeps it current). */
+let remoteName = (id: string) => id;
+export const setRemoteNames = (f: (id: string) => string) => (remoteName = f);
+
+/** How the path bar shows a path: a server's as `home.local:/home/me`, as scp writes it. */
+export function displayPath(p: string): string {
+  const r = remoteParts(p);
+  return r ? `${remoteName(r.id)}:${r.linux}` : p;
+}
+
+export const pathKey = (p: string) => (isWsl(p) || isRemote(p) ? p : p.toLowerCase());
 
 /** Virtual path of the Recycle Bin (same name Explorer's address bar accepts). */
 export const RECYCLE = "shell:RecycleBinFolder";
@@ -34,7 +55,7 @@ export function segments(p: string): Segment[] {
     const parts = p.slice(2).split("\\").filter(Boolean);
     if (parts.length < 2) return [{ label: p, path: p }];
     let acc = `\\\\${parts[0]}\\${parts[1]}`;
-    out.push({ label: isWsl(p) ? parts[1] : acc, path: acc });
+    out.push({ label: isWsl(p) ? parts[1] : isRemote(p) ? remoteName(parts[1]) : acc, path: acc });
     for (const part of parts.slice(2)) {
       acc += `\\${part}`;
       out.push({ label: part, path: acc });

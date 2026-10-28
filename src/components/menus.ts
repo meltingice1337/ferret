@@ -6,7 +6,7 @@ import {
 } from "../lib/icons";
 import { api } from "../lib/api";
 import { kindOf } from "../lib/format";
-import { isVirtual, basename, isRecycle, isWsl, parent, pathKey } from "../lib/path";
+import { isVirtual, basename, isRecycle, isRemote, isWsl, parent, pathKey } from "../lib/path";
 import {
   fileList, favorites, isFavorite, recents, reload, resetView, saveViewForFolder, setUi,
   toggleFavorite, ui, updateView, type MenuItem, type Tab,
@@ -97,6 +97,9 @@ export function itemMenu(t: Tab, e: Entry, targets: Entry[], x: number, y: numbe
   const multi = targets.length > 1;
   const single = !multi;
   const archived = targets.some((x) => x.inArchive);
+  // On a server: no Windows apps, shell menus or archive tools for its files (Terminal and VS
+  // Code log in to it instead).
+  const server = isRemote(e.path);
   const dirs = targets.filter((x) => x.isDir);
   const folderForShell = e.isDir ? e.path : parent(e.path)!;
   const items: MenuItem[] = [];
@@ -114,22 +117,22 @@ export function itemMenu(t: Tab, e: Entry, targets: Entry[], x: number, y: numbe
   items.push({ label: "Open", icon: e.isDir ? FolderOpen : ExternalLink, shortcut: "Enter", action: () => openEntry(t, e) });
   if (e.isDir) items.push({ label: "Open in new tab", icon: FolderOpen, shortcut: "Ctrl+Enter", action: () => dirs.forEach((d) => openEntry(t, d, true)) });
   if (!e.isDir && single) {
-    items.push({ label: "Open with", icon: AppWindow, loadSubmenu: openWithItems(e) });
+    if (!server) items.push({ label: "Open with", icon: AppWindow, loadSubmenu: openWithItems(e) });
     items.push({ label: "Preview", icon: Eye, shortcut: "Space", action: () => setUi("quickLook", true) });
   }
-  if (isArchive(e) && single && !archived) {
+  if (isArchive(e) && single && !archived && !server) {
     items.push({ label: "Browse archive", icon: FolderOpen, action: () => openEntry(t, { ...e, isDir: true }) });
   }
   if (!archived) {
     const openIn: MenuItem[] = [];
     if (e.isDir && single) openIn.push({ label: "New window", icon: AppWindow, action: () => openNewWindow(e.path) });
-    if (e.isDir && single && !adminWindow()) openIn.push({ label: "New window as administrator", icon: ShieldAlert, action: () => elevateWindow(e.path) });
+    if (e.isDir && single && !adminWindow() && !server) openIn.push({ label: "New window as administrator", icon: ShieldAlert, action: () => elevateWindow(e.path) });
     if (openIn.length) openIn.push({ separator: true });
     openIn.push(
       { label: "Terminal", icon: SquareTerminal, shortcut: "Ctrl+`", action: () => openTerminal(folderForShell) },
       { label: "VS Code", icon: Code2, action: () => openInVscode(single ? e.path : folderForShell) },
-      { label: "Explorer", icon: ExternalLink, action: () => api.revealInExplorer(e.path) },
     );
+    if (!server) openIn.push({ label: "Explorer", icon: ExternalLink, action: () => api.revealInExplorer(e.path) });
     items.push({ label: "Open in", icon: SquareArrowOutUpRight, submenu: openIn });
   }
   items.push({ separator: true });
@@ -143,7 +146,7 @@ export function itemMenu(t: Tab, e: Entry, targets: Entry[], x: number, y: numbe
   if (!archived) items.push({ label: "Duplicate", icon: CopyPlus, action: () => duplicate(paths) });
 
   // --- archives ---
-  if (isArchive(e) && single && !archived) {
+  if (isArchive(e) && single && !archived && !server) {
     const stem = e.name.replace(/(\.tar)?\.[^.]+$/i, "");
     items.push(
       { label: "Extract here", icon: PackageOpen, action: () => extractSmart(e.path) },
@@ -155,8 +158,8 @@ export function itemMenu(t: Tab, e: Entry, targets: Entry[], x: number, y: numbe
     );
   }
   if (archived) items.push({ label: "Extract to…", icon: PackageOpen, action: () => extractTo(e.path, undefined, paths) });
-  else items.push({ label: `Compress to “${zipNameFor(paths)}”`, icon: FileArchive, action: () => compress(paths) });
-  const media = archived ? null : mediaKind(targets);
+  else if (!server) items.push({ label: `Compress to “${zipNameFor(paths)}”`, icon: FileArchive, action: () => compress(paths) });
+  const media = archived || server ? null : mediaKind(targets);
   if (media === "video") items.push({ label: multi ? `Compress ${targets.length} videos…` : "Compress video…", icon: Clapperboard, action: () => setUi("media", { kind: "video", paths }) });
   if (media === "image") items.push({ label: multi ? `Compress ${targets.length} pictures…` : "Compress picture…", icon: ImageDown, action: () => setUi("media", { kind: "image", paths }) });
   items.push({ separator: true });
@@ -175,7 +178,7 @@ export function itemMenu(t: Tab, e: Entry, targets: Entry[], x: number, y: numbe
     items.push({ label: "Delete permanently", icon: Trash2, shortcut: "Shift+Del", danger: true, action: () => deleteItems(paths, true) });
   }
   items.push({ label: "Properties", icon: Info, shortcut: "Alt+Enter", disabled: archived, action: () => setUi("properties", paths) });
-  if (!archived) items.push({ label: "Show more options", icon: MoreHorizontal, action: () => showNativeMenu(t, paths, x, y) });
+  if (!archived && !server) items.push({ label: "Show more options", icon: MoreHorizontal, action: () => showNativeMenu(t, paths, x, y) });
   return items;
 }
 
@@ -232,13 +235,14 @@ export function backgroundMenu(t: Tab, x: number, y: number): MenuItem[] {
     } },
     { separator: true },
   ];
+  const server = isRemote(t.p);
   if (!archived) {
     items.push(
       { label: "Open in Terminal", icon: SquareTerminal, shortcut: "Ctrl+`", action: () => openTerminal(t.p) },
       { label: "Open in VS Code", icon: Code2, action: () => openInVscode(t.p) },
-      { label: "Open in Explorer", icon: ExternalLink, action: () => api.openInExplorer(t.p) },
     );
-    if (!adminWindow()) items.push({ label: "Run as administrator", icon: ShieldAlert, action: () => elevateWindow() });
+    if (!server) items.push({ label: "Open in Explorer", icon: ExternalLink, action: () => api.openInExplorer(t.p) });
+    if (!adminWindow() && !server) items.push({ label: "Run as administrator", icon: ShieldAlert, action: () => elevateWindow() });
   }
   items.push(
     { label: "Copy folder path", icon: Hash, action: () => copyPaths([t.p], false) },
@@ -251,7 +255,7 @@ export function backgroundMenu(t: Tab, x: number, y: number): MenuItem[] {
     { separator: true },
     { label: "Properties", icon: Info, shortcut: "Alt+Enter", disabled: archived, action: () => setUi("properties", [t.p]) },
   );
-  if (!archived) items.push({ label: "Show more options", icon: MoreHorizontal, action: () => showNativeMenu(t, [], x, y) });
+  if (!archived && !server) items.push({ label: "Show more options", icon: MoreHorizontal, action: () => showNativeMenu(t, [], x, y) });
   return items;
 }
 
@@ -266,9 +270,12 @@ export function placeMenu(path: string, goTo: (p: string, newTab?: boolean) => v
     { label: "Open in VS Code", icon: Code2, action: () => openInVscode(path) },
     { label: "Copy as path", icon: Hash, action: () => copyPaths([path]) },
     ...extra,
-    { separator: true },
-    { label: "Properties", icon: Info, action: () => api.showProperties([path]) },
-    { label: "Show more options", icon: MoreHorizontal, action: () => api.showNativeMenu([path], x, y).catch(() => {}) },
+    // Windows' own Properties and menu don't know servers.
+    ...(isRemote(path) ? [] : [
+      { separator: true },
+      { label: "Properties", icon: Info, action: () => api.showProperties([path]) },
+      { label: "Show more options", icon: MoreHorizontal, action: () => api.showNativeMenu([path], x, y).catch(() => {}) },
+    ]),
   ];
 }
 
@@ -342,7 +349,7 @@ function shellToMenu(t: Tab, token: number, it: ShellMenuItem): MenuItem {
 export async function addShellEntries(t: Tab, paths: string[], background: boolean) {
   const opened = ui.menu;
   const target = background ? [t.p] : paths;
-  if (!opened || !target.length || isRecycle(t.p) || target.some((p) => isWsl(p) || /\.(zip|7z|rar|tar|gz|xz|zst|bz2|tgz|jar|apk|cbz|cbr)\\/i.test(p))) return;
+  if (!opened || !target.length || isRecycle(t.p) || target.some((p) => isWsl(p) || isRemote(p) || /\.(zip|7z|rar|tar|gz|xz|zst|bz2|tgz|jar|apk|cbz|cbr)\\/i.test(p))) return;
   // The menu waits (briefly) for these entries, so it opens once at its final size instead of
   // growing under the pointer.
   setUi("menu", "hold", true);

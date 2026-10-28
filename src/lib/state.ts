@@ -5,9 +5,11 @@ import { api } from "./api";
 import { invalidateFolderSizes } from "./foldersizes";
 import { onColor } from "./format";
 import { log } from "./log";
-import { basename, isArchiveName, isRecycle, isSearch, isVirtual, isWsl, parent, pathKey, samePath, searchQuery } from "./path";
+import {
+  basename, isArchiveName, isRecycle, isRemote, isSearch, isVirtual, isWsl, parent, pathKey, remoteParts, samePath, searchQuery, setRemoteNames,
+} from "./path";
 import type {
-  Entry, Favorite, LaunchTarget, Places, ProfileName, Recent, ResolvedView, Session, Settings, ViewSettings, ViewSource,
+  Connection, Entry, Favorite, LaunchTarget, Places, ProfileName, Recent, RemotePrompt, ResolvedView, Session, Settings, ViewSettings, ViewSource,
 } from "./types";
 
 // ---------- global state ----------
@@ -36,6 +38,19 @@ export const [places, setPlaces] = createSignal<Places>({ home: "C:\\", known: [
 export const refreshRecycleInfo = () => api.recycleInfo().then((recycle) => setPlaces((p) => ({ ...p, recycle }))).catch(() => {});
 export const [favorites, setFavorites] = createSignal<Favorite[]>([]);
 export const [recents, setRecents] = createSignal<Recent[]>([]);
+/** Saved server connections (remote.ts has what's done with them). */
+export const [connections, setConnections] = createSignal<Connection[]>([]);
+setRemoteNames((id) => connections().find((c) => c.id === id)?.name ?? id);
+/** Each connection's session in this window: none (disconnected), opening, or open. */
+export const [remoteState, setRemoteState] = createStore<Record<string, "connecting" | "connected" | "disconnected">>({});
+/** The connection a server path is on. */
+export const connectionOf = (p: string) => {
+  const r = remoteParts(p);
+  return r ? connections().find((c) => c.id === r.id) ?? null : null;
+};
+/** A tab showing a server's folder while it isn't connected: shows a Connect button instead of
+ *  connecting by itself (only a click connects). */
+export const OFFLINE = "offline";
 export const [ready, setReady] = createSignal(false);
 /** This window runs as administrator: it saves no session or recents. */
 export const [adminWindow, setAdminWindow] = createSignal(false);
@@ -135,8 +150,9 @@ export const [ui, setUi] = createStore({
   /** Videos or pictures open in the compress editor. */
   media: null as null | { kind: "video" | "image"; paths: string[] },
   conflict: null as null | { conflicts: import("./types").Conflict[]; op: "copy" | "move"; dest: string; resolve: (p: import("./types").Policy | null) => void },
-  /** Mirror of what Ferret put on the clipboard, to dim cut items. */
-  clipboard: null as null | { paths: string[]; cut: boolean },
+  /** Mirror of what Ferret put on the clipboard, to dim cut items. Server files can't go on
+   *  Windows' clipboard: the window keeps them, with the clipboard's change count then (`seq`). */
+  clipboard: null as null | { paths: string[]; cut: boolean; seq?: number },
   /** Folder path currently highlighted as a drop target. */
   dropTarget: null as null | string,
   dialog: null as null | DialogRequest,
@@ -148,6 +164,10 @@ export const [ui, setUi] = createStore({
   sidebarOverlay: false,
   /** Ctrl+K search / Ctrl+Shift+P commands. */
   palette: null as null | "files" | "commands",
+  /** A server connection's question (a password, a server key to trust). */
+  remotePrompt: null as null | RemotePrompt,
+  /** The server connection form: a connection to edit, or `{}` for a new one. */
+  connectionForm: null as null | { connection: Connection | null },
 });
 
 export const SHELF = "::shelf::";
@@ -442,6 +462,11 @@ export async function navigate(
     // Folders Windows keeps closed stay closed: Ferret never changes permissions.
     if (typeof e === "string" && e.startsWith("denied:")) {
       const denied = e.slice("denied:".length);
+      // On a server, its own permissions decide.
+      if (isRemote(denied)) {
+        toast(`“${basename(denied)}” is closed to your user on ${connectionOf(denied)?.name ?? "the server"}`, "error");
+        return false;
+      }
       // Inside WSL, Linux decides, as the distro's user: Windows administrator rights don't help.
       if (isWsl(denied)) {
         toast(`“${basename(denied)}” is closed to your Linux user. Open it from Linux, with sudo`, "error");
@@ -457,6 +482,13 @@ export async function navigate(
         confirmLabel: "Run as administrator", shield: true,
       });
       if (ok !== null) elevateWindow(denied);
+      return false;
+    }
+    // A server that couldn't be reached (or the user cancelled its password): a tab showing
+    // nothing yet keeps the folder, with a Connect button, rather than an empty tab.
+    if (isRemote(path)) {
+      if (e !== "Cancelled") toast(`Couldn't connect to ${connectionOf(path)?.name ?? "the server"}: ${e}`, "error");
+      if (!tab.p) showOffline(tab, path);
       return false;
     }
     toast(`Can't open ${basename(path) || path}: ${e}`, "error");
@@ -491,6 +523,21 @@ export async function navigate(
   return true;
 }
 
+/** A tab on a server folder that isn't connected (restored at startup, or the connection
+ *  failed): the folder is named, with a Connect button where its files would be. */
+export function showOffline(tab: Tab, path: string) {
+  batch(() => {
+    tab.path[1](path);
+    tab.entries[1]([]);
+    tab.loading[1](false);
+    tab.error[1](OFFLINE);
+    if (!tab.history[0]().length) {
+      tab.history[1]([path]);
+      tab.hIndex[1](0);
+    }
+  });
+}
+
 // ---------- recents: folders you actually used ----------
 
 /** A folder counts once you've stayed a moment or opened a file there, not when you pass
@@ -523,11 +570,15 @@ const vanishing = new Set<number>();
 
 /** F5 / the refresh button: list the folder again and count its folders' sizes again. */
 export function refresh(tab: Tab) {
+  // F5 on a server tab that isn't connected connects it.
+  if (tab.error[0]() === OFFLINE) return navigate(tab, tab.p, { history: "none" });
   invalidateFolderSizes([tab.p], true);
   return reload(tab);
 }
 
 export async function reload(tab: Tab, reresolve = false) {
+  // Only a click connects a server.
+  if (tab.error[0]() === OFFLINE) return;
   const tok = ++tab.token;
   let res;
   try {
@@ -687,7 +738,8 @@ export function openEntry(tab: Tab, e: Pick<Entry, "path" | "isDir">, inNewTab =
     });
   }
   // Archives open as folders (like Explorer does for zips); "Open with" still reaches 7-Zip etc.
-  if (e.isDir || isArchiveName(e.path)) {
+  // (A server's open in their app, like its other files.)
+  if (e.isDir || (isArchiveName(e.path) && !isRemote(e.path))) {
     if (inNewTab) newTab(e.path, false);
     else navigate(tab, e.path);
   } else {
@@ -960,6 +1012,7 @@ export async function boot() {
     setPlaces({ ...b.places, recycle: { items: 0, bytes: 0 } });
     setFavorites(b.favorites);
     setRecents(b.recents);
+    setConnections(b.connections ?? []);
     if (b.session?.sidebarWidth) setUi("sidebarWidth", b.session.sidebarWidth);
     if (b.session?.collapsedSections) setUi("collapsedSections", b.session.collapsedSections);
     if (b.session?.previewOpen) setUi("previewOpen", true);
@@ -996,9 +1049,12 @@ export async function boot() {
    *  can't be opened is closed. */
   const open = async (tab: Tab, i: number) => {
     const pane = tab.split[0]();
+    // Servers only connect when the user asks: their tabs come back with a Connect button.
+    const go = (t: Tab, path: string, select?: string | null) =>
+      isRemote(path) ? (showOffline(t, path), Promise.resolve(true)) : navigate(t, path, { select: select ?? null });
     const [ok, paneOk] = await Promise.all([
-      navigate(tab, wanted[i].path, { select: wanted[i].select ?? null }),
-      !pane || navigate(pane, pane.p),
+      go(tab, wanted[i].path, wanted[i].select),
+      !pane || go(pane, pane.p),
     ]);
     if (!paneOk && tab.split[0]() === pane && !pane!.history[0]().length) batch(() => { tab.splitFocused[1](false); tab.split[1](null); });
     return ok;
@@ -1051,18 +1107,22 @@ export async function boot() {
     }
     setFavorites(s.favorites);
     setRecents(s.recents);
+    setConnections(s.connections ?? []);
   });
 
   // Folders deleted from outside on shares/WSL may not raise watcher events: check the open one.
+  // (A server's shown folders are listed again by the backend; checking here would connect.)
   setInterval(() => {
     const t = activeTab();
-    if (!t || t.loading[0]() || document.hidden || isVirtual(t.p)) return;
+    if (!t || t.loading[0]() || document.hidden || isVirtual(t.p) || isRemote(t.p)) return;
     api.resolveInput(t.p).then((r) => { if (r.kind === "missing") reload(t); }).catch(() => {});
   }, 4000);
 
-  // Recent drops folders that no longer exist (checked now and every couple of minutes).
+  // Recent drops folders that no longer exist (checked now and every couple of minutes; a
+  // server's are kept, checking them would connect).
   const pruneRecents = async () => {
     for (const r of recents()) {
+      if (isRemote(r.path)) continue;
       const res = await api.resolveInput(r.path).catch(() => null);
       if (res?.kind === "missing") setRecents(await api.removeRecent(r.path));
     }

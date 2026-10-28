@@ -48,6 +48,10 @@ pub fn plugin<R: Runtime>() -> TauriPlugin<R> {
         .level_for("notify", LevelFilter::Warn)
         // A line per formula it skips in an .xls.
         .level_for("calamine", LevelFilter::Warn)
+        // A line per SSH / SFTP packet.
+        .level_for("russh", LevelFilter::Warn)
+        .level_for("russh_sftp", LevelFilter::Warn)
+        .level_for("pageant", LevelFilter::Warn)
         .build()
 }
 

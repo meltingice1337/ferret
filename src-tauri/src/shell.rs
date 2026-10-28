@@ -1343,6 +1343,18 @@ pub async fn clipboard_after_cut(cut: Vec<String>, left: Vec<String>) -> Result<
         .map_err(|e| e.to_string())?
 }
 
+/// Windows' clipboard change counter: server files Ferret copies are kept by the window (the
+/// clipboard can't hold them), and a paste uses them only while nothing was copied since.
+#[tauri::command]
+pub fn clipboard_sequence() -> u32 {
+    #[cfg(windows)]
+    unsafe {
+        windows::Win32::System::DataExchange::GetClipboardSequenceNumber()
+    }
+    #[cfg(not(windows))]
+    0
+}
+
 /// Files currently on the clipboard (from Explorer or us); `null` if none.
 #[tauri::command]
 pub async fn clipboard_read_files() -> Result<Option<ClipboardFiles>, String> {
@@ -1601,8 +1613,27 @@ fn spawn_hidden(mut cmd: Command) -> std::io::Result<()> {
         .map(|_| ())
 }
 
+/// A terminal logged in to a server, in `linux` there: Windows' own `ssh` (it reads the same
+/// ~/.ssh/config and keys), in Windows Terminal when it's there.
+fn open_remote_terminal(id: &str, linux: &str) -> Result<(), String> {
+    let (dest, mut args) = crate::remote::ssh_destination(id).ok_or("There's no such connection any more")?;
+    let here = format!("cd {} 2>/dev/null; exec \"$SHELL\" -l", crate::remote::ssh::quote(linux));
+    args.extend(["-t".to_string(), dest, here]);
+    if let Some(wt) = find_wt() {
+        let mut cmd = Command::new(&wt);
+        cmd.arg("ssh").args(args.iter().map(|a| escape_wt(a)));
+        if spawn_hidden(cmd).is_ok() {
+            return Ok(());
+        }
+    }
+    shell_execute("ssh.exe", &args.iter().map(|a| quote_arg(a)).collect::<Vec<_>>().join(" "), None)
+}
+
 fn open_terminal_blocking(path: &str) -> Result<(), String> {
     let path = paths::normalize(path);
+    if let Some((id, linux)) = paths::remote_parts(&path) {
+        return open_remote_terminal(id, &linux);
+    }
     let wsl = wsl_linux_path(&path);
     if let Some(wt) = find_wt() {
         let mut cmd = Command::new(&wt);
@@ -1669,8 +1700,15 @@ fn find_code_cmd() -> Option<PathBuf> {
     candidates.into_iter().find(|c| c.is_file())
 }
 
-/// Arguments for `code` (`--remote wsl+<distro> /path` for WSL paths).
+/// Arguments for `code` (`--remote wsl+<distro> /path` for WSL paths, `ssh-remote+<host>` for a
+/// server's, which VS Code's Remote - SSH opens).
 fn vscode_args(path: &str) -> Vec<String> {
+    if let Some((id, linux)) = paths::remote_parts(&paths::normalize(path)) {
+        let host = crate::remote::find_connection(id)
+            .map(|c| c.ssh_alias.clone().unwrap_or_else(|| if c.user.is_empty() { c.host.clone() } else { format!("{}@{}", c.user, c.host) }))
+            .unwrap_or_else(|| id.to_string());
+        return vec!["--remote".into(), format!("ssh-remote+{host}"), linux];
+    }
     match wsl_linux_path(path) {
         Some((distro, linux)) => vec!["--remote".into(), format!("wsl+{distro}"), linux],
         None => vec![paths::for_io(&paths::normalize(path))],

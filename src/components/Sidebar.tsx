@@ -1,13 +1,15 @@
 import {
-  ChevronDown, Clock, Download, EyeOff, FileText, FolderOpen, HardDrive, House, Image, Monitor, Music, Pencil,
-  Inbox, Search, Settings as SettingsIcon, SlidersHorizontal, Star, Terminal, Trash2, Usb, Video, X,
+  ChevronDown, Clock, Download, EyeOff, FileText, FolderOpen, HardDrive, House, Image, Monitor, Music, Pencil, Plug, Plus, Server,
+  Inbox, Search, Settings as SettingsIcon, SlidersHorizontal, Star, Terminal, Trash2, Unplug, Usb, Video, X,
 } from "../lib/icons";
+import { disconnect, editConnection, openConnection, removeConnection } from "../lib/remote";
+import type { Connection } from "../lib/types";
 import { openSearchPalette } from "./SearchPalette";
 import { createEffect, createSignal, For, type JSX, onCleanup, Show } from "solid-js";
 import { Dynamic } from "solid-js/web";
 import { api } from "../lib/api";
 import { formatSize } from "../lib/format";
-import { basename, isRecycle, isSearch, isWithin, parent, RECYCLE, samePath, searchPath, searchQuery } from "../lib/path";
+import { basename, isRecycle, isSearch, isWithin, parent, RECYCLE, remoteParts, samePath, searchPath, searchQuery } from "../lib/path";
 
 /** Folder names that say little on their own (build output, sources, assets…). */
 const GENERIC_NAMES = new Set([
@@ -15,6 +17,7 @@ const GENERIC_NAMES = new Set([
   "assets", "public", "static", "data", "temp", "tmp", "config", "scripts", "images", "img", "node_modules", "app", "packages",
 ]);
 import {
+  connections, remoteState,
   activeTab, favorites, goTo, navigate, newTab, openMenu, persistSession, persistSettings, places, promptSaveSearch, recents,
   removeFromShelf, removeSavedSearch, setFavorites, setRecents, setSettings, settings, setUi, SHELF, ui, type MenuItem,
 } from "../lib/state";
@@ -31,7 +34,7 @@ const KNOWN_ICONS: Record<string, any> = {
 /** Sidebar sections that can be hidden (Settings → Sidebar). */
 export const SECTIONS = [
   { id: "favorites", name: "Favorites" }, { id: "searches", name: "Saved searches" }, { id: "places", name: "Places" }, { id: "linux", name: "Linux (WSL)" },
-  { id: "drives", name: "Drives" }, { id: "recents", name: "Recent" }, { id: "dropzone", name: "Dropzone" },
+  { id: "servers", name: "Servers" }, { id: "drives", name: "Drives" }, { id: "recents", name: "Recent" }, { id: "dropzone", name: "Dropzone" },
 ];
 
 const placeShown = (id: string) => !settings.hiddenPlaces.includes(id);
@@ -173,6 +176,16 @@ export default function Sidebar(props: { overlay?: boolean }) {
           </Section>
         </Show>
 
+        <Section id="servers" title="Servers" action={
+          <button class="icon-btn tiny" title="Add a server (SSH)" onClick={(e) => { e.stopPropagation(); editConnection(null); }}><Plus size={13} /></button>
+        }>
+          <Show when={connections().length} fallback={
+            <button class="side-empty side-add" onClick={() => editConnection(null)}>Add a server to browse its files over SSH</button>
+          }>
+            <For each={connections()}>{(c) => <ServerItem connection={c} current={current()} />}</For>
+          </Show>
+        </Section>
+
         <Section id="drives" title="Drives">
           <For each={places().drives}>
             {(d) => {
@@ -247,6 +260,38 @@ function AppVersion() {
         <Show when={fresh()}><span class="update-dot" /></Show>
       </button>
     </Show>
+  );
+}
+
+/** A server connection: opens (connecting if need be) on click; a dot while connected. */
+function ServerItem(props: { connection: Connection; current: string }) {
+  const c = () => props.connection;
+  const state = () => remoteState[c().id] ?? "disconnected";
+  const here = () => remoteParts(props.current)?.id === c().id;
+  const where = () => `${c().user ? `${c().user}@` : ""}${c().host || c().sshAlias}${c().port !== 22 ? `:${c().port}` : ""}`;
+  const menu = (e: MouseEvent) => {
+    e.preventDefault();
+    openMenu(e.clientX, e.clientY, [
+      { label: state() === "connected" ? "Open" : "Connect", icon: Plug, action: () => openConnection(c().id) },
+      { label: "Open in new tab", icon: FolderOpen, action: () => openConnection(c().id, true) },
+      { separator: true },
+      { label: "Edit…", icon: Pencil, action: () => editConnection(c()) },
+      ...(state() === "connected" ? [{ label: "Disconnect", icon: Unplug, action: () => disconnect(c().id) }] : []),
+      { label: "Remove…", icon: X, action: () => removeConnection(c()) },
+    ]);
+  };
+  return (
+    <button class="side-item server-item" classList={{ active: here() }}
+      title={`${c().name}\n${where()}${state() === "connected" ? "\nConnected" : ""}`}
+      onClick={() => openConnection(c().id)}
+      onMouseDown={(e) => e.button === 1 && (e.preventDefault(), openConnection(c().id, true))}
+      onContextMenu={menu}>
+      <Server size={15} />
+      <span class="side-label">{c().name}</span>
+      <Show when={state() !== "disconnected"}>
+        <span class="server-dot" classList={{ connecting: state() === "connecting" }} title={state() === "connecting" ? "Connecting…" : "Connected"} />
+      </Show>
+    </button>
   );
 }
 

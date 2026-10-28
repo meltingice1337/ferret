@@ -2,7 +2,7 @@
 //! policies, delete (Recycle Bin or permanent), restore from Recycle Bin (undo),
 //! properties and small reads for previews.
 
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 use std::fs;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
@@ -89,8 +89,11 @@ pub fn unique_name(dir: &str, name: &str, copy_style: bool) -> String {
 // ---------- create / rename ----------
 
 #[tauri::command]
-pub fn create_folder(dir: String, name: Option<String>) -> Res<String> {
+pub async fn create_folder(dir: String, name: Option<String>) -> Res<String> {
     let name = name.unwrap_or_else(|| "New folder".into());
+    if paths::is_remote(&dir) {
+        return crate::remote::fs::create_folder(&dir, &name).await;
+    }
     validate_name(&name)?;
     let name = unique_name(&dir, &name, false);
     let p = join(&paths::normalize(&dir), &name);
@@ -103,12 +106,18 @@ pub fn create_folder(dir: String, name: Option<String>) -> Res<String> {
 /// Undo of "New folder": removes the folder only if it's still empty (nothing to lose, so it
 /// doesn't clutter the Recycle Bin). False when there's something in it, or it can't go.
 #[tauri::command]
-pub fn remove_empty_folder(path: String) -> bool {
+pub async fn remove_empty_folder(path: String) -> bool {
+    if paths::is_remote(&path) {
+        return crate::remote::fs::remove_empty_folder(&path).await;
+    }
     fs::remove_dir(io(&paths::normalize(&path))).is_ok()
 }
 
 #[tauri::command]
-pub fn create_file(dir: String, name: String, content: Option<String>) -> Res<String> {
+pub async fn create_file(dir: String, name: String, content: Option<String>) -> Res<String> {
+    if paths::is_remote(&dir) {
+        return crate::remote::fs::create_file(&dir, &name, content).await;
+    }
     validate_name(&name)?;
     let name = unique_name(&dir, &name, false);
     let p = join(&paths::normalize(&dir), &name);
@@ -122,7 +131,10 @@ pub fn create_file(dir: String, name: String, content: Option<String>) -> Res<St
 }
 
 #[tauri::command]
-pub fn rename_item(path: String, new_name: String) -> Res<String> {
+pub async fn rename_item(path: String, new_name: String) -> Res<String> {
+    if paths::is_remote(&path) {
+        return crate::remote::fs::rename(&path, &new_name).await;
+    }
     let new_name = new_name.trim().to_string();
     validate_name(&new_name)?;
     let src = paths::normalize(&path);
@@ -165,11 +177,31 @@ fn ms(m: &fs::Metadata) -> Option<i64> {
     m.modified().ok()?.duration_since(UNIX_EPOCH).ok().map(|d| d.as_millis() as i64)
 }
 
+impl Conflict {
+    /// From the file systems' own descriptions (servers: remote/ops.rs).
+    pub fn new(name: String, source: String, target: String, sm: &vfs::Meta, tm: &vfs::Meta) -> Self {
+        let t = |m: &vfs::Meta| m.modified.and_then(|t| t.duration_since(UNIX_EPOCH).ok()).map(|d| d.as_millis() as i64);
+        Conflict {
+            name,
+            is_dir: sm.is_dir,
+            source_size: sm.len,
+            target_size: tm.len,
+            source_modified: t(sm),
+            target_modified: t(tm),
+            source,
+            target,
+        }
+    }
+}
+
 /// Items in `sources` whose name already exists in `dest` (ignores moving onto itself).
 // Off the main thread: with thousands of items this can take a moment, and the window
 // must keep answering meanwhile.
 #[tauri::command(async)]
 pub fn check_conflicts(sources: Vec<String>, dest: String) -> Vec<Conflict> {
+    if crate::remote::ops::involves(&sources, Some(&dest)) {
+        return crate::remote::ops::conflicts(&sources, &dest);
+    }
     let dest = paths::normalize(&dest);
     sources
         .iter()
@@ -198,122 +230,8 @@ pub fn check_conflicts(sources: Vec<String>, dest: String) -> Vec<Conflict> {
 
 // ---------- copy / move ----------
 
-#[derive(Deserialize, Clone, Copy, PartialEq, Debug)]
-#[serde(rename_all = "camelCase")]
-pub enum Policy {
-    Replace,
-    Skip,
-    KeepBoth,
-}
-
-fn walk_totals(p: &Path, bytes: &mut u64, files: &mut u64, ctx: &JobCtx) -> Res<()> {
-    ctx.check()?;
-    let m = fs::symlink_metadata(p).map_err(err)?;
-    if m.is_dir() {
-        for e in fs::read_dir(p).map_err(err)?.flatten() {
-            walk_totals(&e.path(), bytes, files, ctx)?;
-        }
-    } else {
-        *bytes += m.len();
-        *files += 1;
-    }
-    Ok(())
-}
-
-fn copy_file(src: &Path, dst: &Path, ctx: &JobCtx) -> Res<()> {
-    let meta = fs::metadata(src).map_err(err)?;
-    let mut input = fs::File::open(src).map_err(|e| format!("{}: {e}", src.display()))?;
-    let mut output = fs::File::create(dst).map_err(|e| format!("{}: {e}", dst.display()))?;
-    let mut buf = vec![0u8; 1 << 20];
-    let result = (|| -> Res<()> {
-        loop {
-            ctx.check()?;
-            let n = input.read(&mut buf).map_err(err)?;
-            if n == 0 {
-                break;
-            }
-            output.write_all(&buf[..n]).map_err(err)?;
-            ctx.add_bytes(n as u64);
-        }
-        if let Ok(t) = meta.modified() {
-            let _ = output.set_modified(t);
-        }
-        Ok(())
-    })();
-    if result.is_err() {
-        drop(output);
-        let _ = fs::remove_file(dst);
-    } else {
-        let _ = fs::set_permissions(dst, meta.permissions());
-    }
-    result
-}
-
-/// Moves an item that is about to be overwritten to the Recycle Bin, so undo can bring it back.
-/// Falls back to deleting it where there is no Recycle Bin (e.g. some network/WSL shares).
-fn displace(p: &Path, ctx: &JobCtx) -> Res<()> {
-    match trash::delete(p) {
-        Ok(()) => {
-            ctx.replaced(p.to_string_lossy().into_owned());
-            Ok(())
-        }
-        Err(_) => remove_any(p).map_err(|e| format!("Couldn't replace {}: {e}", p.display())),
-    }
-}
-
-/// Copies `src` to `dst`, merging into existing folders. Reports exactly what it
-/// created (`report`), so undo never touches content that was already there, and
-/// recycles anything it overwrites.
-fn copy_tree(src: &Path, dst: &Path, policy: Policy, ctx: &JobCtx, report: bool) -> Res<()> {
-    ctx.check()?;
-    let m = fs::symlink_metadata(src).map_err(err)?;
-    let s_str = src.to_string_lossy().into_owned();
-    if m.is_dir() {
-        let merging = dst.exists();
-        if !merging {
-            fs::create_dir(dst).map_err(|e| format!("{}: {e}", dst.display()))?;
-            if report {
-                ctx.created(dst.to_string_lossy().into_owned());
-                ctx.pair(s_str.clone(), dst.to_string_lossy().into_owned());
-            }
-        }
-        for e in fs::read_dir(src).map_err(err)?.flatten() {
-            // Inside a brand-new folder only the folder itself is reported.
-            copy_tree(&e.path(), &dst.join(e.file_name()), policy, ctx, report && merging)?;
-        }
-        if let Ok(t) = m.modified() {
-            if let Ok(f) = fs::File::open(dst) {
-                let _ = f.set_modified(t);
-            }
-        }
-        Ok(())
-    } else {
-        ctx.set_current(&src.file_name().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default());
-        let mut target = dst.to_path_buf();
-        if fs::symlink_metadata(dst).is_ok() {
-            match policy {
-                Policy::Skip => {
-                    ctx.add_bytes(m.len());
-                    ctx.file_done();
-                    ctx.skipped();
-                    return Ok(());
-                }
-                Policy::Replace => displace(dst, ctx)?,
-                Policy::KeepBoth => {
-                    let dir = dst.parent().map(|p| p.to_string_lossy().into_owned()).unwrap_or_default();
-                    target = Path::new(&dir).join(unique_name(&dir, &dst.file_name().unwrap().to_string_lossy(), false));
-                }
-            }
-        }
-        copy_file(src, &target, ctx)?;
-        if report {
-            ctx.created(target.to_string_lossy().into_owned());
-            ctx.pair(s_str, target.to_string_lossy().into_owned());
-        }
-        ctx.file_done();
-        Ok(())
-    }
-}
+pub use crate::vfs::Policy;
+use crate::vfs::{self, Local};
 
 /// Whether a new folder can be created in `dir` (creates and removes a probe folder).
 fn can_create_folder(dir: &str) -> bool {
@@ -354,6 +272,9 @@ fn remove_any(p: &Path) -> std::io::Result<()> {
 #[tauri::command(async)]
 pub fn transfer(app: AppHandle, op: String, sources: Vec<String>, dest: String, policy: Policy) -> Res<u64> {
     let moving = op == "move";
+    if crate::remote::ops::involves(&sources, Some(&dest)) {
+        return crate::remote::ops::transfer(&app, moving, sources, dest, policy);
+    }
     let dest = paths::normalize(&dest);
     if !io(&dest).is_dir() {
         return Err(format!("{dest} is not a folder"));
@@ -419,7 +340,7 @@ pub fn transfer(app: AppHandle, op: String, sources: Vec<String>, dest: String, 
                             return Err(why);
                         }
                         if fs::symlink_metadata(io(&target)).is_ok() {
-                            displace(&io(&target), ctx)?;
+                            vfs::displace(&Local, &target, ctx)?;
                         }
                         match fs::rename(io(s), io(&target)) {
                             Ok(()) => Ok(()),
@@ -450,7 +371,7 @@ pub fn transfer(app: AppHandle, op: String, sources: Vec<String>, dest: String, 
 
         let (mut bytes, mut files) = (0u64, 0u64);
         for (s, _) in &pending {
-            walk_totals(&io(s), &mut bytes, &mut files, ctx)?;
+            vfs::totals(&Local, s, &mut bytes, &mut files, ctx)?;
         }
         ctx.set_totals(bytes, files);
 
@@ -466,9 +387,9 @@ pub fn transfer(app: AppHandle, op: String, sources: Vec<String>, dest: String, 
                     }
                     // A file replacing a folder (or vice versa) can't merge: displace the whole item.
                     if policy == Policy::Replace && tp.exists() && (src_is_dir != tp.is_dir() || !src_is_dir) {
-                        displace(&tp, ctx)?;
+                        vfs::displace(&Local, &target, ctx)?;
                     }
-                    copy_tree(&src, &tp, policy, ctx, true)?;
+                    vfs::copy_tree(&Local, &s, &Local, &target, policy, ctx, true)?;
                     copied = true;
                 }
                 // Try again only retries the removal: the copy is already there.
@@ -488,7 +409,7 @@ pub fn transfer(app: AppHandle, op: String, sources: Vec<String>, dest: String, 
 
 /// Runs one item of a job, asking Try again / Skip / Skip all / Cancel when it fails (Skip all:
 /// the rest fail without asking). Ok(false) when the item was skipped; Err when the job is cancelled.
-fn per_item(ctx: &JobCtx, skip_all: &mut bool, item: &str, mut run: impl FnMut() -> Res<()>) -> Res<bool> {
+pub(crate) fn per_item(ctx: &JobCtx, skip_all: &mut bool, item: &str, mut run: impl FnMut() -> Res<()>) -> Res<bool> {
     loop {
         ctx.check()?;
         let Err(why) = run() else { return Ok(true) };
@@ -543,6 +464,9 @@ fn move_blocker(p: &Path) -> Option<String> {
 // must keep answering meanwhile.
 #[tauri::command(async)]
 pub fn undo_moves(app: AppHandle, pairs: Vec<(String, String)>) -> Res<u64> {
+    if pairs.iter().any(|(a, b)| paths::is_remote(a) || paths::is_remote(b)) {
+        return crate::remote::ops::undo_moves(&app, pairs);
+    }
     if let Some((from, _)) = pairs.iter().take(64).find(|(from, to)| {
         crate::shellops::needs_admin_delete(to) || paths::parent(from).is_some_and(|d| crate::shellops::needs_admin_write(&d))
     }) {
@@ -568,7 +492,7 @@ pub fn undo_moves(app: AppHandle, pairs: Vec<(String, String)>) -> Res<u64> {
             }
             ctx.set_current(&file_name(from));
             if fs::rename(&t, &f).is_err() {
-                copy_tree(&t, &f, Policy::KeepBoth, ctx, false)?;
+                vfs::copy_tree(&Local, to, &Local, from, Policy::KeepBoth, ctx, false)?;
                 remove_any(&t).map_err(err)?;
             }
             ctx.created(from.clone());
@@ -591,6 +515,9 @@ const RECYCLE_BATCH: usize = 64;
 // must keep answering meanwhile.
 #[tauri::command(async)]
 pub fn delete_items(app: AppHandle, items: Vec<String>, permanent: bool) -> Res<u64> {
+    if crate::remote::ops::involves(&items, None) {
+        return crate::remote::ops::delete(&app, items, permanent);
+    }
     if let Some(p) = items.iter().take(256).find(|p| crate::shellops::needs_admin_delete(p)) {
         return Err(admin_err(format!("delete “{}”", file_name(p))));
     }
@@ -761,6 +688,10 @@ fn latest_in_trash(items: &[String]) -> Res<Vec<trash::TrashItem>> {
 /// Undo for "move to Recycle Bin": restores the most recently deleted item for each original path.
 #[tauri::command]
 pub async fn restore_from_trash(items: Vec<String>) -> Res<Vec<String>> {
+    // A server's trash (items a copy replaced there).
+    if items.iter().any(|p| paths::is_remote(p)) {
+        return crate::remote::fs::restore_by_original(&items).await;
+    }
     tauri::async_runtime::spawn_blocking(move || {
         #[cfg(windows)]
         {
@@ -832,9 +763,34 @@ pub struct ItemInfo {
     link_target: Option<String>,
 }
 
+/// A server item's details (SFTP knows no creation time or Windows attributes).
+async fn remote_item_info(p: String) -> Res<ItemInfo> {
+    let (s, linux) = crate::remote::fs::session_of(&p).await?;
+    let lm = s.sftp.symlink_metadata(linux.clone()).await.map_err(|e| crate::remote::fs::sftp_err(&p, e))?;
+    let m = if lm.is_symlink() { s.sftp.metadata(linux.clone()).await.unwrap_or(lm.clone()) } else { lm.clone() };
+    let t = |s: Option<u32>| s.map(|v| v as i64 * 1000);
+    Ok(ItemInfo {
+        name: file_name(&p),
+        is_dir: m.is_dir(),
+        size: if m.is_dir() { 0 } else { m.size.unwrap_or(0) },
+        created: None,
+        modified: t(m.mtime),
+        accessed: t(m.atime),
+        readonly: m.permissions.is_some_and(|p| p & 0o200 == 0),
+        hidden: file_name(&p).starts_with('.'),
+        system: false,
+        is_symlink: lm.is_symlink(),
+        link_target: if lm.is_symlink() { s.sftp.read_link(linux).await.ok() } else { None },
+        path: p,
+    })
+}
+
 #[tauri::command]
-pub fn item_info(path: String) -> Res<ItemInfo> {
+pub async fn item_info(path: String) -> Res<ItemInfo> {
     let p = paths::normalize(&path);
+    if paths::is_remote(&p) {
+        return remote_item_info(p).await;
+    }
     let lm = fs::symlink_metadata(io(&p)).map_err(err)?;
     let m = fs::metadata(io(&p)).unwrap_or(lm.clone());
     let t = |r: std::io::Result<std::time::SystemTime>| {
@@ -876,6 +832,10 @@ pub struct Stats {
 /// Recursive size/count for the properties dialog and status bar.
 #[tauri::command]
 pub async fn folder_stats(items: Vec<String>) -> Res<Stats> {
+    if crate::remote::ops::involves(&items, None) {
+        let (files, dirs, bytes, partial) = crate::remote::ops::stats(&items).await;
+        return Ok(Stats { files, dirs, bytes, partial });
+    }
     tauri::async_runtime::spawn_blocking(move || {
         let mut st = Stats::default();
         let mut stack: Vec<PathBuf> = Vec::new();
@@ -924,6 +884,9 @@ pub async fn folder_stats(items: Vec<String>) -> Res<Stats> {
 
 #[tauri::command]
 pub fn set_attributes(path: String, readonly: bool, hidden: bool) -> Res<()> {
+    if paths::is_remote(&path) {
+        return Err("Files on a server don't have these Windows attributes".into());
+    }
     log::info!("set attributes on \"{path}\": readonly={readonly}, hidden={hidden}");
     let p = io(&path);
     let mut perms = fs::metadata(&p).map_err(err)?.permissions();
@@ -976,17 +939,30 @@ fn looks_binary(bytes: &[u8]) -> bool {
 /// Reads up to `max_bytes` of a file as text (UTF-8/UTF-16 with BOM, Windows-1252 fallback).
 #[tauri::command]
 pub async fn read_text(path: String, max_bytes: Option<u64>) -> Res<TextPreview> {
+    let max = max_bytes.unwrap_or(2 * 1024 * 1024);
+    // From a server: only the start comes over (its lines aren't counted).
+    if paths::is_remote(&path) {
+        let (buf, size) = crate::remote::fs::read_head(&path, max).await?;
+        return Ok(decode_text(buf, size, size > max, None));
+    }
     tauri::async_runtime::spawn_blocking(move || {
-        let max = max_bytes.unwrap_or(2 * 1024 * 1024);
         let mut f = fs::File::open(io(&path)).map_err(err)?;
         let size = f.metadata().map_err(err)?.len();
         let mut buf = Vec::with_capacity(max.min(size) as usize);
         (&mut f).take(max).read_to_end(&mut buf).map_err(err)?;
         let truncated = size > max;
+        Ok(decode_text(buf, size, truncated, Some(&mut f)))
+    })
+    .await
+    .map_err(err)?
+}
 
+/// A file's start as text (`rest`: the remainder, to count its lines).
+fn decode_text(buf: Vec<u8>, size: u64, truncated: bool, rest: Option<&mut dyn Read>) -> TextPreview {
+    {
         let (enc, bom) = encoding_rs::Encoding::for_bom(&buf).unwrap_or((encoding_rs::UTF_8, 0));
         if bom == 0 && looks_binary(&buf) {
-            return Ok(TextPreview { text: String::new(), truncated, binary: true, encoding: "binary".into(), size, lines: None });
+            return TextPreview { text: String::new(), truncated, binary: true, encoding: "binary".into(), size, lines: None };
         }
         let (text, encoding) = if bom > 0 {
             let (t, _, _) = enc.decode(&buf);
@@ -1006,7 +982,7 @@ pub async fn read_text(path: String, max_bytes: Option<u64>) -> Res<TextPreview>
         };
         // Cut short: the rest is only counted, so the preview can say how long the file is.
         // (Byte counting fits UTF-8 and the one-byte encodings, not UTF-16.)
-        let lines = (truncated && bom == 0 && size <= TEXT_COUNT_MAX).then(|| {
+        let lines = rest.filter(|_| truncated && bom == 0 && size <= TEXT_COUNT_MAX).map(|f| {
             let mut n = memchr::memchr_iter(b'\n', &buf).count() as u64;
             let mut last = buf.last().copied();
             let mut chunk = vec![0u8; 1 << 20];
@@ -1019,15 +995,16 @@ pub async fn read_text(path: String, max_bytes: Option<u64>) -> Res<TextPreview>
             }
             n + u64::from(last.is_some_and(|b| b != b'\n'))
         });
-        Ok(TextPreview { text, truncated, binary: false, encoding, size, lines })
-    })
-    .await
-    .map_err(err)?
+        TextPreview { text, truncated, binary: false, encoding, size, lines }
+    }
 }
 
 /// First `count` bytes as a hex dump source for the fallback preview.
 #[tauri::command]
-pub fn read_bytes(path: String, count: Option<u64>) -> Res<Vec<u8>> {
+pub async fn read_bytes(path: String, count: Option<u64>) -> Res<Vec<u8>> {
+    if paths::is_remote(&path) {
+        return crate::remote::fs::read_head(&path, count.unwrap_or(512)).await.map(|(b, _)| b);
+    }
     let f = fs::File::open(io(&path)).map_err(err)?;
     let mut buf = Vec::new();
     f.take(count.unwrap_or(512)).read_to_end(&mut buf).map_err(err)?;

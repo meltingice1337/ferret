@@ -69,6 +69,14 @@ tauri-plugin-process = "2"
 # --- diagnostics (rotating log files in the app's log folder) ---
 tauri-plugin-log = "2"
 log = "0.4"
+# --- remote/ (SSH connections) ---
+# ring, as rustls already uses: the default aws-lc backend needs CMake and NASM to build.
+russh = { version = "0.65", default-features = false, features = ["ring", "rsa", "flate2"] }
+russh-sftp = "3"
+tokio = { version = "1", features = ["io-util", "macros", "net", "rt", "sync", "time"] }
+# hashed known_hosts names (both were already in the build through russh)
+hmac = "0.13"
+sha1 = "0.11"
 
 [target.'cfg(windows)'.dependencies]
 winreg = "0.56"
@@ -94,6 +102,8 @@ windows = { version = "0.62", features = [
     "Win32_UI_WindowsAndMessaging",
     # search (MFT/USN, named pipe, directory watchers)
     "Win32_Security",
+    # remote/secrets.rs (remembered SSH passwords)
+    "Win32_Security_Credentials",
     "Win32_Security_Authorization",
     "Win32_Storage_FileSystem",
     "Win32_System_IO",

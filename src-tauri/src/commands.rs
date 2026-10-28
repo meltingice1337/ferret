@@ -32,11 +32,13 @@ pub struct Bootstrap {
     places: places::Places,
     favorites: Vec<db::Favorite>,
     recents: Vec<db::Recent>,
+    connections: Vec<crate::remote::Connection>,
 }
 
 #[tauri::command]
 pub async fn bootstrap(state: State<'_, AppState>) -> Res<Bootstrap> {
     let places = tauri::async_runtime::spawn_blocking(places::all).await.map_err(err)?;
+    let connections = crate::remote::connections();
     with_db(&state, |c| {
         Ok(Bootstrap {
             settings: db::load_settings(c),
@@ -44,6 +46,7 @@ pub async fn bootstrap(state: State<'_, AppState>) -> Res<Bootstrap> {
             places,
             favorites: db::favorites(c)?,
             recents: db::recents_present(c, 12)?,
+            connections,
         })
     })
 }
@@ -54,12 +57,14 @@ pub struct SharedState {
     settings: Value,
     favorites: Vec<db::Favorite>,
     recents: Vec<db::Recent>,
+    connections: Vec<crate::remote::Connection>,
 }
 
 /// What other Ferret windows may have changed (re-read when a window gets focus).
 #[tauri::command]
 pub fn shared_state(state: State<'_, AppState>) -> Res<SharedState> {
-    with_db(&state, |c| Ok(SharedState { settings: db::load_settings(c), favorites: db::favorites(c)?, recents: db::recents_present(c, 12)? }))
+    let connections = crate::remote::connections();
+    with_db(&state, |c| Ok(SharedState { settings: db::load_settings(c), favorites: db::favorites(c)?, recents: db::recents_present(c, 12)?, connections }))
 }
 
 #[tauri::command]
@@ -98,6 +103,13 @@ pub async fn list_dir(state: State<'_, AppState>, path: String) -> Res<DirListin
         let entries = tauri::async_runtime::spawn_blocking(move || crate::search::list_matches(&q)).await.map_err(err)?;
         let path = format!("{}{query}", crate::search::SEARCH_PREFIX);
         let resolved = with_db(&state, |c| Ok(db::resolve_view(c, &db::load_settings(c), &path, None)))?;
+        return Ok(DirListing { path, entries, resolved });
+    }
+    // A server's folder (connecting first if need be: the user opened it).
+    if paths::is_remote(&path) {
+        let (path, entries) = crate::remote::fs::list(&path).await?;
+        let profile = listing::detect_profile(&path, &entries);
+        let resolved = with_db(&state, |c| Ok(db::resolve_view(c, &db::load_settings(c), &path, profile)))?;
         return Ok(DirListing { path, entries, resolved });
     }
     if let Some(server) = listing::server_root(&path).map(str::to_string) {
@@ -139,6 +151,11 @@ pub struct ResolvedInput {
 /// Linux paths (`/home/me` → current or default WSL distro), `\\wsl$`.
 #[tauri::command]
 pub async fn resolve_input(input: String, current: Option<String>) -> Res<ResolvedInput> {
+    // A server's folder: `\\ssh:\home.local\srv`, `home.local:/srv`, `ssh://home.local/srv`.
+    if let Some(path) = crate::remote::parse_input(input.trim().trim_matches('"')) {
+        let (path, kind) = crate::remote::fs::resolve(&path).await?;
+        return Ok(ResolvedInput { path, kind });
+    }
     tauri::async_runtime::spawn_blocking(move || {
         let mut s = input.trim().trim_matches('"').to_string();
         if recycle::is_recycle(&s) {
@@ -208,12 +225,19 @@ pub async fn resolve_input(input: String, current: Option<String>) -> Res<Resolv
 
 #[tauri::command]
 pub fn open_path(path: String) -> Res<()> {
+    // Server files open through remote_open (downloaded, then uploaded back when saved).
+    if paths::is_remote(&path) {
+        return Err("Open server files with remote_open".into());
+    }
     tauri_plugin_opener::open_path(paths::for_io(&path), None::<&str>).map_err(err)
 }
 
 #[tauri::command]
 pub fn watch_dirs(state: State<'_, AppState>, paths: Vec<String>) -> Res<()> {
-    state.watcher.lock().map_err(err)?.set(paths);
+    // Servers can't be watched from here: their shown folders are listed again now and then.
+    let (remote, local): (Vec<String>, Vec<String>) = paths.into_iter().partition(|p| crate::paths::is_remote(p));
+    crate::remote::set_shown(&remote);
+    state.watcher.lock().map_err(err)?.set(local);
     Ok(())
 }
 

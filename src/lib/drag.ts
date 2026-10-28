@@ -9,7 +9,7 @@ import { createSignal } from "solid-js";
 import { startDrag } from "@crabnebula/tauri-plugin-drag";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { api } from "./api";
-import { basename, inRecycleBin, isRecycle, isWithin, parent, samePath } from "./path";
+import { basename, inRecycleBin, isRecycle, isRemote, isWithin, parent, samePath } from "./path";
 import { activeTab, addToShelf, SHELF, setActiveId, tabs, toast } from "./state";
 import { deleteItems, realPath, transferTo } from "./ops";
 
@@ -144,6 +144,8 @@ export function beginDrag(down: MouseEvent, getPaths: () => string[], inArchive 
   async function goNative() {
     const d = drag();
     cleanup();
+    // A server's files aren't on this PC for other apps to take.
+    if ((d?.paths ?? paths).some(isRemote)) return toast("To use a server's files in another app, drop them on a folder in Ferret first (or open them)");
     try {
       // Archive entries need real files before other apps can take them.
       const real = (await Promise.all((d?.paths ?? paths).map((p) => realPath({ path: p, inArchive })))).filter(Boolean) as string[];

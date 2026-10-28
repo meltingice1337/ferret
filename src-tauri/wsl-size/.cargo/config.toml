@@ -1,8 +1,13 @@
-# Linux, linked statically (musl): one file that runs in any distro, whatever its libc. Built on
-# Windows with the linker Rust ships (`rustup target add x86_64-unknown-linux-musl` once).
+# Linux, linked statically (musl): one file that runs in any distro or server, whatever its libc.
+# Built on Windows with the linker Rust ships, for x86_64 and ARM64 (build.rs passes --target;
+# `rustup target add x86_64-unknown-linux-musl aarch64-unknown-linux-musl` once).
 [build]
 target = "x86_64-unknown-linux-musl"
 
 [target.x86_64-unknown-linux-musl]
+linker = "rust-lld"
+rustflags = ["-C", "link-self-contained=yes", "-C", "target-feature=+crt-static"]
+
+[target.aarch64-unknown-linux-musl]
 linker = "rust-lld"
 rustflags = ["-C", "link-self-contained=yes", "-C", "target-feature=+crt-static"]

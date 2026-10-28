@@ -1,6 +1,8 @@
 import { createEffect, For, on, onCleanup, onMount, Show } from "solid-js";
 import ContextMenu from "./components/ContextMenu";
 import { AskDialog, BatchRenameDialog, ConflictDialog, PropertiesDialog } from "./components/Dialogs";
+import { ConnectionDialog, RemotePromptDialog } from "./components/RemoteDialogs";
+import { answerPrompt } from "./lib/remote";
 import Panes from "./components/Panes";
 import { DragGhost, JobsPanel } from "./components/Jobs";
 import MediaEditor, { closeMediaEditor, escLeavesFullscreen } from "./components/MediaEditor";
@@ -98,16 +100,19 @@ function toggleSidebar() {
 }
 
 function closeTopModal() {
-  if (ui.dialog) { const d = ui.dialog; setUi("dialog", null); d.resolve(null); }
+  if (ui.remotePrompt) answerPrompt(null);
+  else if (ui.dialog) { const d = ui.dialog; setUi("dialog", null); d.resolve(null); }
   else if (ui.conflict) { const c = ui.conflict; setUi("conflict", null); c.resolve(null); }
   else if (ui.batchRename) setUi("batchRename", null);
   else if (ui.media) closeMediaEditor();
   else if (ui.properties) setUi("properties", null);
+  else if (ui.connectionForm) setUi("connectionForm", null);
   else if (updater.notesOpen) setUpdater("notesOpen", false);
   else if (ui.settingsOpen) setUi("settingsOpen", false);
 }
 
-const modalOpen = () => !!(ui.dialog || ui.conflict || ui.properties || ui.batchRename || ui.media || ui.settingsOpen || ui.quickLook || ui.palette || updater.notesOpen);
+const modalOpen = () => !!(ui.dialog || ui.conflict || ui.properties || ui.batchRename || ui.media || ui.settingsOpen || ui.quickLook || ui.palette
+  || updater.notesOpen || ui.remotePrompt || ui.connectionForm);
 
 const keyboardMenu = () => openKeyboardMenu(activeTab());
 
@@ -431,6 +436,9 @@ export default function App() {
       <PropertiesDialog />
       <BatchRenameDialog />
       <MediaEditor />
+      <ConnectionDialog />
+      {/* Last: a connection's question goes over everything (it may come from any dialog's action). */}
+      <RemotePromptDialog />
       <DragGhost />
       <div class="toasts">
         <For each={ui.toasts}>

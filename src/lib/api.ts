@@ -3,9 +3,9 @@ import { untrack } from "solid-js";
 import { createStore } from "solid-js/store";
 import { logCommandFailure } from "./log";
 import type {
-  ArchiveInfo, AudioInfo, Bootstrap, ClipboardFiles, Conflict, DefaultManagerStatus, DirListing, Favorite, FolderSize, FolderView, ImageInfo,
-  ImageOpts, ImagePreview, ItemInfo, LaunchTarget, OpenWithApp, Places, Policy, Recent, RecycleInfo, Session, ShellMenuItem, ShellOp,
-  Settings, Stats, TextPreview, VideoInfo, VideoJob, VideoSample, ViewSettings,
+  ArchiveInfo, AudioInfo, Bootstrap, ClipboardFiles, Conflict, Connection, DefaultManagerStatus, DirListing, Favorite, FolderSize, FolderView,
+  HostConfig, ImageInfo, ImageOpts, ImagePreview, ItemInfo, LaunchTarget, OpenWithApp, Places, Policy, Recent, RecycleInfo, Session,
+  ShellMenuItem, ShellOp, Settings, Stats, TextPreview, VideoInfo, VideoJob, VideoSample, ViewSettings,
 } from "./types";
 
 /** `invoke` that records failures in the log file before passing them on. */
@@ -90,6 +90,8 @@ export const api = {
   clipboardWriteFiles: (paths: string[], cut: boolean) => invoke<void>("clipboard_write_files", { paths, cut }),
   clipboardAfterCut: (cut: string[], left: string[]) => invoke<boolean>("clipboard_after_cut", { cut, left }),
   clipboardReadFiles: () => invoke<ClipboardFiles | null>("clipboard_read_files"),
+  /** Windows' count of clipboard changes. */
+  clipboardSequence: () => invoke<number>("clipboard_sequence"),
   openTerminal: (path: string) => invoke<void>("open_terminal", { path }),
   openInVscode: (path: string) => invoke<void>("open_in_vscode", { path }),
   revealInExplorer: (path: string) => invoke<void>("reveal_in_explorer", { path }),
@@ -132,10 +134,26 @@ export const api = {
   /** Restarts this window as administrator (UAC prompt) with these tabs; resolves once it's on screen. */
   restartElevated: (tabs: string[], active: number) => invoke<void>("restart_elevated", { tabs, active }),
   /** Settings, favorites and recents (other windows may have changed them). */
-  sharedState: () => invoke<{ settings: Settings; favorites: Favorite[]; recents: Recent[] }>("shared_state"),
+  sharedState: () => invoke<{ settings: Settings; favorites: Favorite[]; recents: Recent[]; connections: Connection[] }>("shared_state"),
   /** Runs an operation through the Windows shell; `elevate` lets it ask for administrator permission. */
   shellOp: (op: ShellOp, elevate: boolean) => invoke<number>("shell_op", { op, elevate }),
   logFolder: () => invoke<string>("log_folder"),
+
+  // ---- servers (remote/) ----
+  remoteConnections: () => invoke<Connection[]>("remote_connections"),
+  remoteSaveConnection: (connection: Connection) => invoke<Connection[]>("remote_save_connection", { connection }),
+  remoteDeleteConnection: (id: string) => invoke<Connection[]>("remote_delete_connection", { id }),
+  remoteConfigHosts: () => invoke<HostConfig[]>("remote_config_hosts"),
+  /** Connects (if need be); the folder to open. */
+  remoteConnect: (id: string) => invoke<string>("remote_connect", { id }),
+  remoteDisconnect: (id: string) => invoke<void>("remote_disconnect", { id }),
+  remoteTest: (connection: Connection) => invoke<{ home: string; arch: string | null }>("remote_test", { connection }),
+  remoteStatus: () => invoke<{ id: string; connected: boolean }[]>("remote_status"),
+  /** A local copy of a server file, for previews. */
+  remoteMaterialize: (path: string) => invoke<string>("remote_materialize", { path }),
+  /** Opens a server file in its app; saves are uploaded back. */
+  remoteOpen: (path: string) => invoke<void>("remote_open", { path }),
+  remoteAnswer: (id: number, values: string[] | null, remember: boolean) => invoke<void>("remote_answer", { id, values, remember }),
 };
 
 /** Each shown file's version (modified time + size). File and thumbnail URLs carry it, so a

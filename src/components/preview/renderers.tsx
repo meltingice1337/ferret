@@ -3,8 +3,8 @@ import { createEffect, createMemo, createResource, createSignal, For, Index, on,
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { api, fileUrl, thumbUrl } from "../../lib/api";
 import { formatDate, formatSize, languageName, plural, typeLabel } from "../../lib/format";
-import { isRecycle, isWsl, parent } from "../../lib/path";
-import { activeTab, fsTick, isDark } from "../../lib/state";
+import { isRecycle, isRemote, isWsl, parent, remoteParts } from "../../lib/path";
+import { activeTab, fsTick, isDark, remoteState } from "../../lib/state";
 import { enter } from "../../lib/motion";
 import type { Entry, VideoInfo } from "../../lib/types";
 import FileIcon from "../FileIcon";
@@ -693,7 +693,9 @@ export function FolderView(props: { path: string; setMeta: SetMeta; onOpen: (p: 
   // A distro picked in \\wsl.localhost may not be running, and reading it would start it: only
   // opening it does that (as in Explorer).
   const distroFromOutside = () => isWsl(props.path) && !parent(props.path) && !isWsl(activeTab().p);
-  const [listing] = createResource(() => !distroFromOutside() && ([props.path, fsTick()] as const), ([p]) => api.listDir(p));
+  // Likewise a server's folder is only read while it's connected (a click connects it).
+  const offline = () => isRemote(props.path) && remoteState[remoteParts(props.path)?.id ?? ""] !== "connected";
+  const [listing] = createResource(() => !distroFromOutside() && !offline() && ([props.path, fsTick()] as const), ([p]) => api.listDir(p));
   const summary = createMemo(() => {
     const l = listing();
     if (!l) return null;

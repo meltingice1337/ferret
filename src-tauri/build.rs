@@ -22,9 +22,10 @@ fn release_key() {
     }
 }
 
-/// The Linux program that counts folder sizes in WSL (wsl-size/), built for Linux and embedded
-/// in the app (foldersize.rs writes it out and runs it). Without Rust's musl target a debug
-/// build goes without it (WSL counts with find then); a release needs it.
+/// The Linux program that counts folder sizes in WSL and on SSH servers (wsl-size/), built for
+/// x86_64 and ARM64 Linux and embedded in the app (linux.rs puts it there and runs it). Without
+/// Rust's musl targets a debug build goes without it (folders are counted with find then); a
+/// release needs both.
 fn wsl_helper() {
     use std::path::PathBuf;
     use std::process::Command;
@@ -33,31 +34,33 @@ fn wsl_helper() {
     for p in ["src", "Cargo.toml", "Cargo.lock", ".cargo/config.toml"] {
         println!("cargo:rerun-if-changed={}", src.join(p).display());
     }
-    let out = PathBuf::from(std::env::var("OUT_DIR").unwrap()).join("ferret-wsl-size");
     let target_dir = dir.join("target").join("wsl-size");
-    let mut cargo = Command::new(std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into()));
-    // Its own settings (target, linker, flags: wsl-size/.cargo/config.toml), not the app's.
-    // (Its output to stderr: what a build script prints on stdout is read as instructions.)
-    cargo.current_dir(&src).args(["build", "--release", "--locked", "--target-dir"]).arg(&target_dir);
-    cargo.stdout(std::io::stderr());
-    for v in ["CARGO_TARGET_DIR", "CARGO_BUILD_TARGET", "CARGO_ENCODED_RUSTFLAGS", "RUSTFLAGS", "RUSTC_WORKSPACE_WRAPPER"] {
-        cargo.env_remove(v);
-    }
-    let built = target_dir.join("x86_64-unknown-linux-musl").join("release").join("ferret-wsl-size");
-    let ok = cargo.status().is_ok_and(|s| s.success()) && std::fs::copy(&built, &out).is_ok();
-    if !ok {
-        let fix = "the WSL folder-size helper didn't build (`rustup target add x86_64-unknown-linux-musl`)";
-        if std::env::var("PROFILE").as_deref() == Ok("release") {
-            panic!("{fix}");
+    for (arch, target) in [("X64", "x86_64-unknown-linux-musl"), ("ARM64", "aarch64-unknown-linux-musl")] {
+        let out = PathBuf::from(std::env::var("OUT_DIR").unwrap()).join(format!("ferret-wsl-size-{target}"));
+        let mut cargo = Command::new(std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into()));
+        // Its own settings (linker, flags: wsl-size/.cargo/config.toml), not the app's.
+        // (Its output to stderr: what a build script prints on stdout is read as instructions.)
+        cargo.current_dir(&src).args(["build", "--release", "--locked", "--target", target, "--target-dir"]).arg(&target_dir);
+        cargo.stdout(std::io::stderr());
+        for v in ["CARGO_TARGET_DIR", "CARGO_BUILD_TARGET", "CARGO_ENCODED_RUSTFLAGS", "RUSTFLAGS", "RUSTC_WORKSPACE_WRAPPER"] {
+            cargo.env_remove(v);
         }
-        println!("cargo:warning={fix}: WSL folders are counted with find instead");
-        std::fs::write(&out, []).unwrap();
+        let built = target_dir.join(target).join("release").join("ferret-wsl-size");
+        let ok = cargo.status().is_ok_and(|s| s.success()) && std::fs::copy(&built, &out).is_ok();
+        if !ok {
+            let fix = format!("the Linux folder-size helper didn't build for {target} (`rustup target add {target}`)");
+            if std::env::var("PROFILE").as_deref() == Ok("release") {
+                panic!("{fix}");
+            }
+            println!("cargo:warning={fix}: those folders are counted with find instead");
+            std::fs::write(&out, []).unwrap();
+        }
+        // Its fingerprint: Linux checks a copy against it before running it.
+        use sha2::Digest;
+        let hash = sha2::Sha256::digest(std::fs::read(&out).unwrap());
+        let hex: String = hash.iter().map(|b| format!("{b:02x}")).collect();
+        println!("cargo:rustc-env=FERRET_HELPER_{arch}_SHA256={hex}");
     }
-    // Its fingerprint: Linux checks a copy against it before running it.
-    use sha2::Digest;
-    let hash = sha2::Sha256::digest(std::fs::read(&out).unwrap());
-    let hex: String = hash.iter().map(|b| format!("{b:02x}")).collect();
-    println!("cargo:rustc-env=FERRET_WSL_HELPER_SHA256={hex}");
 }
 
 /// ferret-indexer.exe gets its own icon. Explorer and Task Manager show a program's

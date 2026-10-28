@@ -21,6 +21,7 @@ pub mod index;
 pub mod ipc;
 pub mod mft;
 pub mod query;
+pub mod remote;
 pub mod service;
 pub mod signed;
 pub mod sizes;
@@ -172,8 +173,9 @@ fn service_request(a: &'static AppSearch, req: &ipc::Request, timeout: Duration)
 /// Size + modified (ms) straight from the file system for the final hits.
 fn fill_meta(hits: &mut [Hit]) {
     hits.par_iter_mut().for_each(|h| {
-        // WSL indexes carry size and date already (and reading them via \\wsl.localhost is slow).
-        if crate::paths::is_wsl(&h.path) {
+        // WSL and server indexes carry size and date already (reading them via \\wsl.localhost
+        // is slow; a server's paths aren't Windows paths at all).
+        if crate::paths::is_wsl(&h.path) || crate::paths::is_remote(&h.path) {
             return;
         }
         if let Ok(m) = std::fs::symlink_metadata(crate::paths::for_io(&h.path)) {
@@ -216,11 +218,16 @@ fn run_query(req: SearchRequest) -> SearchResults {
     res
 }
 
-/// WSL distros are indexed by the app (the service only reads NTFS drives): their matches
-/// join the drives' by score.
+/// WSL distros and servers are indexed by the app (the service only reads NTFS drives): their
+/// matches join the drives' by score.
 fn merge_wsl(res: &mut SearchResults, req: &SearchRequest) {
     wsl::refresh();
-    let w = wsl::engine().search(req);
+    remote::refresh();
+    merge(res, req, wsl::engine().search(req));
+    merge(res, req, remote::engine().search(req));
+}
+
+fn merge(res: &mut SearchResults, req: &SearchRequest, w: SearchResults) {
     res.partial |= w.partial;
     if w.results.is_empty() {
         return;
@@ -233,9 +240,10 @@ fn merge_wsl(res: &mut SearchResults, req: &SearchRequest) {
 }
 
 fn status() -> SearchStatus {
-    // Opening search is a good moment to (re)list WSL distros.
+    // Opening search is a good moment to (re)list WSL distros and connected servers.
     wsl::refresh();
-    let wsl_volumes = wsl::engine().status();
+    remote::refresh();
+    let wsl_volumes: Vec<_> = wsl::engine().status().into_iter().chain(remote::engine().status()).collect();
     let wsl_building = wsl_volumes.iter().any(|v| !v.ready);
     let a = app();
     let (installed, running) = service::service_state();
@@ -308,11 +316,33 @@ pub fn list_matches(query: &str) -> Vec<crate::listing::Entry> {
     };
     hits.par_iter()
         .filter_map(|h| {
-            let mut e = crate::listing::entry_for(&h.path)?;
-            e.origin = std::path::Path::new(&h.path).parent().map(|p| p.to_string_lossy().into_owned());
+            // A server's matches as its index has them (its files aren't on this PC).
+            let mut e = if crate::paths::is_remote(&h.path) { server_entry(h) } else { crate::listing::entry_for(&h.path)? };
+            e.origin = crate::paths::parent(&h.path);
             Some(e)
         })
         .collect()
+}
+
+fn server_entry(h: &engine::Hit) -> crate::listing::Entry {
+    let ext = if h.is_dir {
+        String::new()
+    } else {
+        h.name.rsplit_once('.').filter(|(stem, _)| !stem.is_empty()).map(|(_, e)| e.to_lowercase()).unwrap_or_default()
+    };
+    crate::listing::Entry {
+        name: h.name.clone(),
+        path: h.path.clone(),
+        is_dir: h.is_dir,
+        is_symlink: false,
+        hidden: h.name.starts_with('.'),
+        size: h.size.unwrap_or(0),
+        modified: h.modified,
+        created: None,
+        ext,
+        in_archive: false,
+        origin: None,
+    }
 }
 
 /// Stops a search inside files that the palette started (something newer was typed).

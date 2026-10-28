@@ -1,7 +1,7 @@
 // Ctrl+K: instant whole-disk search. Ctrl+Shift+P (or ">" prefix): command palette.
 
 import { invoke } from "@tauri-apps/api/core";
-import { AppWindow, CalendarClock, CircleHelp, Command, Copy, ExternalLink, FolderOpen, FolderSearch, HardDrive, Hash, History, Info, LoaderCircle, Ruler, Search, Shapes, ShieldCheck, SquareTerminal, Star, TextSearch, X } from "../lib/icons";
+import { AppWindow, CalendarClock, CircleHelp, Command, Copy, ExternalLink, FolderOpen, FolderSearch, HardDrive, Hash, History, Info, LoaderCircle, Ruler, Search, Server, Shapes, ShieldCheck, SquareTerminal, Star, TextSearch, X } from "../lib/icons";
 import { createEffect, createMemo, createSignal, For, on, onCleanup, onMount, Show, type JSX } from "solid-js";
 import { Dynamic, Portal } from "solid-js/web";
 import FileIcon from "./FileIcon";
@@ -9,9 +9,9 @@ import { typeIcon } from "./typeIcons";
 import { didYouMean, extPreview, FILE_TYPES, findType, FOLDERS, KIND_EXTS, knownType, typeTokens, withoutTypes } from "../lib/filetypes";
 import "../palette.css";
 import { formatDate, formatSize, KIND_LABEL, kindOf } from "../lib/format";
-import { basename, isArchiveName, isVirtual, parent, searchPath } from "../lib/path";
+import { basename, isArchiveName, isRemote, isVirtual, parent, remoteParts, searchPath } from "../lib/path";
 import {
-  activeTab, forgetSearch, navigate, newTab, openMenu, promptSaveSearch, recents, rememberSearch, removeSavedSearch, savedSearch,
+  activeTab, connections, forgetSearch, navigate, newTab, openMenu, promptSaveSearch, recents, rememberSearch, removeSavedSearch, savedSearch,
   setUi, settings, toast, ui,
 } from "../lib/state";
 import { api } from "../lib/api";
@@ -66,9 +66,11 @@ export interface PaletteCommand {
 /** Highlights matched character positions (UTF-16 offsets) in a name. */
 /** Where a result lives: a WSL distro (with its Linux path), a drive (with the rest of the
  *  path), or elsewhere (network). */
-function location(dir: string): { kind: "wsl" | "drive" | "other"; label: string; rest: string } {
+function location(dir: string): { kind: "wsl" | "server" | "drive" | "other"; label: string; rest: string } {
   const wsl = /^\\\\wsl(?:\.localhost|\$)\\([^\\]+)(.*)$/i.exec(dir);
   if (wsl) return { kind: "wsl", label: wsl[1], rest: wsl[2].replace(/\\/g, "/").replace(/\/+$/, "") || "/" };
+  const server = remoteParts(dir);
+  if (server) return { kind: "server", label: connections().find((c) => c.id === server.id)?.name ?? server.id, rest: server.linux };
   const drive = /^([a-z]):\\?(.*)$/i.exec(dir);
   if (drive) return { kind: "drive", label: drive[1].toUpperCase(), rest: drive[2].replace(/\\+$/, "") };
   return { kind: "other", label: "", rest: dir };
@@ -544,7 +546,7 @@ export default function SearchPalette(props: { mode: "files" | "commands"; comma
     rememberSearch(tabQuery());
     // Archives open as folders, like in the list: Windows would hand a zip to Explorer (and,
     // with Ferret as the default file manager, on to a new Ferret window, slowly).
-    const archive = !h.isDir && isArchiveName(h.path);
+    const archive = !h.isDir && isArchiveName(h.path) && !isRemote(h.path);
     if (how === "tab") newTab(h.isDir || archive ? h.path : parent(h.path) ?? h.path);
     else if (how === "reveal" || h.isDir) reveal(h);
     else if (archive) navigate(activeTab(), h.path);
@@ -586,9 +588,10 @@ export default function SearchPalette(props: { mode: "files" | "commands"; comma
         if (dir) navigate(activeTab(), dir, { select: h.path });
       } },
       { label: "Open in new tab", icon: FolderOpen, shortcut: "Ctrl+Enter", action: () => activate(i, "tab") },
-      ...(h.isDir ? [] : [{ label: "Open with…", icon: AppWindow, action: () => { close(); api.openWithDialog(h.path).catch((err) => toast(String(err), "error")); } }]),
+      ...(h.isDir || isRemote(h.path) ? [] : [{ label: "Open with…", icon: AppWindow, action: () => { close(); api.openWithDialog(h.path).catch((err) => toast(String(err), "error")); } }]),
       { separator: true },
-      { label: "Copy path", icon: Hash, action: () => copy(h.path, "Path") },
+      // A server's file: its path there.
+      { label: "Copy path", icon: Hash, action: () => copy(remoteParts(h.path)?.linux ?? h.path, "Path") },
       { label: "Copy name", icon: Copy, action: () => copy(h.name, "Name") },
       { separator: true },
       { label: "Properties", icon: Info, action: () => { close(); setUi("properties", [h.path]); } },
@@ -699,6 +702,7 @@ export default function SearchPalette(props: { mode: "files" | "commands"; comma
                     <span>{contentSearch() ? (
                       busy() ? `Reading the files in ${basename(searchFolder() ?? "") || "this folder"}…`
                       : searchFolder() && isVirtual(searchFolder()!) ? <>Searching inside files needs a folder: open one, or add <code>in:C:\folder</code></>
+                      : searchFolder() && isRemote(searchFolder()!) ? "Searching inside files doesn't work on servers yet (names do, with search on in the connection's settings)"
                       : `No file in ${basename(searchFolder() ?? "") || "the folder"} contains “${contentText(fullQuery())}”`)
                       : status()?.building ? "Still indexing, so more results will appear…"
                       : !query() && typeChip() ? `No ${files(findType(typeChip()!)?.label ?? "files")} found`
@@ -723,6 +727,9 @@ export default function SearchPalette(props: { mode: "files" | "commands"; comma
                             <>
                               <Show when={loc.kind === "wsl"}>
                                 <span class="loc-wsl" title={`In WSL (${loc.label})`}><SquareTerminal size={11} />{loc.label}</span>
+                              </Show>
+                              <Show when={loc.kind === "server"}>
+                                <span class="loc-wsl" title={`On ${loc.label}`}><Server size={11} />{loc.label}</span>
                               </Show>
                               <Show when={loc.kind === "drive"}>
                                 <span class="drive-letter" title={`On drive ${loc.label}:`}>{loc.label}</span>

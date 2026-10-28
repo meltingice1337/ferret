@@ -51,8 +51,45 @@ fn parse_range(h: &str, len: u64) -> Option<(u64, u64)> {
     (start <= end && start < len).then_some((start, end))
 }
 
+/// A server file's bytes, a range at a time (videos seek without downloading it all).
+fn serve_remote(req: &Request<Vec<u8>>, path: &str) -> Response<Vec<u8>> {
+    let Some(len) = crate::remote::fs::size_of(path) else {
+        return status(StatusCode::NOT_FOUND, "not found");
+    };
+    let mime = mime_guess::from_path(path).first_or_octet_stream().essence_str().to_string();
+    let range = req.headers().get(header::RANGE).and_then(|h| h.to_str().ok()).and_then(|r| parse_range(r, len));
+    let (start, end, partial) = match range {
+        Some((s, e)) => (s, e.min(s + MAX_CHUNK - 1), true),
+        None if len <= MAX_WHOLE => (0, len.saturating_sub(1), false),
+        None => (0, MAX_CHUNK - 1, true),
+    };
+    let buf = if len == 0 {
+        Vec::new()
+    } else {
+        match crate::remote::fs::read_range(path, start, end + 1 - start) {
+            Ok((b, _)) => b,
+            Err(_) => return status(StatusCode::INTERNAL_SERVER_ERROR, "read failed"),
+        }
+    };
+    let res = Response::builder()
+        .header(header::CONTENT_TYPE, &mime)
+        .header(header::ACCEPT_RANGES, "bytes")
+        .header(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")
+        .header(header::CACHE_CONTROL, "no-cache")
+        .header(header::CONTENT_LENGTH, buf.len());
+    let res = if partial {
+        res.status(StatusCode::PARTIAL_CONTENT).header(header::CONTENT_RANGE, format!("bytes {start}-{end}/{len}"))
+    } else {
+        res.status(StatusCode::OK)
+    };
+    res.body(buf).unwrap()
+}
+
 pub fn serve_file(req: Request<Vec<u8>>) -> Response<Vec<u8>> {
     let path = decode_path(&req);
+    if paths::is_remote(&path) {
+        return serve_remote(&req, &path);
+    }
     let io = PathBuf::from(paths::for_io(&path));
     let Ok(mut file) = fs::File::open(&io) else {
         return status(StatusCode::NOT_FOUND, "not found");
@@ -113,10 +150,33 @@ fn hash(s: &str) -> u64 {
     h
 }
 
+/// Pictures on a server up to this size get thumbnails (from a cached copy); other server files
+/// show their type's icon.
+const REMOTE_THUMB_MAX: u64 = 16 << 20;
+
 pub fn serve_thumb(req: Request<Vec<u8>>) -> Response<Vec<u8>> {
-    let path = decode_path(&req);
+    let mut path = decode_path(&req);
     let size: u32 = query(&req, "s").and_then(|s| s.parse().ok()).unwrap_or(256).clamp(16, 1024);
     let icon_only = query(&req, "icon").as_deref() == Some("1");
+    if paths::is_remote(&path) {
+        let picture = mime_guess::from_path(&path).first().is_some_and(|m| m.type_() == "image");
+        let copy = (picture && !icon_only)
+            .then(|| crate::remote::block(crate::remote::fs::materialize(&path, REMOTE_THUMB_MAX)).ok())
+            .flatten();
+        match copy {
+            Some(local) => path = local,
+            // No thumbnail: the window shows the type's icon.
+            None => {
+                return Response::builder()
+                    .status(StatusCode::OK)
+                    .header(header::CONTENT_TYPE, "image/png")
+                    .header(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")
+                    .header("X-Ferret-Thumb", "none")
+                    .body(EMPTY_PNG.to_vec())
+                    .unwrap();
+            }
+        }
+    }
     let io = PathBuf::from(paths::for_io(&path));
     let meta = fs::metadata(&io).ok();
     let stamp = meta

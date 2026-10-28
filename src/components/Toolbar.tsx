@@ -1,10 +1,10 @@
 import { AppWindow, ArrowLeft, ArrowRight, ArrowUp, ChevronRight, Copy, Folder, FolderOpen, ListFilter, PanelLeft, Plus, RotateCw, Search, Shapes, Star, X } from "../lib/icons";
 import { createEffect, createMemo, createSignal, For, on, onCleanup, Show } from "solid-js";
 import { api } from "../lib/api";
-import { basename, isRecycle, isVirtual, isWsl, parent, segments } from "../lib/path";
-import { copyPaths } from "../lib/ops";
+import { basename, displayPath, isRecycle, isRemote, isVirtual, isWsl, parent, segments } from "../lib/path";
+import { copyPaths, openFile } from "../lib/ops";
 import {
-  fileList, activeTab, goBack, goForward, goToHistory, goUp, isFavorite, navigate, newTab, openMenu, openNewWindow, refocusList, refresh, setUi,
+  connections, fileList, activeTab, goBack, goForward, goToHistory, goUp, isFavorite, navigate, newTab, openMenu, openNewWindow, refocusList, refresh, setUi,
   sidebarDocked, toast, toggleFavorite, ui, winWidth,
 } from "../lib/state";
 import FileIcon from "./FileIcon";
@@ -175,9 +175,9 @@ function Breadcrumbs() {
                 <ChevronRight size={14} />
               </button>
             </Show>
-            <button class="crumb" classList={{ last: i() === segs().length - 1, wsl: i() === 0 && isWsl(seg.path), squeezed: i() === segs().length - 1 && squeeze() !== null }}
+            <button class="crumb" classList={{ last: i() === segs().length - 1, wsl: i() === 0 && (isWsl(seg.path) || isRemote(seg.path)), squeezed: i() === segs().length - 1 && squeeze() !== null }}
               style={i() === segs().length - 1 && squeeze() !== null ? { "max-width": `${squeeze()}px` } : undefined}
-              title={seg.path}
+              title={displayPath(seg.path)}
               data-drop={seg.path}
               onClick={(e) => { e.stopPropagation(); navigate(tab(), seg.path); }}
               onContextMenu={(e) => { e.preventDefault(); e.stopPropagation(); crumbMenu(e, seg.path); }}>
@@ -196,9 +196,18 @@ function Breadcrumbs() {
   );
 }
 
+/** A server path as typed (`home.local:/srv/`), as a Ferret path, if it names a connection. */
+function serverPath(value: string): string | null {
+  const m = /^([^:\\/]{2,}):(\/.*)$/.exec(value);
+  if (!m) return null;
+  const c = connections().find((x) => [x.id, x.name, x.host].some((n) => n.toLowerCase() === m[1].toLowerCase()));
+  return c ? `\\\\ssh:\\${c.id}${m[2].replace(/\//g, "\\")}`.replace(/\\$/, "") : null;
+}
+
 function PathEditor() {
   const tab = () => activeTab();
-  const [text, setText] = createSignal(tab().p);
+  // A server's folders show as `home.local:/home/me`.
+  const [text, setText] = createSignal(displayPath(tab().p));
   const [suggestions, setSuggestions] = createSignal<{ name: string; path: string }[]>([]);
   const [pick, setPick] = createSignal(-1);
   const cache = new Map<string, { name: string; path: string }[]>();
@@ -217,9 +226,11 @@ function PathEditor() {
   const suggest = (value: string) => {
     clearTimeout(timer);
     timer = window.setTimeout(async () => {
-      const cut = value.lastIndexOf("\\");
+      // A server's folder (`home.local:/srv/w`): its folders, by the path there.
+      const server = !!serverPath(value);
+      const cut = value.lastIndexOf(server ? "/" : "\\");
       if (cut < 2) return setSuggestions([]);
-      const dir = value.slice(0, cut + 1);
+      const dir = server ? serverPath(value.slice(0, cut + 1)) ?? "" : value.slice(0, cut + 1);
       const prefix = value.slice(cut + 1).toLowerCase();
       let dirs = cache.get(dir.toLowerCase());
       if (!dirs) {
@@ -246,13 +257,14 @@ function PathEditor() {
     else {
       const dir = parent(res.path);
       if (dir) await navigate(tab(), dir, { select: res.path });
-      api.openPath(res.path).catch((e) => toast(String(e), "error"));
+      openFile({ path: res.path, inArchive: false });
     }
   };
 
   const accept = (s: { path: string }) => {
-    setText(s.path + "\\");
-    suggest(s.path + "\\");
+    const next = isRemote(s.path) ? `${displayPath(s.path)}/` : `${s.path}\\`;
+    setText(next);
+    suggest(next);
     input.focus();
   };
 

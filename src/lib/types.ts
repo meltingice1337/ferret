@@ -286,6 +286,52 @@ export interface Bootstrap {
   places: Places;
   favorites: Favorite[];
   recents: Recent[];
+  connections: Connection[];
+}
+
+/** A saved server connection (remote/config.rs). */
+export interface Connection {
+  /** Stable and path-safe: its folders are `\\ssh:\<id>\…`. Empty for a new one. */
+  id: string;
+  name: string;
+  kind: "ssh";
+  host: string;
+  port: number;
+  user: string;
+  /** The ~/.ssh/config Host it was made from (read again at each connect). */
+  sshAlias: string | null;
+  /** "auto": SSH agent, key files, then a password; "key": only `identityFile`; "password". */
+  auth: "auto" | "key" | "password";
+  identityFile: string | null;
+  /** Where it opens (a Linux path); the home folder when empty. */
+  startDir: string | null;
+  /** Ctrl+K searches it while it's connected. */
+  search: boolean;
+}
+
+/** What ~/.ssh/config says about a host. */
+export interface HostConfig {
+  alias: string;
+  hostName: string | null;
+  user: string | null;
+  port: number | null;
+  identityFiles: string[];
+  identitiesOnly: boolean;
+  proxyJump: string | null;
+}
+
+/** A question a connection asks (remote/prompt.rs). */
+export interface RemotePrompt {
+  id: number;
+  connection: string;
+  kind: "secret" | "hostKey" | "confirm";
+  title: string;
+  message: string;
+  fields: { label: string; secret: boolean }[];
+  canRemember: boolean;
+  fingerprint: string | null;
+  confirmLabel: string | null;
+  danger: boolean;
 }
 
 /** A song's tags as Windows reads them (empty / 0 when not set). */

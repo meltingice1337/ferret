@@ -6,6 +6,7 @@ mod fileops;
 mod foldersize;
 mod integration;
 mod jobs;
+mod linux;
 mod listing;
 mod logging;
 mod media;
@@ -15,10 +16,12 @@ mod places;
 mod protocol;
 mod recycle;
 mod redirect;
+mod remote;
 pub mod search;
 mod shell;
 mod shellmenu;
 mod shellops;
+mod vfs;
 mod watch;
 mod wsl;
 
@@ -88,6 +91,7 @@ pub fn run() {
         })
         .setup(move |app| {
             logging::log_startup(app.handle(), admin);
+            remote::init(app.handle());
             let dir = app.path().app_data_dir()?;
             std::fs::create_dir_all(&dir)?;
             let conn = db::open(&dir.join("ferret.db"))?;
@@ -189,6 +193,7 @@ pub fn run() {
             shell::clipboard_write_files,
             shell::clipboard_after_cut,
             shell::clipboard_read_files,
+            shell::clipboard_sequence,
             shell::open_terminal,
             shell::open_in_vscode,
             shell::reveal_in_explorer,
@@ -210,6 +215,18 @@ pub fn run() {
             office::slides_preview,
             media::compress_images,
             media::media_release,
+            // remote/ (SSH connections)
+            remote::remote_connections,
+            remote::remote_save_connection,
+            remote::remote_delete_connection,
+            remote::remote_config_hosts,
+            remote::remote_connect,
+            remote::remote_disconnect,
+            remote::remote_test,
+            remote::remote_status,
+            remote::remote_materialize,
+            remote::prompt::remote_answer,
+            remote::edit::remote_open,
             // search (whole-disk index)
             search::search_query,
             search::search_status,

@@ -1,0 +1,15 @@
+[package]
+name = "ferret-test-sshd"
+version = "0.1.0"
+description = "A small SSH server with SFTP over a local folder, for Ferret's end-to-end tests"
+edition = "2024"
+publish = false
+
+[dependencies]
+russh = { version = "0.65", default-features = false, features = ["ring"] }
+russh-sftp = "3"
+rand = { version = "0.10", features = ["thread_rng"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "io-util", "sync", "time"] }
+
+# Its own workspace: scripts/e2e/run.mjs builds it apart from the app.
+[workspace]

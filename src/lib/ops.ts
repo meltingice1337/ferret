@@ -8,8 +8,9 @@ import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import { api } from "./api";
 import { entryFilter } from "./filter";
 import { invalidateFolderSizes } from "./foldersizes";
-import { plural } from "./format";
-import { isVirtual, basename, inRecycleBin, isArchiveName, isRecycle, isSearch, isWithin, parent, pathKey, samePath } from "./path";
+import { kindOf, plural } from "./format";
+import { isVirtual, basename, inRecycleBin, isArchiveName, isRecycle, isRemote, isSearch, isWithin, parent, pathKey, remoteParts, samePath } from "./path";
+import { serverName } from "./remote";
 import {
   otherPane, setJobsRunning,
   activeTab, allPanes, ask, ASK_ALT, beginTypeAhead, dismissToast, elevateWindow, friendly, navigate, places, refreshRecycleInfo, reload, setUi,
@@ -322,6 +323,13 @@ let clipboardWrite: Promise<unknown> = Promise.resolve();
 export async function copyToClipboard(paths: string[], cut: boolean) {
   if (!paths.length || binGuard(paths, cut ? "cut" : "copied")) return;
   if (cut && inArchive(paths)) return toast("Items inside an archive can't be cut. Copy them instead.", "error");
+  // A server's files can't go on Windows' clipboard: the window keeps them, for as long as
+  // nothing else is copied (`seq`, Windows' count of clipboard changes).
+  if (paths.some(isRemote)) {
+    const seq = await api.clipboardSequence().catch(() => 0);
+    setUi("clipboard", { paths, cut, seq });
+    return toast(`${cut ? "Cut" : "Copied"} ${describe(paths)} (paste them in a Ferret folder)`);
+  }
   try {
     const write = api.clipboardWriteFiles(paths, cut);
     clipboardWrite = write.catch(() => {});
@@ -342,7 +350,7 @@ export async function paste(dest: string) {
   let clip;
   try {
     await clipboardWrite;
-    clip = await api.clipboardReadFiles();
+    clip = await serverClipboard() ?? await api.clipboardReadFiles();
   } catch (e) {
     return toast(`Clipboard error: ${e}`, "error");
   }
@@ -353,9 +361,25 @@ export async function paste(dest: string) {
   if (sources.length) await transferTo("move", sources, dest);
   // Like Explorer, a pasted cut leaves the clipboard; what wasn't moved (skipped, cancelled) stays cut.
   const left = sources.length ? await stillThere(sources) : [];
-  const ours = await api.clipboardAfterCut(clip.paths, left).catch(() => true);
-  if (ours) setUi("clipboard", left.length ? { paths: left, cut: true } : null);
+  if (ui.clipboard?.seq !== undefined) {
+    setUi("clipboard", left.length ? { ...ui.clipboard, paths: left } : null);
+  } else {
+    const ours = await api.clipboardAfterCut(clip.paths, left).catch(() => true);
+    if (ours) setUi("clipboard", left.length ? { paths: left, cut: true } : null);
+  }
   if (!sources.length) toast("Nothing to paste: the cut items have already been moved");
+}
+
+/** Server files copied in this window, if nothing was copied since (else Windows' clipboard). */
+async function serverClipboard(): Promise<{ paths: string[]; cut: boolean } | null> {
+  const mine = ui.clipboard;
+  if (mine?.seq === undefined) return null;
+  const now = await api.clipboardSequence().catch(() => mine.seq);
+  if (now !== mine.seq) {
+    setUi("clipboard", null);
+    return null;
+  }
+  return { paths: mine.paths, cut: mine.cut };
 }
 
 export const isCut = (path: string) => !!ui.clipboard?.cut && ui.clipboard.paths.some((p) => samePath(p, path));
@@ -480,6 +504,7 @@ export async function deleteItems(paths: string[], permanent: boolean) {
   paths = paths.filter((p) => !busy.has(pathKey(p)));
   if (!paths.length) return;
   touch(...paths);
+  if (paths.some(isRemote)) return deleteOnServer(paths.filter(isRemote), permanent);
   // Deleting inside the Recycle Bin is for good.
   if (paths.some(inRecycleBin)) return purgeFromBin(paths.filter(inRecycleBin));
   if (inArchive(paths)) return toast("Deleting inside archives isn't supported yet", "error");
@@ -527,6 +552,74 @@ export async function deleteItems(paths: string[], permanent: boolean) {
     if (still.length) selectAfterReload(t, still);
   } finally {
     paths.forEach((p) => busy.delete(pathKey(p)));
+  }
+}
+
+/** What a server's delete job says about an item its trash can't take (remote/fs.rs). */
+const NOT_TRASHABLE = "not_trashable:";
+
+/** Delete on a server: to its trash (undo moves the items back), or for good. Items its trash
+ *  can't take (on another disk there) are offered for deleting for good. */
+async function deleteOnServer(paths: string[], permanent: boolean) {
+  const server = serverName(paths[0]);
+  if (permanent) {
+    const ok = await ask({ title: `Delete ${describe(paths)} for good?`, message: `This can't be undone: ${server} deletes ${paths.length === 1 ? "it" : "them"} without a trash.`, confirmLabel: "Delete for good", danger: true });
+    if (ok === null) return;
+  }
+  const t = activeTab();
+  const order = t.ordered[0]();
+  const gone = new Set(paths.map(pathKey));
+  const firstIdx = order.findIndex((e) => gone.has(pathKey(e.path)));
+  const next = order.slice(Math.max(0, firstIdx)).find((e) => !gone.has(pathKey(e.path)))
+    ?? [...order.slice(0, Math.max(0, firstIdx))].reverse().find((e) => !gone.has(pathKey(e.path)));
+  paths.forEach((p) => busy.add(pathKey(p)));
+  batch(() => {
+    t.selection[1](next ? [next.path] : []);
+    t.cursor[1](next?.path ?? null);
+    t.anchor[1](next?.path ?? null);
+  });
+  try {
+    const u = await tracked(runJob(api.deleteItems(paths, permanent)));
+    const failed = u.failed ?? [];
+    const noTrash = failed.filter(([, why]) => why.startsWith(NOT_TRASHABLE)).map(([p]) => p);
+    const skipped = failed.filter(([, why]) => !why.startsWith(NOT_TRASHABLE)).map(([p]) => p);
+    const skippedNote = skipped.length ? ` · ${plural(skipped.length, "item")} skipped` : "";
+    if (permanent) {
+      const done = paths.filter((p) => !failed.some(([f]) => samePath(f, p)));
+      if (done.length) toast(`Deleted ${describe(done)} on ${server}${skippedNote}`);
+    } else if (u.pairs?.length) {
+      // Each item and where it is in the trash, for undo (and again after a redo).
+      let pairs = u.pairs;
+      const done = pairs.map(([from]) => from);
+      record({
+        label: `Delete ${describe(done)}`,
+        undo: () => moveBack(pairs),
+        redo: async () => {
+          const again = await runJob(api.deleteItems(done, false));
+          pairs = again.pairs ?? [];
+          return again;
+        },
+      }, `Moved ${describe(done)} to the trash on ${server}${skippedNote}`);
+    }
+    if (noTrash.length) {
+      const ok = await ask({
+        title: `Delete ${describe(noTrash)} for good?`,
+        message: `${server}'s trash can't take ${noTrash.length === 1 ? "it" : "them"} (${noTrash.length === 1 ? "it's" : "they're"} on another disk there). Deleting can't be undone.`,
+        confirmLabel: "Delete for good", danger: true,
+      });
+      if (ok !== null) {
+        await tracked(runJob(api.deleteItems(noTrash, true)));
+        toast(`Deleted ${describe(noTrash)} on ${server}`);
+      }
+    }
+    const left = [...skipped, ...noTrash];
+    if (left.length) selectAfterReload(t, await stillThere(left));
+    else if (next && !t.selection[0]().length) selectAfterReload(t, [next.path]);
+  } catch (e) {
+    fail("Delete failed", e);
+  } finally {
+    paths.forEach((p) => busy.delete(pathKey(p)));
+    refreshAffected(true);
   }
 }
 
@@ -808,8 +901,24 @@ export async function compressMedia(kind: "video" | "image", start: Promise<numb
   }
 }
 
-/** Real filesystem path for an entry (archive entries are extracted to a cache first). */
-export async function realPath(e: Pick<Entry, "path" | "inArchive">): Promise<string | undefined> {
+/** Videos and songs on a server bigger than this play from it (a range at a time) instead of
+ *  being copied here for the preview. */
+const STREAM_FROM = 64 << 20;
+
+/** Real filesystem path for an entry (archive entries are extracted to a cache first, server
+ *  files copied here, except big videos, which stream). */
+export async function realPath(e: Pick<Entry, "path" | "inArchive"> & Partial<Pick<Entry, "isDir" | "ext" | "size">>): Promise<string | undefined> {
+  if (isRemote(e.path)) {
+    if (e.isDir) return e.path;
+    const kind = kindOf({ isDir: false, ext: e.ext ?? "" });
+    if ((kind === "video" || kind === "audio") && (e.size ?? 0) > STREAM_FROM) return e.path;
+    try {
+      return await api.remoteMaterialize(e.path);
+    } catch (err) {
+      toast(`Couldn't get “${basename(e.path)}” from ${serverName(e.path)}: ${err}`, "error");
+      return;
+    }
+  }
   if (!e.inArchive) return e.path;
   try {
     return await withPassword((pw) => api.archiveMaterialize(e.path, pw));
@@ -819,6 +928,18 @@ export async function realPath(e: Pick<Entry, "path" | "inArchive">): Promise<st
 }
 
 export async function openFile(e: Pick<Entry, "path" | "inArchive">) {
+  // From a server: a copy opens in its app, and each save is uploaded back (remote/edit.rs).
+  if (isRemote(e.path)) {
+    const slow = window.setTimeout(() => toast(`Downloading “${basename(e.path)}” from ${serverName(e.path)}…`), 600);
+    try {
+      await api.remoteOpen(e.path);
+    } catch (err) {
+      toast(`Couldn't open “${basename(e.path)}”: ${err}`, "error");
+    } finally {
+      clearTimeout(slow);
+    }
+    return;
+  }
   // Archives open as folders (the preview's Open button, Ctrl+K): their default app is
   // Explorer's zip folder, which with Ferret as the default file manager becomes a new Ferret
   // window after a slow detour through Explorer.
@@ -838,7 +959,9 @@ export async function openInVscode(path: string) {
 }
 
 export async function copyPaths(paths: string[], quoted = true) {
-  await copyText(paths.map((p) => (quoted ? `"${p}"` : p)).join("\r\n"));
+  // A server's files as paths there (what a terminal on it takes).
+  const shown = paths.map((p) => remoteParts(p)?.linux ?? p);
+  await copyText(shown.map((p) => (quoted ? `"${p}"` : p)).join("\r\n"));
   toast(paths.length === 1 ? "Path copied" : `${paths.length} paths copied`);
 }
 
@@ -853,6 +976,8 @@ export async function copyText(text: string) {
 export async function syncClipboard() {
   const mine = ui.clipboard;
   if (!mine) return;
+  // Server files: kept until something else is copied.
+  if (mine.seq !== undefined) return void serverClipboard();
   const clip = await api.clipboardReadFiles().catch(() => undefined);
   if (clip === undefined || ui.clipboard !== mine) return;
   const same = !!clip && clip.cut === mine.cut && clip.paths.length === mine.paths.length
