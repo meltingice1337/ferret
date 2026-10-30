@@ -87,8 +87,13 @@ const ssh = { dir: join(sshRoot, "dot-ssh"), server: join(sshRoot, "server"), ho
 mkdirSync(ssh.dir, { recursive: true });
 mkdirSync(ssh.home, { recursive: true });
 writeFileSync(join(ssh.home, "readme.txt"), "on the server\n");
+// A folder for its size (counted over SFTP: the test server runs no commands).
+mkdirSync(join(ssh.home, "docs", "sub"), { recursive: true });
+writeFileSync(join(ssh.home, "docs", "a.bin"), Buffer.alloc(3000));
+writeFileSync(join(ssh.home, "docs", "sub", "b.bin"), Buffer.alloc(2000));
 execFileSync(sshdExe, ["keygen", join(ssh.dir, "id_ed25519")]);
-const sshd = spawn(sshdExe, ["serve", ssh.server, join(ssh.dir, "id_ed25519.pub")], { stdio: ["pipe", "pipe", "ignore"] });
+// Also lets in "pw" with the password "secret" (the password prompt's test).
+const sshd = spawn(sshdExe, ["serve", ssh.server, join(ssh.dir, "id_ed25519.pub"), "pw:secret"], { stdio: ["pipe", "pipe", "ignore"] });
 ssh.port = await new Promise((resolve, reject) => {
   let out = "";
   sshd.stdout.on("data", (d) => { out += d; const m = /port (\d+)/.exec(out); if (m) resolve(Number(m[1])); });

@@ -519,10 +519,12 @@ body.reordering, body.reordering * { cursor: grabbing !important; }
   background: color-mix(in oklab, var(--accent) 16%, transparent); color: var(--fg);
 }
 /* The hint shows whole or not at all (the match count's tooltip says the same). */
-.search-bar { container-type: inline-size; }
-.search-bar .bin-hint { flex: none; }
-.search-bar .bin-hint + .btn { margin-left: auto; }
-@container (max-width: 980px) { .search-bar .bin-hint { display: none; } }
+.search-bar, .archive-bar { container-type: inline-size; }
+.search-bar .bin-hint, .archive-bar .bin-hint { flex: none; }
+.search-bar .bin-hint + .btn, .archive-bar .bin-hint + .btn { margin-left: auto; }
+@container (max-width: 980px) { .search-bar .bin-hint, .archive-bar .bin-hint { display: none; } }
+/* Inside an archive: its name, and the folder in it. */
+.archive-bar .bin-count { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
 .btn.warn { color: #f87171; }
 .btn.warn:hover:not(:disabled) { background: #dc2626; color: #fff; }
 .colhead.static { cursor: default; }

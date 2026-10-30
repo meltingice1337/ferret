@@ -31,6 +31,9 @@ export interface DragState {
 
 export const [drag, setDrag] = createSignal<DragState | null>(null);
 
+/** Server files dragged to another app are downloaded first, up to this much. */
+const DRAG_DOWNLOAD_MAX = 128 << 20;
+
 const sameVolume = (a: string, b: string) => {
   const root = (p: string) => (p.startsWith("\\\\") ? p.split("\\").slice(2, 4).join("\\") : p.slice(0, 2)).toLowerCase();
   return root(a) === root(b);
@@ -144,11 +147,19 @@ export function beginDrag(down: MouseEvent, getPaths: () => string[], inArchive 
   async function goNative() {
     const d = drag();
     cleanup();
-    // A server's files aren't on this PC for other apps to take.
-    if ((d?.paths ?? paths).some(isRemote)) return toast("To use a server's files in another app, drop them on a folder in Ferret first (or open them)");
+    const dragged = d?.paths ?? paths;
+    // A server's files aren't on this PC for other apps to take: small ones are downloaded first
+    // (the drag starts once they're here), folders and big ones are copied to a folder in Ferret.
+    if (dragged.some(isRemote)) {
+      const shown = new Map(activeTab().entries[0]().map((e) => [e.path, e]));
+      const items = dragged.map((p) => shown.get(p));
+      if (items.some((e) => !e || e.isDir)) return toast("To use a server's folders in another app, copy them to a folder in Ferret first");
+      if (items.reduce((n, e) => n + (e?.size ?? 0), 0) > DRAG_DOWNLOAD_MAX) return toast("Those files are big to drag out of a server: copy them to a folder in Ferret first");
+    }
     try {
-      // Archive entries need real files before other apps can take them.
-      const real = (await Promise.all((d?.paths ?? paths).map((p) => realPath({ path: p, inArchive })))).filter(Boolean) as string[];
+      // Archive entries need real files before other apps can take them (server files too).
+      const shown = new Map(activeTab().entries[0]().map((e) => [e.path, e]));
+      const real = (await Promise.all(dragged.map((p) => realPath({ ...shown.get(p), path: p, inArchive }, true)))).filter(Boolean) as string[];
       const icon = (await iconPath) ?? "";
       if (real.length) await startDrag({ item: real, icon });
     } catch (err) {

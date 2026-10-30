@@ -656,6 +656,21 @@ export const tests = [
       await t.c.waitFor(`!document.querySelector(".modal")`, { what: "the dialog to close" });
     },
   },
+  {
+    name: "inside a zip, Extract all extracts it and shows the files",
+    async run(t) {
+      await go(t, t.p("kinds", "two.zip"));
+      await t.c.waitFor(`!!document.querySelector(".archive-bar")`, { what: "the archive's bar" });
+      assert(!(await t.c.eval(`!!document.querySelector(".archive-bar button.btn")?.textContent.includes("selected")`)), "offers to extract a selection with nothing selected");
+      await t.c.click(".archive-bar button", { text: "Extract all" });
+      const start = Date.now();
+      while (!existsSync(t.p("kinds", "two", "b.txt")) && Date.now() - start < 8000) await sleep(150);
+      // Two items: into a folder of their own, next to the zip.
+      assert(readFileSync(t.p("kinds", "two", "a.txt"), "utf8") === "a" && readFileSync(t.p("kinds", "two", "b.txt"), "utf8") === "b", `not extracted: ${readdirSync(t.p("kinds")).join(", ")}`);
+      await t.c.waitFor(`${tab}?.p === ${JSON.stringify(t.p("kinds"))} && ${tab}.selection[0]().includes(${JSON.stringify(t.p("kinds", "two"))})`, { what: "the extracted folder, shown and selected" });
+      assert(!(await t.c.eval(`!!document.querySelector(".archive-bar")`)), "the archive's bar stays outside it");
+    },
+  },
   // ---- a server over SSH (the runner's test server: SFTP over a folder of its own) ----
   {
     name: "SSH: adds a server from ~/.ssh/config, trusts its key and opens its home folder",
@@ -674,6 +689,42 @@ export const tests = [
       const known = readFileSync(join(t.ssh.dir, "known_hosts"), "utf8");
       assert(known.includes(`[127.0.0.1]:${t.ssh.port} ssh-ed25519 `), `known_hosts: ${known}`);
       assert(await t.c.eval(`!!document.querySelector(".server-item .server-dot")`), "the sidebar doesn't show it connected");
+      // Its folders get sizes too (this server runs no commands: counted over SFTP).
+      await t.c.waitFor(`[...document.querySelectorAll(".files .row")].some((r) => r.querySelector(".name")?.textContent === "docs" && /4\\.9 KB|5 KB|5\\.0 KB/.test(r.querySelector(".c-size")?.textContent ?? ""))`,
+        { what: "the server folder's size (5,000 bytes)", timeoutMs: 15_000 });
+    },
+  },
+  {
+    name: "SSH: a password server asks for it (again after a wrong one), Remember unticked",
+    async run(t) {
+      await t.c.click("button[title='Add a server (SSH)']");
+      await t.c.waitFor(`!!document.querySelector(".conn-form select")`, { what: "the connection form" });
+      await t.c.eval(`(() => { const s = document.querySelector(".conn-form select"); s.value = "ferret-e2e"; s.dispatchEvent(new Event("change", { bubbles: true })); })()`);
+      await t.c.waitFor(`[...document.querySelectorAll(".conn-form input.text-input")].some((i) => i.value === "127.0.0.1")`, { what: "the form filled in" });
+      // Its own name and user, signing in with a password only.
+      const set = (index, value) => t.c.eval(`(() => {
+        const i = document.querySelectorAll(".conn-form input.text-input")[${index}];
+        i.value = ${JSON.stringify(value)}; i.dispatchEvent(new Event("input", { bubbles: true }));
+      })()`);
+      await set(0, "pw test");
+      await set(3, "pw");
+      await t.c.eval(`(() => { const s = document.querySelectorAll(".conn-form select")[1]; s.value = "password"; s.dispatchEvent(new Event("change", { bubbles: true })); })()`);
+      await t.c.click(".conn-form button", { text: "Add and connect" });
+      const answer = async (password) => {
+        await t.c.waitFor(`!!document.querySelector(".remote-prompt input[type=password]")`, { what: "the password prompt", timeoutMs: 15_000 });
+        assert(await t.c.eval(`!document.querySelector(".remote-prompt input[type=checkbox]").checked`), "Remember is ticked by itself");
+        await t.c.eval(`document.querySelector(".remote-prompt input[type=password]").focus()`);
+        await t.c.type(password);
+        // (The protocol's Enter doesn't submit a form the way a keyboard's does.)
+        await t.c.click(".remote-prompt button", { text: "Connect" });
+      };
+      await answer("wrong");
+      await t.c.waitFor(`(document.querySelector(".remote-prompt")?.innerText ?? "").includes("didn't work")`, { what: "the prompt again, saying so", timeoutMs: 15_000 });
+      await answer("secret");
+      const home = "\\\\ssh:\\pw-test\\home\\pw";
+      await t.c.waitFor(`${tab}?.p === ${JSON.stringify(home)}`, { what: "the password user's home", timeoutMs: 15_000 });
+      await t.c.eval(`window.__TAURI_INTERNALS__.invoke("remote_delete_connection", { id: "pw-test" })`);
+      await go(t, t.root);
     },
   },
   {

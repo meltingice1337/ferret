@@ -93,3 +93,9 @@ export function isWithin(child: string, dir: string): boolean {
 const ARCHIVE_RE = /\.(zip|7z|rar|tar|tgz|txz|tzst|tbz2?|gz|xz|zst|bz2|jar|apk|cbz|cbr|xpi|nupkg|vsix|whl|epub)$/i;
 /** File names Ferret can browse like folders. */
 export const isArchiveName = (p: string) => ARCHIVE_RE.test(p);
+
+/** The archive a path inside one is in: `C:\a\b.zip\docs` → `C:\a\b.zip` (null outside one). */
+export function archiveRoot(p: string): string | null {
+  if (isRemote(p)) return null;
+  return segments(p).find((s, i) => i > 0 && isArchiveName(s.label))?.path ?? null;
+}

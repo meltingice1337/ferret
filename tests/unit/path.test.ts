@@ -67,6 +67,17 @@ describe("virtual places", () => {
   });
 });
 
+describe("archiveRoot", () => {
+  it("finds the archive a path inside one is in", async () => {
+    const { archiveRoot } = await import("../../src/lib/path");
+    expect(archiveRoot("C:\\a\\b.zip\\docs\\x")).toBe("C:\\a\\b.zip");
+    expect(archiveRoot("C:\\a\\b.zip")).toBe("C:\\a\\b.zip");
+    expect(archiveRoot("C:\\a\\b")).toBeNull();
+    // A drive's own name never counts, nor a server's path.
+    expect(archiveRoot("\\\\ssh:\\home.local\\x.zip")).toBeNull();
+  });
+});
+
 describe("server paths", () => {
   it("names the connection, keeps case and walks up to the server's root", async () => {
     const { displayPath, isRemote, remoteParts, setRemoteNames } = await import("../../src/lib/path");

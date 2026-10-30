@@ -33,7 +33,8 @@ interface SearchResults {
   results: Hit[];
   total: number;
   tookUs: number;
-  source: "service" | "walk" | "content" | "none";
+  /** "content-unsupported": inside files on a server that only allows SFTP. */
+  source: "service" | "walk" | "content" | "content-unsupported" | "none";
   partial: boolean;
   /** Searches inside files stop at the limit: there may be more than `total`. */
   more?: boolean;
@@ -702,7 +703,7 @@ export default function SearchPalette(props: { mode: "files" | "commands"; comma
                     <span>{contentSearch() ? (
                       busy() ? `Reading the files in ${basename(searchFolder() ?? "") || "this folder"}…`
                       : searchFolder() && isVirtual(searchFolder()!) ? <>Searching inside files needs a folder: open one, or add <code>in:C:\folder</code></>
-                      : searchFolder() && isRemote(searchFolder()!) ? "Searching inside files doesn't work on servers yet (names do, with search on in the connection's settings)"
+                      : res()?.source === "content-unsupported" ? "This server only allows file access (SFTP), so Ferret can't search inside its files"
                       : `No file in ${basename(searchFolder() ?? "") || "the folder"} contains “${contentText(fullQuery())}”`)
                       : status()?.building ? "Still indexing, so more results will appear…"
                       : !query() && typeChip() ? `No ${files(findType(typeChip()!)?.label ?? "files")} found`

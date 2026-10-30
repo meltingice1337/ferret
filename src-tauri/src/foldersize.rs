@@ -953,7 +953,67 @@ fn linux_worker(app: AppHandle) {
             log::info!("folder sizes in {}: not running, {} folders left uncounted", host.label(), batch.len());
             continue;
         }
+        // A server that runs no commands (SFTP only): walked over SFTP instead.
+        if let Host::Ssh(id) = &host
+            && let Some(s) = crate::remote::ssh::connected(id).filter(|s| s.arch.is_none())
+        {
+            count_sftp(&app, &s, batch);
+            continue;
+        }
         count_linux(&app, &host, batch);
+    }
+}
+
+/// Counts folders on a server that only allows SFTP, by listing everything in them over SFTP,
+/// one folder at a time: much slower than the helper (a round trip per folder), but the size
+/// still comes. A count stops to make way for a folder on screen, and goes on later. Symlinks
+/// aren't followed (as `find` doesn't).
+fn count_sftp(app: &AppHandle, s: &crate::remote::ssh::Session, batch: Vec<Job>) {
+    for job in batch {
+        let Some((_, root)) = Host::of(&job.path) else {
+            finish(app, &job, None, None);
+            continue;
+        };
+        let started = Instant::now();
+        let mut size = FolderSize { path: job.path.clone(), bytes: 0, files: Some(0), partial: false, done: false, refreshing: false, counted_at: db::now() };
+        let mut files = 0u64;
+        let mut stack = vec![root];
+        let mut last = Instant::now();
+        let mut stopped = false;
+        while let Some(dir) = stack.pop() {
+            if job.stop.load(Ordering::Relaxed) || s.is_closed() {
+                stopped = true;
+                break;
+            }
+            match crate::remote::block(s.sftp.read_dir(dir.clone())) {
+                Ok(rd) => {
+                    for e in rd {
+                        let m = e.metadata();
+                        if m.is_dir() {
+                            let sub = if dir.ends_with('/') { format!("{dir}{}", e.file_name()) } else { format!("{dir}/{}", e.file_name()) };
+                            if countable_in_linux(&sub, false) {
+                                stack.push(sub);
+                            }
+                        } else if m.file_type() == russh_sftp::protocol::FileType::File {
+                            size.bytes += m.size.unwrap_or(0);
+                            files += 1;
+                        }
+                    }
+                }
+                Err(_) => size.partial = true,
+            }
+            if last.elapsed() >= PROGRESS_EVERY {
+                last = Instant::now();
+                let _ = app.emit("folder-size", FolderSize { files: Some(files), ..size.clone() });
+            }
+        }
+        if stopped {
+            requeue(app, job);
+            continue;
+        }
+        size.files = Some(files);
+        size.done = true;
+        finish(app, &job, Some(size), Some(started.elapsed()));
     }
 }
 

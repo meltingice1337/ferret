@@ -1,4 +1,4 @@
-import { ArchiveRestore, ArrowDown, ArrowUp, ChevronDown, ChevronRight, LoaderCircle, Pencil, Play, Plug, Search, Star, Trash2 } from "../lib/icons";
+import { ArchiveRestore, ArrowDown, ArrowUp, ChevronDown, ChevronRight, FileArchive, FolderOpen, LoaderCircle, PackageOpen, Pencil, Play, Plug, Search, Star, Trash2 } from "../lib/icons";
 import { batch, createComputed, createEffect, createMemo, createResource, createSignal, For, Match, on, onCleanup, onMount, Show, Switch, untrack } from "solid-js";
 import { Portal } from "solid-js/web";
 import FileIcon from "./FileIcon";
@@ -7,10 +7,10 @@ import { addShellEntries, backgroundMenu, fromKeyboard, itemMenu, openKeyboardMe
 import { api, fileUrl, noteVersion, thumbUrl } from "../lib/api";
 import { beginDrag } from "../lib/drag";
 import { formatDate, formatSize, kindOf, plural, timeAgo, typeLabel } from "../lib/format";
-import { emptyBin, isCut, newFolder, renamePath, restoreFromBin, startRename, targetsOf, visibleEntries } from "../lib/ops";
+import { emptyBin, extractFromInside, isCut, newFolder, renamePath, restoreFromBin, startRename, targetsOf, visibleEntries } from "../lib/ops";
 import { groupEntries, sortEntries, type Group } from "../lib/sortgroup";
 import { entryFilter } from "../lib/filter";
-import { isRecycle, isSearch, isWithin, pathKey, samePath, searchQuery } from "../lib/path";
+import { archiveRoot, basename, isRecycle, isSearch, isWithin, pathKey, samePath, searchQuery } from "../lib/path";
 import { enter } from "../lib/motion";
 import { openSearchPalette } from "./SearchPalette";
 import { folderSizes, requestFolderSizes, sizeOrder, sizesApply, sizesEpoch, uncounted } from "../lib/foldersizes";
@@ -687,6 +687,7 @@ export default function FileView(props: { tab: Tab }) {
     <div class="fileview" classList={{ grid: view().mode === "grid", bin: bin() }} data-tab={t.id} onFocusIn={() => focusPane(t)}>
       <Show when={bin()}><BinBar tab={t} /></Show>
       <Show when={found()}><SearchBar tab={t} /></Show>
+      <Show when={insideArchive(t)}>{(archive) => <ArchiveBar tab={t} archive={archive()} />}</Show>
       <Show when={view().mode === "list"}>
         <div class="colheads" style={{ "grid-template-columns": columns(), "padding-right": `${10 + gutter()}px` }}
           onContextMenu={headingsMenu}>
@@ -992,6 +993,41 @@ function BinBar(props: { tab: Tab }) {
         <ArchiveRestore size={14} />{selected().length ? `Restore ${plural(selected().length, "item")}` : "Restore all"}
       </button>
       <button class="btn warn" disabled={!all().length} onClick={() => emptyBin()}><Trash2 size={14} />Empty Recycle Bin</button>
+    </div>
+  );
+}
+
+/** The archive the tab is browsing (inside it, or a folder in it), if it is: its items come
+ *  from the archive. (An empty one has no items to tell by.) */
+function insideArchive(t: Tab): string | null {
+  const root = archiveRoot(t.p);
+  if (!root || t.loading[0]()) return null;
+  const items = t.entries[0]();
+  return !items.length || items.some((e) => e.inArchive) ? root : null;
+}
+
+/** Inside an archive, as Explorer's "Extract all": extracting it (or what's selected) without
+ *  going back out to it. Then the extracted files are shown. */
+function ArchiveBar(props: { tab: Tab; archive: string }) {
+  const t = props.tab;
+  const selected = () => t.selection[0]();
+  const inner = () => t.p.slice(props.archive.length).replace(/^\\/, "").replace(/\\/g, "/");
+  return (
+    <div class="bin-bar archive-bar">
+      <FileArchive size={15} />
+      <span class="bin-count" title={props.archive}>{basename(props.archive)}</span>
+      <Show when={inner()}><code class="search-bar-query">{inner()}</code></Show>
+      <span class="bin-hint">Browsing a compressed file: extract it to change what's in it</span>
+      <Show when={selected().length}>
+        <button class="btn" onClick={() => extractFromInside(t, props.archive, "selected")}>
+          <PackageOpen size={14} />Extract {plural(selected().length, "selected item")}…
+        </button>
+      </Show>
+      <button class="btn" onClick={() => extractFromInside(t, props.archive, "to")}><FolderOpen size={14} />Extract to…</button>
+      <button class="btn accent" title={`Next to ${basename(props.archive)} (in a folder of its own unless it holds a single folder)`}
+        onClick={() => extractFromInside(t, props.archive, "all")}>
+        <PackageOpen size={14} />Extract all
+      </button>
     </div>
   );
 }

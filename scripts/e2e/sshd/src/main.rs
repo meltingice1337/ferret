@@ -16,7 +16,7 @@ use std::time::{Duration, UNIX_EPOCH};
 
 use russh::keys::{PrivateKey, PublicKey, ssh_key::Algorithm};
 use russh::server::{Auth, Msg, Server as _, Session};
-use russh::{Channel, ChannelId};
+use russh::{Channel, ChannelId, MethodKind, MethodSet};
 use russh_sftp::protocol::{Attrs, Data, File, FileAttributes, Handle, Name, OpenFlags, Status, StatusCode, Version};
 use tokio::sync::Mutex;
 
@@ -95,7 +95,12 @@ impl russh::server::Handler for Client {
                 self.user = user.to_string();
                 Ok(Auth::Accept)
             }
-            _ => Ok(Auth::reject()),
+            // Like OpenSSH, a wrong password can be tried again on the same connection (russh's
+            // default drops password from the methods left).
+            _ => Ok(Auth::Reject {
+                proceed_with_methods: Some(MethodSet::from(&[MethodKind::PublicKey, MethodKind::Password][..])),
+                partial_success: false,
+            }),
         }
     }
 

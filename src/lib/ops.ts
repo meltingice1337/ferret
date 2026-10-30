@@ -9,7 +9,7 @@ import { api } from "./api";
 import { entryFilter } from "./filter";
 import { invalidateFolderSizes } from "./foldersizes";
 import { kindOf, plural } from "./format";
-import { isVirtual, basename, inRecycleBin, isArchiveName, isRecycle, isRemote, isSearch, isWithin, parent, pathKey, remoteParts, samePath } from "./path";
+import { archiveRoot, isVirtual, basename, inRecycleBin, isArchiveName, isRecycle, isRemote, isSearch, isWithin, parent, pathKey, remoteParts, samePath } from "./path";
 import { serverName } from "./remote";
 import {
   otherPane, setJobsRunning,
@@ -413,7 +413,7 @@ export async function transferTo(op: "copy" | "move", sources: string[], dest: s
   // Items inside archives are extracted instead of copied.
   if (inArchive(sources)) {
     const archive = sources[0];
-    return extractTo(archive, dest, sources);
+    return void (await extractTo(archive, dest, sources));
   }
 
   let policy: Policy = "keepBoth";
@@ -824,7 +824,8 @@ async function withPassword<T>(fn: (pw?: string) => Promise<T>): Promise<T | und
   }
 }
 
-export async function extractSmart(archive: string) {
+/** "Extract here": next to the archive. What it made (for showing it), or undefined. */
+export async function extractSmart(archive: string): Promise<string[] | undefined> {
   touch(parent(archive));
   try {
     const u = await withPassword((pw) => runJob(api.archiveExtractSmart(archive, pw)));
@@ -832,14 +833,18 @@ export async function extractSmart(archive: string) {
     const t = activeTab();
     if (samePath(t.p, parent(archive))) selectAfterReload(t, u.created);
     record({ label: `Extract ${basename(archive)}`, undo: () => runJob(api.deleteItems(u.created, false)) }, `Extracted ${basename(archive)}`);
+    return u.created;
   } catch (e) {
     fail("Extract failed", e);
   }
 }
 
-export async function extractTo(archive: string, dest?: string, entries?: string[]) {
+/** Extracts the archive (or `entries` of it) into `dest`, a folder picked if not given. Where
+ *  it went and what it made, or undefined. */
+export async function extractTo(archive: string, dest?: string, entries?: string[]): Promise<{ dest: string; created: string[] } | undefined> {
   if (!dest) {
-    const picked = await openDialog({ directory: true, title: `Extract ${basename(archive)} to…`, defaultPath: parent(archive) ?? undefined });
+    const outside = archiveRoot(archive) ?? archive;
+    const picked = await openDialog({ directory: true, title: `Extract ${basename(outside)} to…`, defaultPath: parent(outside) ?? undefined });
     if (typeof picked !== "string") return;
     dest = picked;
   }
@@ -851,9 +856,20 @@ export async function extractTo(archive: string, dest?: string, entries?: string
     const t = activeTab();
     if (samePath(t.p, target)) selectAfterReload(t, u.created);
     record({ label: `Extract to ${basename(target)}`, undo: () => runJob(api.deleteItems(u.created, false)) }, `Extracted to ${basename(target)}`);
+    return { dest: target, created: u.created };
   } catch (e) {
     fail("Extract failed", e);
   }
+}
+
+/** From inside an archive (its bar above the list, its folder's menu), as Explorer's "Extract
+ *  all": extracts it all next to it, or to a folder picked, or only what's selected; then shows
+ *  the extracted files. */
+export async function extractFromInside(t: Tab, archive: string, how: "all" | "to" | "selected") {
+  const show = (dir: string, made: string[] | undefined) => made?.length && navigate(t, dir, { select: made[0] });
+  if (how === "all") return void show(parent(archive)!, await extractSmart(archive));
+  const r = how === "to" ? await extractTo(archive) : await extractTo(t.p, undefined, [...t.selection[0]()]);
+  if (r) show(r.dest, r.created);
 }
 
 /** Name "Compress to ZIP" will use (unique within the folder). */
@@ -907,11 +923,12 @@ const STREAM_FROM = 64 << 20;
 
 /** Real filesystem path for an entry (archive entries are extracted to a cache first, server
  *  files copied here, except big videos, which stream). */
-export async function realPath(e: Pick<Entry, "path" | "inArchive"> & Partial<Pick<Entry, "isDir" | "ext" | "size">>): Promise<string | undefined> {
+export async function realPath(e: Pick<Entry, "path" | "inArchive"> & Partial<Pick<Entry, "isDir" | "ext" | "size">>, local = false): Promise<string | undefined> {
   if (isRemote(e.path)) {
     if (e.isDir) return e.path;
+    // (`local`: for another app, which needs a copy here.)
     const kind = kindOf({ isDir: false, ext: e.ext ?? "" });
-    if ((kind === "video" || kind === "audio") && (e.size ?? 0) > STREAM_FROM) return e.path;
+    if (!local && (kind === "video" || kind === "audio") && (e.size ?? 0) > STREAM_FROM) return e.path;
     try {
       return await api.remoteMaterialize(e.path);
     } catch (err) {

@@ -286,7 +286,13 @@ fn join(folder: &[u8], name: &[u8]) -> Vec<u8> {
     p
 }
 
+mod grep;
+
 fn main() {
+    // `grep`: searching inside files instead (grep.rs).
+    if std::env::args().nth(1).as_deref() == Some("grep") {
+        return grep::main(std::env::args().skip(2));
+    }
     let mut watch_stdin = false;
     let mut roots_stdin = false;
     let mut threads = 0usize;

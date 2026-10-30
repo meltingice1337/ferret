@@ -6,13 +6,13 @@ import {
 } from "../lib/icons";
 import { api } from "../lib/api";
 import { kindOf } from "../lib/format";
-import { isVirtual, basename, isRecycle, isRemote, isWsl, parent, pathKey } from "../lib/path";
+import { archiveRoot, isVirtual, basename, isRecycle, isRemote, isWsl, parent, pathKey } from "../lib/path";
 import {
   fileList, favorites, isFavorite, recents, reload, resetView, saveViewForFolder, setUi,
   toggleFavorite, ui, updateView, type MenuItem, type Tab,
 } from "../lib/state";
 import {
-  compress, copyPaths, copyText, copyToClipboard, deleteItems, duplicate, emptyBin, extractSmart, extractTo, newFile, newFolder,
+  compress, copyPaths, copyText, copyToClipboard, deleteItems, duplicate, emptyBin, extractFromInside, extractSmart, extractTo, newFile, newFolder,
   NEW_FILE_TYPES, openFile, openInVscode, openTerminal, paste, purgeFromBin, realPath, redo, redoLabel, restoreFromBin,
   showNativeMenu, startRename, targetsOf, transferTo, transferWithPicker, undo, undoLabel, visibleEntries, zipNameFor,
 } from "../lib/ops";
@@ -214,7 +214,14 @@ export function viewSubmenus(t: Tab): MenuItem[] {
 export function backgroundMenu(t: Tab, x: number, y: number): MenuItem[] {
   if (isRecycle(t.p)) return binBackgroundMenu(t);
   const archived = /\.(zip|7z|rar|tar|gz|xz|zst|bz2|tgz|jar|apk|cbz|cbr)(\\|$)/i.test(t.p);
+  // Inside an archive, what its bar offers comes first.
+  const root = archived ? archiveRoot(t.p) : null;
   const items: MenuItem[] = [
+    ...(root ? [
+      { label: "Extract all", icon: PackageOpen, action: () => extractFromInside(t, root, "all") },
+      { label: "Extract to…", icon: PackageOpen, action: () => extractFromInside(t, root, "to") },
+      { separator: true },
+    ] : []),
     ...viewSubmenus(t),
     { label: "Refresh", icon: RotateCw, shortcut: "F5", action: () => reload(t) },
     { separator: true },

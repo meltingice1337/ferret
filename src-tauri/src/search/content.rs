@@ -128,6 +128,16 @@ pub fn search(query: &str, needles: &[String], scope: Option<&str>, limit: usize
     if res.is_empty() || q.kind == Some(Kind::Folder) {
         return done(Vec::new(), false, 0);
     }
+    // In WSL or on a server, Linux reads the files (linux.rs's helper): only the results travel.
+    if let Some((host, linux)) = crate::linux::Host::of(&root) {
+        match search_linux(&q, needles, &host, &linux, limit, &cancelled) {
+            Some((hits, more)) => return done(hits, more, 0),
+            // A server without the helper (SFTP only) can't be searched inside; WSL is walked
+            // from here instead.
+            None if matches!(host, crate::linux::Host::Ssh(_)) => return SearchResults { source: "content-unsupported".into(), ..done(Vec::new(), false, 0) },
+            None => {}
+        }
+    }
 
     let walker = walkdir::WalkDir::new(crate::paths::for_io(&root))
         .follow_links(false)
@@ -182,7 +192,7 @@ pub fn search(query: &str, needles: &[String], scope: Option<&str>, limit: usize
 fn root_of(q: &Query, scope: Option<&str>) -> Option<String> {
     let mut scopes: Vec<String> = q.scopes.iter().map(String::as_str).chain(scope).map(|s| crate::paths::normalize(s)).collect();
     scopes.retain(|s| !s.is_empty());
-    for s in scopes.iter_mut() {
+    for s in scopes.iter_mut().filter(|s| !crate::paths::is_remote(s)) {
         *s = super::walk::long_path(s);
     }
     scopes.sort_by_key(|s| std::cmp::Reverse(s.len()));
@@ -195,7 +205,8 @@ fn root_of(q: &Query, scope: Option<&str>) -> Option<String> {
     if !scopes.iter().all(|s| inside(s)) {
         return None;
     }
-    std::path::Path::new(&crate::paths::for_io(&root)).is_dir().then_some(root)
+    // A server's folder isn't one Windows can look at (the helper says if it isn't there).
+    (crate::paths::is_remote(&root) || std::path::Path::new(&crate::paths::for_io(&root)).is_dir()).then_some(root)
 }
 
 /// A folder below the searched one: skipped when it's one of [`SKIP_DIRS`] or a `!` filter
@@ -225,38 +236,122 @@ fn path_excluded(q: &Query, path: &[u8]) -> bool {
 /// excludes, size and date.
 fn candidate(q: &Query, e: &walkdir::DirEntry) -> Option<Candidate> {
     let path = e.path().to_string_lossy().into_owned();
-    let path_l = lower(&path);
-    let name_l = lower(&e.file_name().to_string_lossy());
+    let name = e.file_name().to_string_lossy();
+    if !named(q, &path, &name) {
+        return None;
+    }
+    let meta = e.metadata().ok()?;
+    let secs = meta.modified().ok().and_then(|t| t.duration_since(UNIX_EPOCH).ok()).map(|d| d.as_secs() as i64);
+    sized(q, meta.len(), secs).then(|| Candidate { path, size: meta.len(), modified: secs.map(|s| s * 1000) })
+}
+
+/// The query keeps a file by its path and name (see `candidate`).
+fn named(q: &Query, path: &str, name: &str) -> bool {
+    let path_l = lower(path);
+    let name_l = lower(name);
     let parent_l = &path_l[..path_l.len() - name_l.len()];
     if path_excluded(q, &path_l) || q.excludes.iter().any(|x| memchr::memmem::find(&name_l, x).is_some()) {
-        return None;
+        return false;
     }
     let ext = name_l.iter().rposition(|&b| b == b'.').map(|i| &name_l[i + 1..]);
     if q.exts.is_empty() {
         if ext.is_some_and(|e| BINARY_EXTS.iter().any(|b| b.as_bytes() == e)) {
-            return None;
+            return false;
         }
     } else if !ext.is_some_and(|e| q.exts.iter().any(|x| x.as_slice() == e)) {
-        return None;
+        return false;
     }
-    let terms_ok = q.terms.iter().all(|t| match t {
+    q.terms.iter().all(|t| match t {
         Term::Sub(s) => memchr::memmem::find(&path_l, s).is_some(),
         Term::Glob(g) => query::glob_match(g, &name_l),
         Term::Path { dir, name } => memchr::memmem::find(&name_l, name).is_some() && memchr::memmem::find(parent_l, dir).is_some(),
-    });
-    if !terms_ok {
-        return None;
-    }
-    let meta = e.metadata().ok()?;
-    let size = meta.len();
+    })
+}
+
+/// … and by its size and date (Unix seconds).
+fn sized(q: &Query, size: u64, secs: Option<i64>) -> bool {
     if size == 0 || size > MAX_BYTES || !q.size.iter().all(|&(c, v)| c.test(size, v)) {
-        return None;
+        return false;
     }
-    let secs = meta.modified().ok().and_then(|t| t.duration_since(UNIX_EPOCH).ok()).map(|d| d.as_secs() as i64);
-    if !q.modified.is_empty() && !secs.is_some_and(|s| q.modified.iter().all(|&(c, v)| c.test(s, v))) {
-        return None;
+    q.modified.is_empty() || secs.is_some_and(|s| q.modified.iter().all(|&(c, v)| c.test(s, v)))
+}
+
+/// Searching inside files in WSL or on a server: the helper reads them there (`grep` mode),
+/// and the rest of the query picks from what it found, as from a folder here. None when the
+/// helper can't run there.
+fn search_linux(
+    q: &Query,
+    needles: &[String],
+    host: &crate::linux::Host,
+    root: &str,
+    limit: usize,
+    cancelled: &dyn Fn() -> bool,
+) -> Option<(Vec<Hit>, bool)> {
+    use std::io::{BufRead, BufReader, Read};
+    let helper = crate::linux::helper(host)?;
+    // More than asked for: some may not pass the other filters.
+    let max = (limit * 4).max(50).to_string();
+    let exts = q.exts.iter().map(|e| String::from_utf8_lossy(e).into_owned()).collect::<Vec<_>>().join(",");
+    let (ext_flag, ext_list) = if exts.is_empty() { ("--skip-ext", BINARY_EXTS.join(",")) } else { ("--ext", exts) };
+    let mut args = vec!["-c", crate::linux::HELPER_START, "sh", &helper.name, &helper.sha256, "grep", root, "--max", &max, ext_flag, &ext_list, "--"];
+    args.extend(needles.iter().map(String::as_str));
+    let mut child = host.spawn("sh", &args).ok()?;
+    let mut said = String::new();
+    let err = child.stderr.take().map(|mut e| std::thread::spawn(move || { let _ = e.read_to_string(&mut said); said }));
+    let mut started = false;
+    let mut hits = Vec::new();
+    let mut found = 0usize;
+    let reader = BufReader::new(child.stdout.take()?);
+    for line in reader.split(b'\n').map_while(Result::ok) {
+        if cancelled() {
+            child.kill();
+            break;
+        }
+        let line = String::from_utf8_lossy(&line).into_owned();
+        if line == "H\t1" {
+            started = true;
+            continue;
+        }
+        let mut f = line.splitn(9, '\t');
+        if f.next() != Some("M") {
+            continue;
+        }
+        let num = |s: Option<&str>| s.and_then(|v| v.parse::<i64>().ok());
+        let (Some(size), Some(mtime), Some(no), Some(count), Some(start), Some(end), Some(rel), Some(text)) =
+            (num(f.next()), num(f.next()), num(f.next()), num(f.next()), num(f.next()), num(f.next()), f.next(), f.next())
+        else {
+            continue;
+        };
+        found += 1;
+        // What Linux reports is only data: nothing in it may name a file elsewhere.
+        if rel.split('/').any(|p| matches!(p, "" | "." | "..")) || rel.contains('\\') {
+            continue;
+        }
+        let linux = if root == "/" { format!("/{rel}") } else { format!("{}/{rel}", root.trim_end_matches('/')) };
+        let path = host.path(&linux);
+        let name = rel.rsplit('/').next().unwrap_or(rel).to_string();
+        if !named(q, &path, &name) || !sized(q, size as u64, Some(mtime)) {
+            continue;
+        }
+        let (start, end) = (start as usize, end as usize);
+        if start > end || end > text.len() || !text.is_char_boundary(start) || !text.is_char_boundary(end) {
+            continue;
+        }
+        let mut m = excerpt(text.as_bytes(), start, end, count as u32);
+        m.line = no as u32;
+        hits.push(Hit { path, name, is_dir: false, size: Some(size as u64), modified: Some(mtime * 1000), score: 0.0, matches: Vec::new(), line: Some(m) });
     }
-    Some(Candidate { path, size, modified: secs.map(|s| s * 1000) })
+    let code = child.wait();
+    let said = err.and_then(|t| t.join().ok()).unwrap_or_default();
+    // Not there yet (or changed): put there, and searched again.
+    if !started {
+        return crate::linux::after_failed_start(host, helper, code, &said)
+            .then(|| search_linux(q, needles, host, root, limit, cancelled))
+            .flatten();
+    }
+    let more = hits.len() > limit || found >= limit * 4;
+    hits.truncate(limit);
+    Some((hits, more))
 }
 
 fn hit(c: Candidate, m: LineMatch) -> Hit {
@@ -374,6 +469,50 @@ mod tests {
         let mut utf16 = vec![0xFF, 0xFE];
         utf16.extend("Grüße needle".encode_utf16().flat_map(|u| u.to_le_bytes()));
         assert_eq!(&*decode(&utf16).unwrap(), "Grüße needle".as_bytes());
+    }
+
+    /// Searching inside files on Linux (the helper's `grep` mode) agrees with the search here: in
+    /// the first running distro, and on a server with `FERRET_TEST_SSH=<a ~/.ssh/config host>`,
+    /// in a /tmp folder of its own (removed at the end):
+    /// `cargo test --lib linux_content_search -- --ignored --nocapture`.
+    #[test]
+    #[ignore]
+    fn linux_content_search() {
+        use crate::linux::Host;
+        use std::io::{Read, Write};
+        let mut hosts: Vec<Host> = crate::wsl::running().into_iter().take(1).map(Host::Wsl).collect();
+        if let Ok(alias) = std::env::var("FERRET_TEST_SSH") {
+            hosts.push(Host::Ssh(crate::remote::test_connection(&alias).expect("connects")));
+        }
+        for host in hosts {
+            let dir = format!("/tmp/ferret-grep-{}", std::process::id());
+            let sh = |script: &str| {
+                let mut c = host.spawn("sh", &["-c", script, "sh", &dir]).unwrap();
+                let mut out = String::new();
+                c.stdout.take().unwrap().read_to_string(&mut out).unwrap();
+                c.wait();
+                out
+            };
+            sh(r#"mkdir -p "$1/src" "$1/node_modules/p" && printf 'fn main() {\n  // The Needle and the haystack\n}\n' > "$1/src/a.rs" && printf 'a NEEDLE, another needle\n' > "$1/src/b.txt" && printf 'needle\000bin' > "$1/bin.dat" && printf 'needle haystack\n' > "$1/node_modules/p/x.js""#);
+            let root = host.path(&dir);
+            let names = |r: &SearchResults| r.results.iter().map(|h| h.name.clone()).collect::<Vec<_>>();
+            let r = search("", &["needle".into()], Some(&root), 50, false);
+            println!("{}: {:?} ({})", host.label(), names(&r), r.source);
+            assert_eq!(names(&r), ["a.rs", "b.txt"], "{}", host.label());
+            let a = r.results[0].line.as_ref().unwrap();
+            assert_eq!((a.line, a.text.as_str(), a.count), (2, "// The Needle and the haystack", 1));
+            assert_eq!(&a.text.encode_utf16().collect::<Vec<_>>()[a.start as usize..a.end as usize], "Needle".encode_utf16().collect::<Vec<_>>());
+            assert_eq!(r.results[1].line.as_ref().unwrap().count, 2);
+            assert_eq!(r.results[0].path, format!("{root}\\src\\a.rs"));
+            assert_eq!(names(&search("", &["needle".into(), "haystack".into()], Some(&root), 50, false)), ["a.rs"]);
+            assert_eq!(names(&search("ext:txt", &["needle".into()], Some(&root), 50, false)), ["b.txt"]);
+            assert_eq!(names(&search("size:<40", &["needle".into()], Some(&root), 50, false)), ["b.txt"]);
+            sh(r#"rm -rf "$1""#);
+            let _ = std::io::stdout().flush();
+            if let Host::Ssh(id) = &host {
+                crate::remote::block(crate::remote::ssh::disconnect(id));
+            }
+        }
     }
 
     #[test]

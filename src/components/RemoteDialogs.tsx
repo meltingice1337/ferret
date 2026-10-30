@@ -55,7 +55,7 @@ function ConnectionForm(props: { editing: Connection | null }) {
     setTest({ busy: true });
     try {
       const r = await api.remoteTest(unwrap(c));
-      setTest({ ok: `Connected. Home folder ${r.home}${r.arch ? ` · Linux (${r.arch}): folder sizes and search run on the server` : " · files only (SFTP): no folder sizes or search there"}` });
+      setTest({ ok: `Connected. Home folder ${r.home}${r.arch ? ` · Linux (${r.arch}): folder sizes and search run on the server` : " · files only (SFTP): folder sizes are counted more slowly, and searching its files isn't possible"}` });
     } catch (e) {
       setTest(e === "Cancelled" ? null : { error: String(e) });
     }

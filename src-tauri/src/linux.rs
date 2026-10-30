@@ -31,6 +31,17 @@ impl Host {
         crate::wsl::linux_path(path).map(|(d, l)| (Host::Wsl(d), l))
     }
 
+    /// The Ferret path of `linux` (an absolute path) on this system.
+    pub fn path(&self, linux: &str) -> String {
+        match self {
+            Host::Wsl(d) => {
+                let inside = linux.trim_matches('/');
+                if inside.is_empty() { paths::wsl_root(d) } else { format!("{}\\{}", paths::wsl_root(d), inside.replace('/', "\\")) }
+            }
+            Host::Ssh(id) => paths::remote_path(id, linux),
+        }
+    }
+
     /// For logs.
     pub fn label(&self) -> String {
         match self {

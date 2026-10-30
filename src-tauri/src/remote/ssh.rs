@@ -542,6 +542,7 @@ async fn login(h: &mut Handle<Client>, conn: &Connection, user: &str, host: &str
     // A password, or the server's own questions.
     let target = secrets::password_target(user, host, conn.port);
     let mut remembered = secrets::get(&target);
+    let mut wrong_password = false;
     for attempt in 0..3 {
         if allows(&methods, MethodKind::Password) {
             let (password, remember) = match remembered.take() {
@@ -563,6 +564,7 @@ async fn login(h: &mut Handle<Client>, conn: &Connection, user: &str, host: &str
                 }
                 russh::client::AuthResult::Failure { remaining_methods, .. } => {
                     secrets::forget(&target);
+                    wrong_password = true;
                     methods = Some(remaining_methods.to_vec());
                 }
             }
@@ -574,7 +576,8 @@ async fn login(h: &mut Handle<Client>, conn: &Connection, user: &str, host: &str
             break;
         }
     }
-    Err(format!("{host} didn't let {user} in"))
+    // Some servers take one password per connection: connecting again asks again.
+    Err(if wrong_password { format!("{host} didn't take the password for {user}") } else { format!("{host} didn't let {user} in") })
 }
 
 /// The SSH agent's keys; Some(()) when one let the user in.
