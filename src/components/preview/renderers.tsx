@@ -5,6 +5,7 @@ import { api, fileUrl, thumbUrl } from "../../lib/api";
 import { formatDate, formatSize, languageName, plural, typeLabel } from "../../lib/format";
 import { isRecycle, isRemote, isWsl, parent, remoteParts } from "../../lib/path";
 import { activeTab, fsTick, isDark, remoteState } from "../../lib/state";
+import { log } from "../../lib/log";
 import { enter } from "../../lib/motion";
 import type { Entry, VideoInfo } from "../../lib/types";
 import FileIcon from "../FileIcon";
@@ -445,7 +446,13 @@ export function VideoView(props: { path: string; setMeta: SetMeta; large?: boole
             { label: "Dimensions", value: `${e.currentTarget.videoWidth} × ${e.currentTarget.videoHeight}` },
             { label: "Duration", value: fmtDuration(e.currentTarget.duration) },
           ])}
-          onError={() => setFailed(true)}
+          onError={(e) => {
+            // Why, for the log: the player's own reason (a demuxer or decoder error) and what Windows read.
+            const err = e.currentTarget.error;
+            const v = info();
+            log.warn(`video preview: a .${props.path.split(".").pop()?.toLowerCase()} didn't play: ${err?.code ?? "?"} ${err?.message ?? ""}${v ? ` (${v.codec}, ${v.width}×${v.height})` : ""}`);
+            setFailed(true);
+          }}
         />
       </Show>
     </Show>

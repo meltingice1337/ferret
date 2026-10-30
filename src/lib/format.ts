@@ -45,7 +45,7 @@ export const plural = (n: number, word: string) => `${n.toLocaleString()} ${word
 /** Format names that aren't just the extension in capitals. */
 const FORMAT_NAME: Record<string, string> = { jpg: "JPEG", jpeg: "JPEG", jfif: "JPEG", tif: "TIFF", tiff: "TIFF", m4a: "AAC" };
 
-export function typeLabel(e: Entry): string {
+export function typeLabel(e: Pick<Entry, "isDir" | "ext">): string {
   if (!e.isDir && EXT_LABEL[e.ext]) return EXT_LABEL[e.ext];
   const k = kindOf(e);
   // "PNG image", "MP4 video": as in Explorer, the format tells same-kind files apart.

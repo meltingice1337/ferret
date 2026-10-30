@@ -4,7 +4,7 @@ import { createEffect, createSignal, For, on, onCleanup, onMount, Show } from "s
 import FileIcon from "./FileIcon";
 import { placeMenu } from "./menus";
 import { beginReorder } from "../lib/drag";
-import { basename, isRecycle, isSearch, parent } from "../lib/path";
+import { basename, folderLook, isRecycle, isSearch, parent } from "../lib/path";
 import {
   fileList, paneOf, activeId, adminWindow, closedTabs, closeTab, goTo, moveTab, newTab, openMenu, persistSession, reload, reopenClosedTab, searchTitle, setActiveId,
   tabs, type MenuItem,
@@ -115,7 +115,7 @@ export default function TitleBar() {
                 {/* A split tab is named after the pane in use. */}
                 <Show when={!isRecycle(paneOf(tab).p)} fallback={<Trash2 size={14} class="tab-bin" />}>
                   <Show when={!isSearch(paneOf(tab).p)} fallback={<Search size={14} class="tab-bin" />}>
-                    <FileIcon entry={{ isDir: true, ext: "", isSymlink: false }} size={14} />
+                    <FileIcon entry={folderLook(paneOf(tab).p)} size={14} />
                   </Show>
                 </Show>
                 <span class="tab-label">{isSearch(paneOf(tab).p) ? searchTitle(paneOf(tab).p) : basename(paneOf(tab).p) || "…"}</span>

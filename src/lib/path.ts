@@ -99,3 +99,10 @@ export function archiveRoot(p: string): string | null {
   if (isRemote(p)) return null;
   return segments(p).find((s, i) => i > 0 && isArchiveName(s.label))?.path ?? null;
 }
+
+/** How a folder on screen is drawn and named: an archive's top as the archive, anything else as a folder. */
+export function folderLook(p: string): { isDir: boolean; ext: string; isSymlink: false } {
+  const root = archiveRoot(p);
+  const ext = root && samePath(root, p) ? (/\.([^.\\]+)$/.exec(root)?.[1].toLowerCase() ?? "") : "";
+  return { isDir: !ext, ext, isSymlink: false };
+}

@@ -10,7 +10,7 @@ import { formatDate, formatSize, kindOf, plural, timeAgo, typeLabel } from "../l
 import { emptyBin, extractFromInside, isCut, newFolder, renamePath, restoreFromBin, startRename, targetsOf, visibleEntries } from "../lib/ops";
 import { groupEntries, sortEntries, type Group } from "../lib/sortgroup";
 import { entryFilter } from "../lib/filter";
-import { archiveRoot, basename, isRecycle, isSearch, isWithin, pathKey, samePath, searchQuery } from "../lib/path";
+import { archiveRoot, basename, folderLook, isRecycle, isSearch, isWithin, pathKey, samePath, searchQuery } from "../lib/path";
 import { enter } from "../lib/motion";
 import { openSearchPalette } from "./SearchPalette";
 import { folderSizes, requestFolderSizes, sizeOrder, sizesApply, sizesEpoch, uncounted } from "../lib/foldersizes";
@@ -1011,13 +1011,12 @@ function insideArchive(t: Tab): string | null {
 function ArchiveBar(props: { tab: Tab; archive: string }) {
   const t = props.tab;
   const selected = () => t.selection[0]();
-  const inner = () => t.p.slice(props.archive.length).replace(/^\\/, "").replace(/\\/g, "/");
+  // Its name and the folder in it are in the tab and the path bar already.
   return (
     <div class="bin-bar archive-bar">
       <FileArchive size={15} />
-      <span class="bin-count" title={props.archive}>{basename(props.archive)}</span>
-      <Show when={inner()}><code class="search-bar-query">{inner()}</code></Show>
-      <span class="bin-hint">Browsing a compressed file: extract it to change what's in it</span>
+      <span class="bin-count">{typeLabel(folderLook(props.archive))}</span>
+      <span class="bin-hint">Read-only: extract it to make changes</span>
       <Show when={selected().length}>
         <button class="btn" onClick={() => extractFromInside(t, props.archive, "selected")}>
           <PackageOpen size={14} />Extract {plural(selected().length, "selected item")}…

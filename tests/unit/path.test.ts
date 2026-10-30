@@ -76,6 +76,14 @@ describe("archiveRoot", () => {
     // A drive's own name never counts, nor a server's path.
     expect(archiveRoot("\\\\ssh:\\home.local\\x.zip")).toBeNull();
   });
+
+  it("draws an archive's top as the archive, its folders as folders", async () => {
+    const { folderLook } = await import("../../src/lib/path");
+    expect(folderLook("C:\\a\\Photos (23).ZIP")).toEqual({ isDir: false, ext: "zip", isSymlink: false });
+    expect(folderLook("C:\\a\\b.tar.gz")).toEqual({ isDir: false, ext: "gz", isSymlink: false });
+    expect(folderLook("C:\\a\\b.zip\\2024").isDir).toBe(true);
+    expect(folderLook("C:\\a\\b").isDir).toBe(true);
+  });
 });
 
 describe("server paths", () => {

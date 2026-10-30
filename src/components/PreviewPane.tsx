@@ -3,9 +3,10 @@ import { createEffect, createMemo, createSignal, For, on, onCleanup, onMount, Sh
 import { Portal } from "solid-js/web";
 import { formatDate, formatSize, kindOf, plural, typeLabel } from "../lib/format";
 import { copyText, openFile } from "../lib/ops";
-import { basename, isRecycle, pathKey } from "../lib/path";
+import { basename, folderLook, isRecycle, pathKey } from "../lib/path";
 import { fileList, activeTab, openEntry, persistSession, previewSpace, setUi, ui } from "../lib/state";
 import type { Entry } from "../lib/types";
+import FileIcon from "./FileIcon";
 import { Thumb } from "./FileView";
 import Preview from "./preview/Preview";
 import { enter } from "../lib/motion";
@@ -73,7 +74,7 @@ function CopyPath(props: { path: string }) {
   );
 }
 
-function MetaList(props: { entry: Entry; extra: Meta[] }) {
+function MetaList(props: { entry: Entry; type?: string; extra: Meta[] }) {
   // Recycle Bin items: where they came from and when they were deleted.
   const original = () => props.entry.origin && `${props.entry.origin.replace(/\\$/, "")}\\${props.entry.name}`;
   const rows = (): Meta[] => props.entry.origin ? [
@@ -83,7 +84,7 @@ function MetaList(props: { entry: Entry; extra: Meta[] }) {
     ...(props.entry.modified ? [{ label: "Deleted", value: formatDate(props.entry.modified) }] : []),
     ...(props.entry.created ? [{ label: "Modified", value: formatDate(props.entry.created) }] : []),
   ] : [
-    { label: "Type", value: typeLabel(props.entry) },
+    { label: "Type", value: props.type ?? typeLabel(props.entry) },
     ...(props.entry.isDir ? [] : [{ label: "Size", value: `${formatSize(props.entry.size)}${props.entry.size >= 1024 ? ` (${props.entry.size.toLocaleString()} bytes)` : ""}` }]),
     ...props.extra,
     ...(props.entry.modified ? [{ label: "Modified", value: formatDate(props.entry.modified) }] : []),
@@ -148,23 +149,32 @@ export default function PreviewPane() {
       <div class="preview-resizer" onMouseDown={startResize} />
       <Show when={summary()}><div class="pv-multi" role="status">{summary()}</div></Show>
       <Show when={shown()}>
-        {(e) => (
-          <>
-            <header class="pv-head">
-              <div class="pv-head-icon"><Thumb entry={e()} size={32} fallbackSize={28} /></div>
-              <div class="pv-head-text">
-                <div class="pv-name" title={e().name}>{e().name || e().path}</div>
-                <div class="pv-sub">{e().isDir && !focused() ? "Current folder" : typeLabel(e())}</div>
-              </div>
-              <Show when={!e().isDir}>
-                <button class="icon-btn" title="Open" onClick={() => openFile(e())}><ExternalLink size={15} /></button>
-                <button class="icon-btn" title="Quick Look (Space)" onClick={() => setUi("quickLook", true)}><Maximize2 size={15} /></button>
-              </Show>
-            </header>
-            <div class="pv-body" ref={body}><Preview entry={e()} onMeta={setMeta} onSwap={swapped} /></div>
-            <MetaList entry={e()} extra={meta()} />
-          </>
-        )}
+        {(e) => {
+          // An archive being browsed is described as the archive, not as a folder.
+          const archive = () => {
+            const look = e().isDir && !focused() ? folderLook(e().path) : null;
+            return look && !look.isDir ? look : null;
+          };
+          return (
+            <>
+              <header class="pv-head">
+                <div class="pv-head-icon">
+                  <Show when={archive()} fallback={<Thumb entry={e()} size={32} fallbackSize={28} />}>{(a) => <FileIcon entry={a()} size={28} />}</Show>
+                </div>
+                <div class="pv-head-text">
+                  <div class="pv-name" title={e().name}>{e().name || e().path}</div>
+                  <div class="pv-sub">{archive() ? typeLabel(archive()!) : e().isDir && !focused() ? "Current folder" : typeLabel(e())}</div>
+                </div>
+                <Show when={!e().isDir}>
+                  <button class="icon-btn" title="Open" onClick={() => openFile(e())}><ExternalLink size={15} /></button>
+                  <button class="icon-btn" title="Quick Look (Space)" onClick={() => setUi("quickLook", true)}><Maximize2 size={15} /></button>
+                </Show>
+              </header>
+              <div class="pv-body" ref={body}><Preview entry={e()} onMeta={setMeta} onSwap={swapped} /></div>
+              <MetaList entry={e()} type={archive() ? typeLabel(archive()!) : undefined} extra={meta()} />
+            </>
+          );
+        }}
       </Show>
     </aside>
   );

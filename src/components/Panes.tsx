@@ -3,7 +3,7 @@
 
 import { Show } from "solid-js";
 import { X } from "../lib/icons";
-import { basename, isRecycle, isSearch } from "../lib/path";
+import { basename, folderLook, isRecycle, isSearch } from "../lib/path";
 import { closeSplit, fileList, focusPane, paneOf, searchTitle, type Tab } from "../lib/state";
 import FileIcon from "./FileIcon";
 import FileView from "./FileView";
@@ -25,7 +25,7 @@ function Pane(props: { tab: Tab; owner: Tab }) {
     <div class="pane" classList={{ "in-use": split() && inUse(), idle: split() && !inUse() }}>
       <Show when={split()}>
         <div class="pane-head" title={props.tab.p} onMouseDown={use}>
-          <FileIcon entry={{ isDir: true, ext: "", isSymlink: false }} size={14} />
+          <FileIcon entry={folderLook(props.tab.p)} size={14} />
           <span class="pane-name">{label(props.tab.p)}</span>
           {/* Left-to-right marks keep the path reading normally in the end-truncating box. */}
           <span class="pane-path">{`‎${props.tab.p}‎`}</span>
