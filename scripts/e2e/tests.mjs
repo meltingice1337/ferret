@@ -458,6 +458,9 @@ export const tests = [
       const bin = binCount();
       await clickRow(t, "recycle-me.txt");
       await t.c.key("Delete");
+      // Nothing is left selected (so pressing or holding Delete deletes nothing more), and the
+      // cursor is on the item after it.
+      await t.c.waitFor(`${tab}.selection[0]().length === 0 && !!${tab}.cursor[0]() && !${tab}.cursor[0]().endsWith("recycle-me.txt")`, { what: "no selection, the cursor on the next item" });
       let start = Date.now();
       while (existsSync(t.p("recycle-me.txt")) && Date.now() - start < 8000) await sleep(150);
       assert(!existsSync(t.p("recycle-me.txt")), "not recycled");
@@ -774,6 +777,7 @@ export const tests = [
       await t.c.waitFor(`[...document.querySelectorAll(".files .row .name")].some((e) => e.textContent === "on-server.txt")`, { what: "the server's file" });
       await clickRow(t, "on-server.txt");
       await t.c.key("Delete");
+      await t.c.waitFor(`${tab}.selection[0]().length === 0`, { what: "nothing selected after Delete" });
       const trashed = join(t.ssh.home, ".local", "share", "Trash", "files", "on-server.txt");
       let start = Date.now();
       while (!existsSync(trashed) && Date.now() - start < 8000) await sleep(150);

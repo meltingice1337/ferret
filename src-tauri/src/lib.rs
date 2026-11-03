@@ -91,6 +91,7 @@ pub fn run() {
         })
         .setup(move |app| {
             logging::log_startup(app.handle(), admin);
+            logging::watch_main_thread(app.handle().clone());
             remote::init(app.handle());
             let dir = app.path().app_data_dir()?;
             std::fs::create_dir_all(&dir)?;
@@ -135,7 +136,7 @@ pub fn run() {
             });
             Ok(())
         })
-        .invoke_handler(tauri::generate_handler![
+        .invoke_handler(logging::timed(tauri::generate_handler![
             commands::bootstrap,
             commands::get_places,
             commands::shared_state,
@@ -244,7 +245,7 @@ pub fn run() {
             integration::show_window,
             integration::new_window,
             integration::restart_elevated,
-        ])
+        ]))
         .run(context)
         .expect("error while running Ferret");
 }

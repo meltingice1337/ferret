@@ -500,6 +500,22 @@ export async function transferWithPicker(op: "copy" | "move", paths: string[]) {
 
 // ---------- delete ----------
 
+/** Right as a delete starts: the cursor moves to the item after the deleted ones (or before, at
+ *  the end of the list) with nothing selected, so pressing or holding Delete again deletes nothing
+ *  more. The arrow keys go on from there. */
+function stepPastDeleted(t: Tab, paths: string[]) {
+  const order = t.ordered[0]();
+  const gone = new Set(paths.map(pathKey));
+  const firstIdx = order.findIndex((e) => gone.has(pathKey(e.path)));
+  const next = order.slice(Math.max(0, firstIdx)).find((e) => !gone.has(pathKey(e.path)))
+    ?? [...order.slice(0, Math.max(0, firstIdx))].reverse().find((e) => !gone.has(pathKey(e.path)));
+  batch(() => {
+    t.selection[1]([]);
+    t.cursor[1](next?.path ?? null);
+    t.anchor[1](next?.path ?? null);
+  });
+}
+
 export async function deleteItems(paths: string[], permanent: boolean) {
   paths = paths.filter((p) => !busy.has(pathKey(p)));
   if (!paths.length) return;
@@ -513,19 +529,9 @@ export async function deleteItems(paths: string[], permanent: boolean) {
     if (ok === null) return;
   }
   const t = activeTab();
-  // Explorer selects the item after the deleted ones (or before, at the end of the list).
-  const order = t.ordered[0]();
   const gone = new Set(paths.map(pathKey));
-  const firstIdx = order.findIndex((e) => gone.has(pathKey(e.path)));
-  const next = order.slice(Math.max(0, firstIdx)).find((e) => !gone.has(pathKey(e.path)))
-    ?? [...order.slice(0, Math.max(0, firstIdx))].reverse().find((e) => !gone.has(pathKey(e.path)));
-  // Mark busy and move the selection on immediately, so a second Delete acts on the next item.
   paths.forEach((p) => busy.add(pathKey(p)));
-  batch(() => {
-    t.selection[1](next ? [next.path] : []);
-    t.cursor[1](next?.path ?? null);
-    t.anchor[1](next?.path ?? null);
-  });
+  stepPastDeleted(t, paths);
   try {
     const u = await tracked(permanent ? destroy(paths) : recycle(paths));
     // Items skipped after "Skip" / "Skip all" stay where they were.
@@ -543,7 +549,6 @@ export async function deleteItems(paths: string[], permanent: boolean) {
       }, `Moved ${describe(done)} to the Recycle Bin${skippedNote}`);
     // The skipped items get selected, so it's clear what's left (and easy to try again).
     if (left.length) selectAfterReload(t, left);
-    else if (next && !t.selection[0]().length) selectAfterReload(t, [next.path]);
     if (ui.shelf.some((p) => gone.has(pathKey(p)))) setUi("shelf", ui.shelf.filter((p) => !gone.has(pathKey(p))));
   } catch (e) {
     fail("Delete failed", e);
@@ -567,17 +572,8 @@ async function deleteOnServer(paths: string[], permanent: boolean) {
     if (ok === null) return;
   }
   const t = activeTab();
-  const order = t.ordered[0]();
-  const gone = new Set(paths.map(pathKey));
-  const firstIdx = order.findIndex((e) => gone.has(pathKey(e.path)));
-  const next = order.slice(Math.max(0, firstIdx)).find((e) => !gone.has(pathKey(e.path)))
-    ?? [...order.slice(0, Math.max(0, firstIdx))].reverse().find((e) => !gone.has(pathKey(e.path)));
   paths.forEach((p) => busy.add(pathKey(p)));
-  batch(() => {
-    t.selection[1](next ? [next.path] : []);
-    t.cursor[1](next?.path ?? null);
-    t.anchor[1](next?.path ?? null);
-  });
+  stepPastDeleted(t, paths);
   try {
     const u = await tracked(runJob(api.deleteItems(paths, permanent)));
     const failed = u.failed ?? [];
@@ -614,7 +610,6 @@ async function deleteOnServer(paths: string[], permanent: boolean) {
     }
     const left = [...skipped, ...noTrash];
     if (left.length) selectAfterReload(t, await stillThere(left));
-    else if (next && !t.selection[0]().length) selectAfterReload(t, [next.path]);
   } catch (e) {
     fail("Delete failed", e);
   } finally {

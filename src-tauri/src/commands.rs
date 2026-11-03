@@ -2,6 +2,7 @@ use rusqlite::Connection;
 use serde::Serialize;
 use serde_json::Value;
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicU64, Ordering};
 use tauri::{State, WebviewWindow};
 
 use crate::{db, listing, paths, places, recycle, watch::DirWatcher};
@@ -232,12 +233,21 @@ pub fn open_path(path: String) -> Res<()> {
     tauri_plugin_opener::open_path(paths::for_io(&path), None::<&str>).map_err(err)
 }
 
-#[tauri::command]
+/// Off the main thread: watching a folder opens it, which waits on a WSL distro that's starting
+/// or a network share that's gone (20–30 s), and the window would stop answering meanwhile.
+#[tauri::command(async)]
 pub fn watch_dirs(state: State<'_, AppState>, paths: Vec<String>) -> Res<()> {
+    static LATEST: AtomicU64 = AtomicU64::new(0);
+    let this = LATEST.fetch_add(1, Ordering::Relaxed) + 1;
     // Servers can't be watched from here: their shown folders are listed again now and then.
     let (remote, local): (Vec<String>, Vec<String>) = paths.into_iter().partition(|p| crate::paths::is_remote(p));
+    let mut watcher = state.watcher.lock().map_err(err)?;
+    // A newer list came while this one waited for a slow one: it wins.
+    if LATEST.load(Ordering::Relaxed) != this {
+        return Ok(());
+    }
     crate::remote::set_shown(&remote);
-    state.watcher.lock().map_err(err)?.set(local);
+    watcher.set(local);
     Ok(())
 }
 
