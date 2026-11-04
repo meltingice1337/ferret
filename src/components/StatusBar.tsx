@@ -58,11 +58,13 @@ export default function StatusBar() {
     openMenu(r.left, r.top - 8, [
       { heading: true, label: "Group by" },
       ...(Object.keys(GROUP_LABELS) as GroupBy[]).map((k) => ({ label: GROUP_LABELS[k], checked: v().groupBy === k, shortcut: k === "none" ? "Ctrl+G cycles" : undefined, action: () => updateView(t(), { groupBy: k }) })),
+      { separator: true },
+      { label: "Expand all groups", disabled: !t().collapsed[0]().size, action: () => t().collapsed[1](new Set<string>()) },
     ]);
   };
 
   return (
-    <div class="statusbar">
+    <div class="statusbar" role="group" aria-label="Status and view">
       <div class="status-left">
         <Show when={t().loading[0]()}><LoaderCircle size={13} class="spin" /></Show>
         <span>{t().filter[0]().trim() ? `${stats().matching.toLocaleString()} of ${plural(stats().total, "item")}` : plural(stats().total, "item")}</span>
@@ -83,33 +85,33 @@ export default function StatusBar() {
         </Show>
       </div>
       <div class="status-right">
-        <button class="sb-btn" onClick={sortMenu} title="Sort">
+        <button class="sb-btn" aria-haspopup="menu" onClick={sortMenu} title="Sort">
           <ArrowDownUp size={13} /><span>{isRecycle(t().p) && v().sortBy === "modified" ? "Date deleted" : SORT_LABELS[v().sortBy]}</span>
         </button>
-        <button class="sb-btn" classList={{ on: v().groupBy !== "none" }} onClick={groupMenu} title="Group (Ctrl+G)">
+        <button class="sb-btn" classList={{ on: v().groupBy !== "none" }} aria-haspopup="menu" onClick={groupMenu} title="Group (Ctrl+G)">
           <Layers size={13} /><span>{v().groupBy === "none" ? "No grouping" : GROUP_LABELS[v().groupBy]}</span>
         </button>
-        <button class="sb-btn icon" classList={{ on: v().showHidden }} title="Show hidden items (Ctrl+H)"
+        <button class="sb-btn icon" classList={{ on: v().showHidden }} aria-pressed={v().showHidden} title="Show hidden items (Ctrl+H)"
           onClick={() => updateView(t(), { showHidden: !v().showHidden })}>
           {v().showHidden ? <Eye size={14} /> : <EyeOff size={14} />}
         </button>
         <Show when={v().mode === "grid"}>
           <input class="size-slider" type="range" min="48" max="256" step="8" value={v().iconSize}
-            title="Icon size (Ctrl+wheel)"
+            aria-label="Icon size" title="Icon size (Ctrl+wheel)"
             onInput={(e) => updateView(t(), { iconSize: +e.currentTarget.value })} />
         </Show>
-        <button class="sb-btn icon split-btn" classList={{ on: !!stripTab()?.split[0]() }} title={stripTab()?.split[0]() ? "Close split view (Ctrl+\\)" : "Split view: two folders side by side (Ctrl+\\)"}
+        <button class="sb-btn icon split-btn" classList={{ on: !!stripTab()?.split[0]() }} aria-pressed={!!stripTab()?.split[0]()} title={stripTab()?.split[0]() ? "Close split view (Ctrl+\\)" : "Split view: two folders side by side (Ctrl+\\)"}
           onClick={() => toggleSplit()}>
           <Columns2 size={14} />
         </button>
-        <button class="sb-btn icon preview-btn" classList={{ on: ui.previewOpen && previewSpace() > 0 }} disabled={!previewSpace()}
+        <button class="sb-btn icon preview-btn" classList={{ on: ui.previewOpen && previewSpace() > 0 }} aria-pressed={ui.previewOpen && previewSpace() > 0} disabled={!previewSpace()}
           title={previewSpace() ? "Preview pane (Alt+P)" : "Window too narrow for the preview pane: use Quick Look (Space)"}
           onClick={() => { setUi("previewOpen", !ui.previewOpen); persistSession(); }}>
           <PanelRight size={14} />
         </button>
-        <div class="seg">
-          <button classList={{ on: v().mode === "list" }} title="List (Ctrl+1)" onClick={() => updateView(t(), { mode: "list" })}><List size={14} /></button>
-          <button classList={{ on: v().mode === "grid" }} title="Grid (Ctrl+2)" onClick={() => updateView(t(), { mode: "grid" })}><LayoutGrid size={14} /></button>
+        <div class="seg" role="group" aria-label="View">
+          <button classList={{ on: v().mode === "list" }} aria-pressed={v().mode === "list"} title="List (Ctrl+1)" onClick={() => updateView(t(), { mode: "list" })}><List size={14} /></button>
+          <button classList={{ on: v().mode === "grid" }} aria-pressed={v().mode === "grid"} title="Grid (Ctrl+2)" onClick={() => updateView(t(), { mode: "grid" })}><LayoutGrid size={14} /></button>
         </div>
       </div>
       <Show when={!settings.rememberPerFolder && t().dirty[0]()}>

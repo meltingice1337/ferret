@@ -119,6 +119,7 @@ export const api = {
 
   // ---- Recycle Bin & Windows integration ----
   recycleInfo: () => invoke<RecycleInfo>("recycle_info"),
+  noRecycleBin: (paths: string[]) => invoke<string[]>("no_recycle_bin", { paths }),
   /** Starts emptying the Recycle Bin; returns the job id. */
   emptyRecycleBin: () => invoke<number>("empty_recycle_bin"),
   launchTargets: () => invoke<LaunchTarget[]>("launch_targets"),

@@ -9,7 +9,7 @@ import { api } from "./api";
 import { entryFilter } from "./filter";
 import { invalidateFolderSizes } from "./foldersizes";
 import { kindOf, plural } from "./format";
-import { archiveRoot, isVirtual, basename, inRecycleBin, isArchiveName, isRecycle, isRemote, isSearch, isWithin, parent, pathKey, remoteParts, samePath } from "./path";
+import { archiveRoot, isVirtual, basename, inRecycleBin, isArchiveName, isRecycle, isRemote, isSearch, isWithin, isWsl, parent, pathKey, remoteParts, samePath } from "./path";
 import { serverName } from "./remote";
 import {
   otherPane, setJobsRunning,
@@ -386,8 +386,8 @@ export const isCut = (path: string) => !!ui.clipboard?.cut && ui.clipboard.paths
 
 // ---------- copy / move ----------
 
-function askConflict(conflicts: import("./types").Conflict[], op: "copy" | "move", dest: string): Promise<Policy | null> {
-  return new Promise((resolve) => setUi("conflict", { conflicts, op, dest, resolve }));
+function askConflict(conflicts: import("./types").Conflict[], op: "copy" | "move", dest: string, noBin: boolean): Promise<Policy | null> {
+  return new Promise((resolve) => setUi("conflict", { conflicts, op, dest, noBin, resolve }));
 }
 
 /** Split view: copies or moves the selection into the other pane's folder. */
@@ -419,7 +419,9 @@ export async function transferTo(op: "copy" | "move", sources: string[], dest: s
   let policy: Policy = "keepBoth";
   const conflicts = await api.checkConflicts(sources, dest).catch(() => []);
   if (conflicts.length) {
-    const p = await askConflict(conflicts, op, dest);
+    // (A server's trash takes what's replaced there.)
+    const noBin = !isRemote(dest) && (await api.noRecycleBin([dest]).catch(() => [dest])).length > 0;
+    const p = await askConflict(conflicts, op, dest, noBin);
     if (!p) return;
     policy = p;
   }
@@ -520,12 +522,35 @@ export async function deleteItems(paths: string[], permanent: boolean) {
   paths = paths.filter((p) => !busy.has(pathKey(p)));
   if (!paths.length) return;
   touch(...paths);
-  if (paths.some(isRemote)) return deleteOnServer(paths.filter(isRemote), permanent);
+  if (paths.some(isRemote)) {
+    const rest = paths.filter((p) => !isRemote(p));
+    if (rest.length) void deleteItems(rest, permanent);
+    return deleteOnServer(paths.filter(isRemote));
+  }
   // Deleting inside the Recycle Bin is for good.
   if (paths.some(inRecycleBin)) return purgeFromBin(paths.filter(inRecycleBin));
   if (inArchive(paths)) return toast("Deleting inside archives isn't supported yet", "error");
+  // What has no Recycle Bin (WSL, network folders, USB sticks) goes for good, once it's agreed to.
+  // Busy until Windows has answered: a second press of Delete mustn't start another.
+  let noBin: string[] = [];
+  if (!permanent) {
+    paths.forEach((p) => busy.add(pathKey(p)));
+    noBin = await api.noRecycleBin(paths).catch(() => paths);
+    paths.forEach((p) => busy.delete(pathKey(p)));
+  }
+  if (noBin.length) {
+    const rest = paths.filter((p) => !noBin.includes(p));
+    if (rest.length) void deleteItems(rest, false);
+    paths = noBin;
+    permanent = true;
+  }
   if (permanent) {
-    const ok = await ask({ title: `Permanently delete ${describe(paths)}?`, message: "This can't be undone. The items won't go to the Recycle Bin.", confirmLabel: "Delete permanently", danger: true });
+    const place = isWsl(paths[0]) ? "WSL" : paths[0].startsWith("\\\\") ? "A network folder" : "This drive";
+    const ok = await ask({
+      title: `Permanently delete ${describe(paths)}?`,
+      message: noBin.length ? `${place} has no Recycle Bin, so this can't be undone.` : "This can't be undone. The items won't go to the Recycle Bin.",
+      confirmLabel: "Delete permanently", danger: true,
+    });
     if (ok === null) return;
   }
   const t = activeTab();
@@ -547,8 +572,10 @@ export async function deleteItems(paths: string[], permanent: boolean) {
         undo: () => unrecycle(done),
         redo: () => recycle(done),
       }, `Moved ${describe(done)} to the Recycle Bin${skippedNote}`);
-    // The skipped items get selected, so it's clear what's left (and easy to try again).
+    // The skipped items get selected, so it's clear what's left (and easy to try again). The
+    // list reloads either way: not everywhere tells Ferret about changes (WSL doesn't).
     if (left.length) selectAfterReload(t, left);
+    else reload(t);
     if (ui.shelf.some((p) => gone.has(pathKey(p)))) setUi("shelf", ui.shelf.filter((p) => !gone.has(pathKey(p))));
   } catch (e) {
     fail("Delete failed", e);
@@ -560,55 +587,19 @@ export async function deleteItems(paths: string[], permanent: boolean) {
   }
 }
 
-/** What a server's delete job says about an item its trash can't take (remote/fs.rs). */
-const NOT_TRASHABLE = "not_trashable:";
-
-/** Delete on a server: to its trash (undo moves the items back), or for good. Items its trash
- *  can't take (on another disk there) are offered for deleting for good. */
-async function deleteOnServer(paths: string[], permanent: boolean) {
+/** Delete on a server: for good, once it's agreed to, as in WSL. */
+async function deleteOnServer(paths: string[]) {
   const server = serverName(paths[0]);
-  if (permanent) {
-    const ok = await ask({ title: `Delete ${describe(paths)} for good?`, message: `This can't be undone: ${server} deletes ${paths.length === 1 ? "it" : "them"} without a trash.`, confirmLabel: "Delete for good", danger: true });
-    if (ok === null) return;
-  }
+  const ok = await ask({ title: `Permanently delete ${describe(paths)}?`, message: `This can't be undone: ${server} deletes ${paths.length === 1 ? "it" : "them"} right away.`, confirmLabel: "Delete permanently", danger: true });
+  if (ok === null) return;
   const t = activeTab();
   paths.forEach((p) => busy.add(pathKey(p)));
   stepPastDeleted(t, paths);
   try {
-    const u = await tracked(runJob(api.deleteItems(paths, permanent)));
-    const failed = u.failed ?? [];
-    const noTrash = failed.filter(([, why]) => why.startsWith(NOT_TRASHABLE)).map(([p]) => p);
-    const skipped = failed.filter(([, why]) => !why.startsWith(NOT_TRASHABLE)).map(([p]) => p);
-    const skippedNote = skipped.length ? ` · ${plural(skipped.length, "item")} skipped` : "";
-    if (permanent) {
-      const done = paths.filter((p) => !failed.some(([f]) => samePath(f, p)));
-      if (done.length) toast(`Deleted ${describe(done)} on ${server}${skippedNote}`);
-    } else if (u.pairs?.length) {
-      // Each item and where it is in the trash, for undo (and again after a redo).
-      let pairs = u.pairs;
-      const done = pairs.map(([from]) => from);
-      record({
-        label: `Delete ${describe(done)}`,
-        undo: () => moveBack(pairs),
-        redo: async () => {
-          const again = await runJob(api.deleteItems(done, false));
-          pairs = again.pairs ?? [];
-          return again;
-        },
-      }, `Moved ${describe(done)} to the trash on ${server}${skippedNote}`);
-    }
-    if (noTrash.length) {
-      const ok = await ask({
-        title: `Delete ${describe(noTrash)} for good?`,
-        message: `${server}'s trash can't take ${noTrash.length === 1 ? "it" : "them"} (${noTrash.length === 1 ? "it's" : "they're"} on another disk there). Deleting can't be undone.`,
-        confirmLabel: "Delete for good", danger: true,
-      });
-      if (ok !== null) {
-        await tracked(runJob(api.deleteItems(noTrash, true)));
-        toast(`Deleted ${describe(noTrash)} on ${server}`);
-      }
-    }
-    const left = [...skipped, ...noTrash];
+    const u = await tracked(runJob(api.deleteItems(paths, true)));
+    const left = (u.failed ?? []).map(([p]) => p);
+    const done = paths.filter((p) => !left.some((f) => samePath(f, p)));
+    if (done.length) toast(`Deleted ${describe(done)} on ${server}${left.length ? ` · ${plural(left.length, "item")} skipped` : ""}`);
     if (left.length) selectAfterReload(t, await stillThere(left));
   } catch (e) {
     fail("Delete failed", e);

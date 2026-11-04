@@ -122,7 +122,7 @@ function cycleArea(dir: 1 | -1) {
   const q = (s: string) => document.querySelector<HTMLElement>(s);
   const areas = [
     { box: q(".toolbar"), target: () => q(".path-edit input") ?? q(".crumbs .crumb.last") },
-    { box: q(".sidebar"), target: () => q(".sidebar .side-item.active") ?? q(".sidebar .side-item") },
+    { box: q(".sidebar"), target: () => q(".sidebar .side-item.active") ?? q(".sidebar .drive.active") ?? q(".sidebar .side-item") },
     { box: q(".panes"), target: () => fileList() },
     { box: q(".preview"), target: () => q(".preview button, .preview [tabindex='0']") },
   ].filter((a) => a.box?.offsetParent && a.target());
@@ -275,7 +275,14 @@ export default function App() {
         const inFiles = !!target.closest(".fileview") || target === document.body;
         if (e.key === "Delete" && inFiles) { e.preventDefault(); return deleteItems(paths(), e.shiftKey); }
         if (e.key === "F2" && inFiles) { e.preventDefault(); return startRename(t); }
-        if ((e.key === "F10" && e.shiftKey) || e.key === "ContextMenu") { e.preventDefault(); return keyboardMenu(); }
+        if ((e.key === "F10" && e.shiftKey) || e.key === "ContextMenu") {
+          e.preventDefault();
+          if (target.closest(".files") || target === document.body) return keyboardMenu();
+          // Anything else with a menu (a sidebar item, a tab, a column heading…) opens its own, by its corner.
+          const r = target.getBoundingClientRect();
+          target.dispatchEvent(new MouseEvent("contextmenu", { bubbles: true, cancelable: true, button: 2, detail: 1, clientX: r.left + 12, clientY: r.bottom }));
+          return;
+        }
       }
 
       // "/" opens search when not typing somewhere else.
@@ -411,6 +418,7 @@ export default function App() {
         {/* The preview is a column inside the files panel, so that panel (and the window
             buttons in its corner) always reaches the right edge of the window. */}
         <main class="main panel" style={{ "--pv-w": `${ui.previewOpen ? previewSpace() : 0}px` }}>
+          <h1 class="sr-only">{windowTitle(activeTab().p)}</h1>
           <TitleBar />
           <Toolbar />
           <div class="content">
@@ -440,10 +448,10 @@ export default function App() {
       {/* Last: a connection's question goes over everything (it may come from any dialog's action). */}
       <RemotePromptDialog />
       <DragGhost />
-      <div class="toasts">
+      <div class="toasts" role="status">
         <For each={ui.toasts}>
           {(t) => (
-            <div class="toast" classList={{ error: t.kind === "error" }}>
+            <div class="toast" classList={{ error: t.kind === "error" }} role={t.kind === "error" ? "alert" : undefined}>
               <span>{t.text}</span>
               <Show when={t.action}>
                 <button class="toast-action" onClick={() => { t.action!.run(); dismissToast(t.id); }}>{t.action!.label}</button>

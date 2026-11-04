@@ -39,10 +39,11 @@ const sameVolume = (a: string, b: string) => {
   return root(a) === root(b);
 };
 
-function chooseOp(sources: string[], target: string, e: { ctrlKey: boolean; shiftKey: boolean }, inArchive: boolean): "copy" | "move" {
+function chooseOp(sources: string[], target: string, e: { ctrlKey: boolean; shiftKey: boolean }, inArchive: boolean, copies = false): "copy" | "move" {
   if (inArchive) return "copy";
   if (e.ctrlKey) return "copy";
   if (e.shiftKey) return "move";
+  if (copies) return "copy";
   return sameVolume(sources[0], target) ? "move" : "copy";
 }
 
@@ -80,11 +81,21 @@ function hoverTabs(x: number, y: number) {
   if (id) tabHoverTimer = window.setTimeout(() => setActiveId(+id), 650);
 }
 
+/** For a drag from outside the list (Ctrl+K's results). */
+export interface DragFrom {
+  /** It copies unless Shift says otherwise, and dropping back in the item's own folder does nothing. */
+  copies?: boolean;
+  /** What's known about an item that isn't on screen, for handing it to another app. */
+  known?: (path: string) => { isDir: boolean; size: number } | undefined;
+  /** It landed somewhere in Ferret. */
+  onDropped?: () => void;
+}
+
 /**
  * Call from an item's mousedown. `getPaths` runs once the drag actually starts
  * (after selection has settled).
  */
-export function beginDrag(down: MouseEvent, getPaths: () => string[], inArchive = false) {
+export function beginDrag(down: MouseEvent, getPaths: () => string[], inArchive = false, from: DragFrom = {}) {
   if (down.button !== 0) return;
   const sx = down.clientX;
   const sy = down.clientY;
@@ -112,7 +123,7 @@ export function beginDrag(down: MouseEvent, getPaths: () => string[], inArchive 
     setHover(t?.el ?? null);
     hoverTabs(e.clientX, e.clientY);
     const target = t?.path ?? null;
-    setDrag({ paths, x: e.clientX, y: e.clientY, target, op: target ? chooseOp(paths, target, e, inArchive) : "move", inArchive });
+    setDrag({ paths, x: e.clientX, y: e.clientY, target, op: target ? chooseOp(paths, target, e, inArchive, from.copies) : from.copies ? "copy" : "move", inArchive });
   };
 
   const onUp = (e: MouseEvent) => {
@@ -122,16 +133,25 @@ export function beginDrag(down: MouseEvent, getPaths: () => string[], inArchive 
     // Swallow the click that follows a drag.
     swallowNextClick();
     if (!d.target) return;
+    const home = paths.every((p) => samePath(parent(p), d.target));
+    if (from.copies && home && !e.ctrlKey) return;
+    from.onDropped?.();
     if (d.target === SHELF) return addToShelf(paths);
     if (isRecycle(d.target)) return deleteItems(paths, e.shiftKey);
-    const op = chooseOp(paths, d.target, e, inArchive);
-    if (op === "move" && paths.every((p) => samePath(parent(p), d.target))) return;
+    const op = chooseOp(paths, d.target, e, inArchive, from.copies);
+    if (op === "move" && home) return;
     transferTo(op, paths, d.target);
   };
 
   const onKey = (e: KeyboardEvent) => {
-    if (e.key === "Escape") cleanup();
-    else if (drag()) setDrag((d) => d && { ...d, op: d.target ? chooseOp(paths, d.target, e, inArchive) : d.op });
+    if (e.key === "Escape") {
+      // Only the drag: not the selection, or the search it started from.
+      e.preventDefault();
+      e.stopPropagation();
+      cleanup();
+      // The mouse is still down: it coming up mustn't count as a click on the item.
+      if (started) window.addEventListener("mouseup", swallowNextClick, { capture: true, once: true });
+    } else if (drag()) setDrag((d) => d && { ...d, op: d.target ? chooseOp(paths, d.target, e, inArchive, from.copies) : d.op });
   };
 
   // Alt+Tab (or anything else taking focus) mid-drag: the pointer never left the window,
@@ -148,18 +168,18 @@ export function beginDrag(down: MouseEvent, getPaths: () => string[], inArchive 
     const d = drag();
     cleanup();
     const dragged = d?.paths ?? paths;
+    const shown = new Map(activeTab().entries[0]().map((e) => [e.path, e]));
+    const about = (p: string) => shown.get(p) ?? from.known?.(p);
     // A server's files aren't on this PC for other apps to take: small ones are downloaded first
     // (the drag starts once they're here), folders and big ones are copied to a folder in Ferret.
     if (dragged.some(isRemote)) {
-      const shown = new Map(activeTab().entries[0]().map((e) => [e.path, e]));
-      const items = dragged.map((p) => shown.get(p));
+      const items = dragged.map(about);
       if (items.some((e) => !e || e.isDir)) return toast("To use a server's folders in another app, copy them to a folder in Ferret first");
       if (items.reduce((n, e) => n + (e?.size ?? 0), 0) > DRAG_DOWNLOAD_MAX) return toast("Those files are big to drag out of a server: copy them to a folder in Ferret first");
     }
     try {
       // Archive entries need real files before other apps can take them (server files too).
-      const shown = new Map(activeTab().entries[0]().map((e) => [e.path, e]));
-      const real = (await Promise.all(dragged.map((p) => realPath({ ...shown.get(p), path: p, inArchive }, true)))).filter(Boolean) as string[];
+      const real = (await Promise.all(dragged.map((p) => realPath({ ...about(p), path: p, inArchive }, true)))).filter(Boolean) as string[];
       const icon = (await iconPath) ?? "";
       if (real.length) await startDrag({ item: real, icon });
     } catch (err) {

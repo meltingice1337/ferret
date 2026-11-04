@@ -51,9 +51,9 @@
 .mx-slider input[type="range"] { flex: 1; accent-color: var(--accent); }
 .mx-slider-val { min-width: 64px; text-align: right; font-weight: 600; color: var(--accent-text); }
 .mx-hint { margin: 6px 0 0; font-size: 11.5px; line-height: 1.4; color: var(--fg-3); }
-.mx-hint.warn { color: #f59e0b; display: flex; gap: 6px; align-items: flex-start; }
+.mx-hint.warn { color: var(--warn-text); display: flex; gap: 6px; align-items: flex-start; }
 .mx-hint.warn svg { flex: none; margin-top: 1px; }
-.mx-hint.err { color: #ef4444; }
+.mx-hint.err { color: var(--danger-text); }
 .mx-privacy { margin-top: 2px; padding-top: 10px; border-top: 1px solid var(--line); }
 .mx-select {
   width: 100%; height: 30px; padding: 0 8px; border-radius: 7px; background: var(--raised); border: 1px solid var(--line-2);

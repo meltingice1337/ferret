@@ -4,7 +4,7 @@
 const KEYS = {
   Enter: [13, "Enter"], Backspace: [8, "Backspace"], Delete: [46, "Delete"], Escape: [27, "Escape"], Tab: [9, "Tab"],
   Home: [36, "Home"], End: [35, "End"], ArrowUp: [38, "ArrowUp"], ArrowDown: [40, "ArrowDown"], ArrowLeft: [37, "ArrowLeft"],
-  ArrowRight: [39, "ArrowRight"], F2: [113, "F2"], F5: [116, "F5"], ",": [188, "Comma"],
+  ArrowRight: [39, "ArrowRight"], F2: [113, "F2"], F5: [116, "F5"], F10: [121, "F10"], ",": [188, "Comma"],
 };
 const MODS = { Alt: 1, Control: 2, Meta: 4, Shift: 8 };
 

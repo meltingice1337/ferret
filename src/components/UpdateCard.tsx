@@ -73,7 +73,7 @@ export function WhatsNewDialog() {
   return (
     <Show when={updater.notesOpen}>
       <div class="modal-backdrop" onMouseDown={(e) => e.target === e.currentTarget && close()}>
-        <div class="modal whats-new" role="dialog" aria-label="What's new" tabIndex={-1}
+        <div class="modal whats-new" role="dialog" aria-modal="true" aria-label="What's new" tabIndex={-1}
           ref={(el) => queueMicrotask(() => el.focus())}
           onKeyDown={(e) => { if (e.key === "Escape") close(); e.stopPropagation(); }}>
           <header class="wn-hero">

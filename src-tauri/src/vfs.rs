@@ -143,11 +143,11 @@ impl Vfs for Local {
         }
     }
     fn displace(&self, p: &str) -> Res<Option<String>> {
-        match trash::delete(io(p)) {
-            Ok(()) => Ok(Some(p.to_string())),
-            // Where there's no Recycle Bin (some network and WSL shares).
-            Err(_) => self.remove(p).map(|_| None).map_err(|e| format!("Couldn't replace {p}: {e}")),
+        // No Recycle Bin here: it goes for good, and isn't reported as something undo can restore.
+        if !crate::recycle::has_bin(p) {
+            return self.remove(p).map(|_| None).map_err(|e| format!("Couldn't replace {p}: {e}"));
         }
+        trash::delete(io(p)).map(|()| Some(p.to_string())).map_err(|e| format!("Couldn't replace {p}: {e}"))
     }
     fn same(&self, a: &str, b: &str) -> bool {
         let root = |p: &str| -> String {

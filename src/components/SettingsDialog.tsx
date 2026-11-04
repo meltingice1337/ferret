@@ -33,7 +33,7 @@ export default function SettingsDialog() {
   return (
     <Show when={ui.settingsOpen}>
       <div class="modal-backdrop" onMouseDown={(e) => e.target === e.currentTarget && setUi("settingsOpen", false)}>
-        <div class="modal" role="dialog" aria-label="Settings" onKeyDown={(e) => { if (e.key === "Escape") setUi("settingsOpen", false); e.stopPropagation(); }} tabIndex={-1}
+        <div class="modal" role="dialog" aria-modal="true" aria-label="Settings" onKeyDown={(e) => { if (e.key === "Escape") setUi("settingsOpen", false); e.stopPropagation(); }} tabIndex={-1}
           ref={(el) => queueMicrotask(() => el.focus())}>
           <header class="modal-head">
             <h2>Settings</h2>
@@ -307,7 +307,7 @@ const KEYS: [string, string][] = [
   ["Del / Shift+Del", "Recycle / delete permanently"], ["Ctrl+Z / Ctrl+Y", "Undo / redo"],
   ["Alt+Enter", "Properties"], ["Ctrl+Shift+C", "Copy path"], ["Ctrl+D", "Pin the selected item (or this folder) to favorites"],
   // View
-  ["Ctrl+1 / Ctrl+2", "List / grid"], ["Ctrl+G", "Cycle grouping"], ["Ctrl+H", "Show hidden"],
+  ["Ctrl+1 / Ctrl+2", "List / grid"], ["Ctrl+G", "Cycle grouping"], ["← / →", "Collapse / expand a group (Ctrl+Shift in a grid)"], ["Ctrl+H", "Show hidden"],
   ["Ctrl+wheel", "Grid icon size"], ["Ctrl+,", "Settings"],
 ];
 

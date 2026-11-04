@@ -236,6 +236,7 @@ pub fn run() {
             search::search_service_outdated,
             // Recycle Bin and Windows integration
             recycle::recycle_info,
+            recycle::no_recycle_bin,
             recycle::empty_recycle_bin,
             integration::launch_targets,
             integration::default_manager_status,

@@ -58,7 +58,8 @@ export default defineConfig(() => ({
       : undefined,
     watch: {
       // 3. tell Vite to ignore watching `src-tauri`
-      ignored: ["**/src-tauri/**"],
+      // (and the e2e build's output: building it mustn't reload a dev window)
+      ignored: ["**/src-tauri/**", "**/dist-e2e/**"],
     },
   },
 }));

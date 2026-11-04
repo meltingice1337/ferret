@@ -231,6 +231,7 @@ pub fn check_conflicts(sources: Vec<String>, dest: String) -> Vec<Conflict> {
 // ---------- copy / move ----------
 
 pub use crate::vfs::Policy;
+use crate::linux::{Host, Removal};
 use crate::vfs::{self, Local};
 
 /// Whether a new folder can be created in `dir` (creates and removes a probe folder).
@@ -263,6 +264,40 @@ fn remove_any(p: &Path) -> std::io::Result<()> {
         fs::remove_dir_all(p)
     } else {
         fs::remove_file(p)
+    }
+}
+
+/// Deletes for good one item at a time, so Cancel can stop it midway (a folder in one call couldn't
+/// be): what was reached is gone, the rest stays. Links go, never what they point to.
+fn remove_until(p: &Path, stop: &dyn Fn() -> bool) -> std::io::Result<()> {
+    if stop() {
+        return Err(std::io::Error::other("Cancelled"));
+    }
+    let m = fs::symlink_metadata(p)?;
+    if m.is_dir() {
+        for e in fs::read_dir(p)? {
+            remove_until(&e?.path(), stop)?;
+        }
+    }
+    #[cfg(windows)]
+    let as_folder = {
+        use std::os::windows::fs::FileTypeExt;
+        m.is_dir() || m.file_type().is_symlink_dir()
+    };
+    #[cfg(not(windows))]
+    let as_folder = m.is_dir();
+    let remove = || if as_folder { fs::remove_dir(p) } else { fs::remove_file(p) };
+    match remove() {
+        // Read-only: as for Explorer, that doesn't stop a delete (through a link it would change
+        // what the link points to, so not those).
+        Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied && m.permissions().readonly() && !m.file_type().is_symlink() => {
+            let mut writable = m.permissions();
+            #[allow(clippy::permissions_set_readonly_false)] // On Windows it only clears the attribute.
+            writable.set_readonly(false);
+            fs::set_permissions(p, writable)?;
+            remove()
+        }
+        done => done,
     }
 }
 
@@ -518,20 +553,37 @@ pub fn delete_items(app: AppHandle, items: Vec<String>, permanent: bool) -> Res<
     if crate::remote::ops::involves(&items, None) {
         return crate::remote::ops::delete(&app, items, permanent);
     }
+    if let Some(p) = items.iter().find(|p| crate::wsl::linux_path(p).is_some_and(|(_, l)| crate::linux::protected(&l))) {
+        return Err(refused_delete(p));
+    }
     if let Some(p) = items.iter().take(256).find(|p| crate::shellops::needs_admin_delete(p)) {
         return Err(admin_err(format!("delete “{}”", file_name(p))));
     }
-    let label = if items.len() == 1 {
-        format!("{} “{}”", if permanent { "Deleting" } else { "Recycling" }, file_name(&items[0]))
+    // WSL has no Recycle Bin: those are deleted for good, in Linux (the window asked first).
+    let (in_wsl, items): (Vec<String>, Vec<String>) = items.into_iter().partition(|p| crate::wsl::linux_path(p).is_some());
+    // Without a Recycle Bin it's for good whatever was asked for, so it says so and Cancel works.
+    let permanent = permanent || items.iter().all(|p| !crate::recycle::has_bin(p));
+    let count = in_wsl.len() + items.len();
+    let label = if count == 1 {
+        format!("{} “{}”", if permanent { "Deleting" } else { "Recycling" }, in_wsl.first().or(items.first()).map(|p| file_name(p)).unwrap_or_default())
     } else {
-        format!("{} {} items", if permanent { "Deleting" } else { "Recycling" }, items.len())
+        format!("{} {count} items", if permanent { "Deleting" } else { "Recycling" })
     };
-    log::info!("{}: {}", if permanent { "delete permanently" } else { "recycle" }, crate::logging::paths(&items));
+    if !in_wsl.is_empty() {
+        log::info!("delete permanently in WSL: {}", crate::logging::paths(&in_wsl));
+    }
+    if !items.is_empty() {
+        log::info!("{}: {}", if permanent { "delete permanently" } else { "recycle" }, crate::logging::paths(&items));
+    }
     Ok(jobs::spawn(&app, if permanent { "delete" } else { "recycle" }, &label, move |ctx| {
-        ctx.set_totals(0, items.len() as u64);
+        ctx.set_totals(0, count as u64);
         // Like Explorer: an item that can't go (open in another program, protected) pauses the
         // job with Try again / Skip / Skip all / Cancel instead of failing the whole job.
         let mut skip_all = false;
+        delete_in_linux(ctx, &in_wsl, &mut skip_all)?;
+        if items.is_empty() {
+            return Ok(());
+        }
         let job_start = std::time::Instant::now();
         let (mut fast_ok, mut fast_failed, mut slowest) = (0usize, 0usize, (std::time::Duration::ZERO, String::new()));
         for batch in recycle_units(&items, permanent).iter() {
@@ -568,11 +620,13 @@ pub fn delete_items(app: AppHandle, items: Vec<String>, permanent: bool) -> Res<
                 let item_start = std::time::Instant::now();
                 loop {
                     let res = if permanent {
-                        remove_any(&path).map_err(|e| format!("Couldn't delete “{}”: {e}", file_name(p)))
+                        remove_until(&path, &|| ctx.is_cancelled()).map_err(|e| format!("Couldn't delete “{}”: {e}", file_name(p)))
                     } else {
                         trash::delete(&path).map_err(|e| explain_delete_failure(&path, &file_name(p), &e.to_string()))
                     };
                     let Err(why) = res else { break };
+                    // Cancelled while it ran: nothing to ask about.
+                    ctx.check()?;
                     if skip_all {
                         ctx.failed(p.clone(), why);
                         break;
@@ -609,6 +663,76 @@ pub fn delete_items(app: AppHandle, items: Vec<String>, permanent: bool) -> Res<
         );
         Ok(())
     }))
+}
+
+/// Why a delete won't take a folder a whole system depends on (`linux::protected`).
+pub(crate) fn refused_delete(p: &str) -> String {
+    format!("Ferret doesn't delete “{}”: too much depends on it", file_name(p))
+}
+
+/// Most characters of paths on one command line (Windows allows 32,767 in all for `wsl.exe`).
+const LINUX_DELETE_BATCH: usize = 24_000;
+
+/// Deletes items for good on the Linux system they're on (a WSL distro, a server that runs
+/// commands): from here, every file would go over the bridge to it, and a folder would be one
+/// call nothing can stop.
+pub(crate) fn delete_in_linux(ctx: &JobCtx, items: &[String], skip_all: &mut bool) -> Res<()> {
+    let mut rest = items;
+    while let Some(first) = rest.first() {
+        ctx.check()?;
+        let Some((host, _)) = Host::of(first) else { break };
+        // As many as one command line takes, of one system.
+        let mut room = LINUX_DELETE_BATCH;
+        let fitting = rest.iter().take_while(|p| {
+            let fits = room >= p.encode_utf16().count() && Host::of(p).is_some_and(|(h, _)| h == host);
+            room = room.saturating_sub(p.encode_utf16().count());
+            fits
+        });
+        let n = fitting.count().max(1);
+        let (batch, after) = rest.split_at(n);
+        rest = after;
+        for (item, why) in batch.iter().zip(rm_in_linux(ctx, &host, batch)?) {
+            let Some(why) = why else { continue };
+            // What it said first, then Try again runs it anew.
+            let mut first = Some(why);
+            let deleted = per_item(ctx, skip_all, item, || match first.take() {
+                Some(why) => Err(why),
+                None => match rm_in_linux(ctx, &host, std::slice::from_ref(item))?.pop().flatten() {
+                    Some(why) => Err(why),
+                    None => Ok(()),
+                },
+            })?;
+            if !deleted {
+                ctx.file_done();
+            }
+        }
+    }
+    Ok(())
+}
+
+/// One `rm` run: for each item, why it wasn't deleted (None: it was). Err when cancelled.
+fn rm_in_linux(ctx: &JobCtx, host: &Host, items: &[String]) -> Res<Vec<Option<String>>> {
+    let couldnt = |p: &str, why: &str| format!("Couldn't delete “{}”: {why}", file_name(p));
+    let linux: Vec<String> = items.iter().filter_map(|p| Host::of(p).map(|(_, l)| l)).collect();
+    let mut outcome: Vec<Option<String>> = items.iter().map(|p| Some(couldnt(p, "the delete stopped before getting to it"))).collect();
+    let started = std::time::Instant::now();
+    let finished = host
+        .remove_all(&linux, &|| ctx.is_cancelled(), &mut |r| match r {
+            Removal::Started(i) => ctx.set_current(&file_name(&items[i])),
+            Removal::Failed(i, why) => outcome[i] = Some(couldnt(&items[i], &why)),
+            // rm says nothing about what it didn't find: only what's really gone counts.
+            Removal::Deleted(i) if vfs::exists(&*vfs::of(&items[i]), &items[i]) => outcome[i] = Some(couldnt(&items[i], "it's still there")),
+            Removal::Deleted(i) => {
+                outcome[i] = None;
+                ctx.file_done();
+            }
+        })
+        .map_err(|e| format!("Couldn't delete on {}: {e}", host.label()))?;
+    log::info!("delete on {}: {} items in {:?}{}", host.label(), items.len(), started.elapsed(), if finished { "" } else { ", stopped" });
+    if !finished {
+        ctx.check()?;
+    }
+    Ok(outcome)
 }
 
 /// Anything slower than this gets a log line (where did a long delete spend its time?).
@@ -1014,6 +1138,42 @@ pub async fn read_bytes(path: String, count: Option<u64>) -> Res<Vec<u8>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A folder with a read-only file and folder, and a link to a folder that must stay.
+    #[test]
+    fn remove_until_deletes_and_stops() {
+        let root = std::env::temp_dir().join(format!("ferret-remove-until-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        let (dir, keep) = (root.join("dir"), root.join("keep"));
+        fs::create_dir_all(dir.join("sub/readonly")).unwrap();
+        fs::create_dir_all(&keep).unwrap();
+        fs::write(keep.join("kept.txt"), "kept").unwrap();
+        fs::write(dir.join("sub/a.txt"), "a").unwrap();
+        fs::write(dir.join("sub/readonly/f.txt"), "f").unwrap();
+        for p in [dir.join("sub/a.txt"), dir.join("sub/readonly")] {
+            let mut perm = fs::metadata(&p).unwrap().permissions();
+            perm.set_readonly(true);
+            fs::set_permissions(&p, perm).unwrap();
+        }
+        // A junction needs no special rights.
+        #[cfg(windows)]
+        {
+            let out = std::process::Command::new("cmd").args(["/c", "mklink", "/J"]).arg(dir.join("junction")).arg(&keep).output().unwrap();
+            assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+        }
+        // Stopped right away: nothing goes.
+        let e = remove_until(&dir, &|| true).unwrap_err();
+        assert_eq!(e.to_string(), "Cancelled");
+        assert!(dir.join("sub/a.txt").exists());
+        // Stopped midway: some goes, the folder stays.
+        let asked = std::cell::Cell::new(0);
+        assert!(remove_until(&dir, &|| { asked.set(asked.get() + 1); asked.get() > 2 }).is_err());
+        assert!(dir.exists());
+        remove_until(&dir, &|| false).unwrap();
+        assert!(!dir.exists());
+        assert_eq!(fs::read_to_string(keep.join("kept.txt")).unwrap(), "kept", "the link's target stays");
+        fs::remove_dir_all(&root).unwrap();
+    }
 
     #[test]
     fn names() {

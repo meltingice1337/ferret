@@ -147,7 +147,7 @@ function JsonNode(props: { k: string | null; value: unknown; depth: number; last
   const entries = createMemo(() => (isObj() ? Object.entries(props.value as object) : []));
   const isArr = () => Array.isArray(props.value);
   const LIMIT = 500;
-  const key = () => props.k !== null && <><span class="j-key">{isArr() || /^\d+$/.test(props.k!) ? props.k : `"${props.k}"`}</span><span class="j-punc">: </span></>;
+  const key = () => props.k !== null && <><span class="j-key">{/^\d+$/.test(props.k!) ? props.k : `"${props.k}"`}</span><span class="j-punc">: </span></>;
   const scalar = (v: unknown) => {
     if (v === null) return <span class="j-null">null</span>;
     if (typeof v === "string") return <span class="j-str">"{v.length > 2000 ? v.slice(0, 2000) + "…" : v}"</span>;

@@ -15,7 +15,7 @@ import { enter } from "../lib/motion";
 import { openSearchPalette } from "./SearchPalette";
 import { folderSizes, requestFolderSizes, sizeOrder, sizesApply, sizesEpoch, uncounted } from "../lib/foldersizes";
 import { connectionOf, navigate, OFFLINE } from "../lib/state";
-import { activeTab, ask, focusPane, goUp, holdKeys, jobsRunning, promptSaveSearch, savedSearch, openEntry, openMenu, persistSettings, refocusList, releaseKeys, reload, setSettings, setUi, settings, sortBy, takeTypeAhead, toast, ui, updateView, type Tab } from "../lib/state";
+import { activeTab, ask, focusPane, goUp, RESIZE_STEP, holdKeys, jobsRunning, promptSaveSearch, savedSearch, openEntry, openMenu, persistSettings, refocusList, releaseKeys, reload, setSettings, setUi, settings, sortBy, takeTypeAhead, toast, ui, updateView, type Tab } from "../lib/state";
 import type { Entry, ListColumn, SortBy } from "../lib/types";
 
 export { GROUP_LABELS, SORT_LABELS } from "./menus";
@@ -246,6 +246,10 @@ export default function FileView(props: { tab: Tab }) {
 
   const ordered = createMemo(() => rows().flatMap((r) => (r.kind === "items" ? r.items : [])));
   createEffect(() => t.ordered[1](ordered()));
+  // For screen readers: only some rows exist at a time, so each says where it is in the whole list.
+  const positions = createMemo(() => new Map(ordered().map((e, i) => [e.path, i])));
+  const optionId = (path: string) => `file-${t.id}-${positions().get(path)}`;
+  const posInSet = (path: string) => (positions().get(path) ?? 0) + 1;
 
   // Filtering (or hiding hidden files) drops now-invisible items from the selection,
   // so actions like Delete only ever touch what's on screen.
@@ -489,13 +493,70 @@ export default function FileView(props: { tab: Tab }) {
     }
   };
 
+  // ---------- groups from the keyboard ----------
+  /** Groups closed with the keys, latest last: → reopens them in reverse, like going back. */
+  const closedByKey: string[] = [];
+  const [groupNote, setGroupNote] = createSignal("");
+  const groupRows = () => rows().flatMap((r) => (r.kind === "header" ? [r] : []));
+  const setGroupClosed = (key: string, closed: boolean) => {
+    const s = new Set(t.collapsed[0]());
+    closed ? s.add(key) : s.delete(key);
+    t.collapsed[1](s);
+  };
+  const closeCursorGroup = () => {
+    const list = ordered();
+    const cur = entryByPath(t.cursor[0]());
+    const open = groupRows().filter((h) => !h.collapsed);
+    const head = (cur && open.find((h) => h.group.items.some((e) => e.path === cur.path))) ?? open[0];
+    if (!head) return;
+    const items = head.group.items;
+    // The keyboard stays on something that's still there: what comes after the group, or before it.
+    const next = list[list.indexOf(items[items.length - 1]) + 1] ?? list[list.indexOf(items[0]) - 1];
+    closedByKey.push(head.group.key);
+    batch(() => {
+      setGroupClosed(head.group.key, true);
+      if (next) selectOnly(next);
+      else { t.selection[1]([]); t.cursor[1](null); t.anchor[1](null); }
+    });
+    setGroupNote(`${head.group.label} collapsed, ${plural(items.length, "item")}`);
+    requestAnimationFrame(revealCursor);
+  };
+  const openClosedGroup = () => {
+    const closed = groupRows().filter((h) => h.collapsed);
+    if (!closed.length) return;
+    let head;
+    while (!head && closedByKey.length) { const key = closedByKey.pop(); head = closed.find((h) => h.group.key === key); }
+    // Closed some other way: the nearest one above the cursor, or else the first.
+    const cur = entryByPath(t.cursor[0]());
+    if (!head && cur) {
+      const all = groupRows();
+      const at = all.findIndex((h) => h.group.items.some((e) => e.path === cur.path));
+      head = all.slice(0, Math.max(0, at)).reverse().find((h) => h.collapsed);
+    }
+    head ??= closed[0];
+    const first = head.group.items[0];
+    batch(() => {
+      setGroupClosed(head.group.key, false);
+      if (first) selectOnly(first);
+    });
+    setGroupNote(`${head.group.label} expanded, ${plural(head.group.items.length, "item")}`);
+    requestAnimationFrame(revealCursor);
+  };
+
   const onKeyDown = (ev: KeyboardEvent) => {
     if (t.renaming[0]()) return;
+    const grid = view().mode === "grid";
+    // ← → in the list close and open groups; the grid's arrows move, so Ctrl+Shift works in both.
+    // Before anything else: with every group closed the list is empty, and → is the way back.
+    if ((ev.key === "ArrowLeft" || ev.key === "ArrowRight") && !ev.altKey && !ev.metaKey && groupRows().length
+      && ((ev.ctrlKey && ev.shiftKey) || (!grid && !ev.ctrlKey && !ev.shiftKey))) {
+      ev.preventDefault();
+      return ev.key === "ArrowLeft" ? closeCursorGroup() : openClosedGroup();
+    }
     const list = ordered();
     if (!list.length && ev.key !== "Backspace") return;
     const cur = entryByPath(t.cursor[0]());
     const idx = cur ? list.indexOf(cur) : -1;
-    const grid = view().mode === "grid";
     const step = grid ? cols() : 1;
     const page = Math.max(1, Math.floor(scroller.clientHeight / (grid ? gridRowH() : itemH())) - 1) * step;
 
@@ -604,19 +665,14 @@ export default function FileView(props: { tab: Tab }) {
   // way so the headings don't run into each other.
   const columns = () => [width() < 360 ? "minmax(48px, 1fr)" : "minmax(160px, 1fr)", showOrigin() && "minmax(120px, 0.9fr)", ...fixedCols().map((k) => `${colW(k)}px`)].filter(Boolean).join(" ");
 
-  /** Dragging the line at a column's left edge moves that line: the column on its left grows
-   *  as this one shrinks (or Name, which takes the rest). */
-  const resizeColumn = (e: MouseEvent, k: ListColumn) => {
-    e.preventDefault();
-    e.stopPropagation();
+  /** The line at a column's left edge, as it is now: moving it by dx makes the column on its left
+   *  grow as this one shrinks (or Name, which takes the rest). */
+  const columnLine = (k: ListColumn) => {
     const order = fixedCols();
     const left = order[order.indexOf(k) - 1];
     const start = { ...settings.columnWidths };
     const room = width() - 20 - (showOrigin() ? 280 : 160) - order.reduce((a, c) => a + colW(c), 0);
-    const x0 = e.clientX;
-    document.body.classList.add("col-resizing");
-    const move = (m: MouseEvent) => {
-      const dx = m.clientX - x0;
+    return (dx: number) => {
       const next = { ...start };
       if (left) {
         const d = Math.max(MIN_COL - colW(left), Math.min(colW(k) - MIN_COL, dx));
@@ -625,6 +681,16 @@ export default function FileView(props: { tab: Tab }) {
       } else next[k] = Math.max(MIN_COL, Math.min(start[k] + Math.max(0, room), start[k] - dx));
       setSettings("columnWidths", next);
     };
+  };
+  /** Shift+← → on a heading: the same line, from the keyboard. */
+  const nudgeColumn = (k: ListColumn, dx: number) => { columnLine(k)(dx); persistSettings(); };
+  const resizeColumn = (e: MouseEvent, k: ListColumn) => {
+    e.preventDefault();
+    e.stopPropagation();
+    const moveTo = columnLine(k);
+    const x0 = e.clientX;
+    document.body.classList.add("col-resizing");
+    const move = (m: MouseEvent) => moveTo(m.clientX - x0);
     const up = () => {
       window.removeEventListener("mousemove", move);
       window.removeEventListener("mouseup", up);
@@ -685,6 +751,7 @@ export default function FileView(props: { tab: Tab }) {
   return (
     // A click or the keyboard in this view makes it the pane in use (split view).
     <div class="fileview" classList={{ grid: view().mode === "grid", bin: bin() }} data-tab={t.id} onFocusIn={() => focusPane(t)}>
+      <div class="sr-only" role="status">{groupNote()}</div>
       <Show when={bin()}><BinBar tab={t} /></Show>
       <Show when={found()}><SearchBar tab={t} /></Show>
       <Show when={insideArchive(t)}>{(archive) => <ArchiveBar tab={t} archive={archive()} />}</Show>
@@ -694,16 +761,20 @@ export default function FileView(props: { tab: Tab }) {
           <ColHead tab={t} k="name" label="Name" />
           <Show when={showOrigin()}><span class="colhead static">{bin() ? "Original location" : "Folder"}</span></Show>
           <Show when={showDate()}>
-            <ColHead tab={t} k="modified" label={bin() ? "Date deleted" : "Modified"} grip={(e) => resizeColumn(e, "modified")} onReset={resetColumns} />
+            <ColHead tab={t} k="modified" label={bin() ? "Date deleted" : "Modified"} grip={(e) => resizeColumn(e, "modified")} onReset={resetColumns} onNudge={(dx) => nudgeColumn("modified", dx)} />
           </Show>
-          <Show when={showType()}><ColHead tab={t} k="type" label="Type" grip={(e) => resizeColumn(e, "type")} onReset={resetColumns} /></Show>
-          <Show when={showSize()}><ColHead tab={t} k="size" label="Size" right grip={(e) => resizeColumn(e, "size")} onReset={resetColumns} /></Show>
+          <Show when={showType()}><ColHead tab={t} k="type" label="Type" grip={(e) => resizeColumn(e, "type")} onReset={resetColumns} onNudge={(dx) => nudgeColumn("type", dx)} /></Show>
+          <Show when={showSize()}><ColHead tab={t} k="size" label="Size" right grip={(e) => resizeColumn(e, "size")} onReset={resetColumns} onNudge={(dx) => nudgeColumn("size", dx)} /></Show>
         </div>
       </Show>
       <div
         class="files"
         ref={scroller}
         tabIndex={0}
+        role={ordered().length ? "listbox" : "group"}
+        aria-multiselectable={ordered().length ? true : undefined}
+        aria-label={`${found() ? "Search results" : bin() ? "Recycle Bin" : basename(t.p) || t.p}: ${ordered().length} ${ordered().length === 1 ? "item" : "items"}`}
+        aria-activedescendant={t.cursor[0]() && positions().has(t.cursor[0]()!) ? optionId(t.cursor[0]()!) : undefined}
         data-drop={found() || t.p.match(/\.(zip|7z|rar|tar|gz|xz|zst|bz2|tgz|jar)(\\|$)/i) ? undefined : t.p}
         onScroll={() => setScrollTop(scroller.scrollTop)}
         onKeyDown={(e) => { cancelSlowClick(); onKeyDown(e); }}
@@ -726,7 +797,7 @@ export default function FileView(props: { tab: Tab }) {
           }
         }}
       >
-        <div class="files-inner" style={{ height: `${layout().total}px` }}>
+        <div class="files-inner" role="presentation" style={{ height: `${layout().total}px` }}>
           <For each={visible()}>
             {(row) => (
               <Switch>
@@ -737,6 +808,11 @@ export default function FileView(props: { tab: Tab }) {
                   {(e) => (
                     <div
                       class="row"
+                      id={optionId(e().path)}
+                      role="option"
+                      aria-selected={isSel(e().path)}
+                      aria-setsize={ordered().length}
+                      aria-posinset={posInSet(e().path)}
                       classList={{
                         selected: isSel(e().path), cursor: t.cursor[0]() === e().path, dim: e().hidden, cut: isCut(e().path),
                         "join-up": isSel(e().path) && selectedNeighbor(row, -1), "join-down": isSel(e().path) && selectedNeighbor(row, 1),
@@ -774,11 +850,16 @@ export default function FileView(props: { tab: Tab }) {
                   )}
                 </Match>
                 <Match when={view().mode === "grid"}>
-                  <div class="grid-row" style={{ transform: `translateY(${topOf(row)}px)`, height: `${gridRowH()}px` }}>
+                  <div class="grid-row" role="presentation" style={{ transform: `translateY(${topOf(row)}px)`, height: `${gridRowH()}px` }}>
                     <For each={(row as Extract<Row, { kind: "items" }>).items}>
                       {(e) => (
                         <div
                           class="cell"
+                          id={optionId(e.path)}
+                          role="option"
+                          aria-selected={isSel(e.path)}
+                          aria-setsize={ordered().length}
+                          aria-posinset={posInSet(e.path)}
                           classList={{ selected: isSel(e.path), cursor: t.cursor[0]() === e.path, dim: e.hidden, cut: isCut(e.path) }}
                           style={{ width: `${slotW() - 6}px` }}
                           data-drop={dropAttr(e)}
@@ -921,6 +1002,7 @@ function RenameInput(props: { tab: Tab; entry: Entry; grid?: boolean }) {
   return (
     <span class="rename-wrap" classList={{ grid: props.grid }}>
       <textarea
+        aria-label={`New name for ${props.entry.name}`}
         ref={(node) => {
           el = node;
           queueMicrotask(() => {
@@ -1056,12 +1138,20 @@ function SearchBar(props: { tab: Tab }) {
 const COLUMN_WIDTHS: Record<ListColumn, number> = { modified: 150, type: 140, size: 90 };
 const MIN_COL = 64;
 
-function ColHead(props: { tab: Tab; k: SortBy; label: string; right?: boolean; grip?: (e: MouseEvent) => void; onReset?: () => void }) {
+function ColHead(props: { tab: Tab; k: SortBy; label: string; right?: boolean; grip?: (e: MouseEvent) => void; onReset?: () => void; onNudge?: (dx: number) => void }) {
   const v = () => props.tab.view[0]();
   return (
     // A click sorts without taking the focus from the list (as in Explorer), so the keys still act
     // on the files; Tab still reaches the headings.
     <button class="colhead" classList={{ active: v().sortBy === props.k, right: props.right }}
+      aria-label={v().sortBy === props.k ? `${props.label}, sorted ${v().sortDir === "asc" ? "ascending" : "descending"}` : `Sort by ${props.label}`}
+      title={props.onNudge ? "Shift+← → moves the line on this column's left" : undefined}
+      onKeyDown={(e) => {
+        if (!props.onNudge || !e.shiftKey || (e.key !== "ArrowLeft" && e.key !== "ArrowRight")) return;
+        e.preventDefault();
+        e.stopPropagation();
+        props.onNudge(e.key === "ArrowLeft" ? -RESIZE_STEP : RESIZE_STEP);
+      }}
       onMouseDown={(e) => e.preventDefault()}
       onClick={() => { sortBy(props.tab, props.k); refocusList(); }}>
       <Show when={props.grip}>
@@ -1088,11 +1178,11 @@ function GroupHeader(props: { tab: Tab; row: Extract<Row, { kind: "header" }>; t
     props.tab.selection[1](props.row.group.items.map((x) => x.path));
   };
   return (
-    <div class="group-head" classList={{ sticky: props.sticky }}
+    <div class="group-head" role="presentation" classList={{ sticky: props.sticky }}
       style={props.sticky ? {} : { transform: `translateY(${props.top}px)`, height: `${HEADER_H}px` }}
       onMouseDown={(e) => e.stopPropagation()}
       onClick={toggle}
-      title="Click to collapse · double-click to select the group"
+      title="Click to collapse (← and → from the list; Ctrl+Shift+← → in a grid) · double-click to select the group"
       onDblClick={selectGroup}>
       {props.row.collapsed ? <ChevronRight size={14} /> : <ChevronDown size={14} />}
       <span class="group-label">{props.row.group.label}</span>

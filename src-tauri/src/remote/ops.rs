@@ -178,6 +178,9 @@ fn server_copy(src: &str, target: &str, ctx: &JobCtx) -> Res<bool> {
 /// undo), or for good. An item that can't go to the trash fails with NOT_TRASHABLE, without
 /// asking: the window then offers to delete those for good.
 pub fn delete(app: &AppHandle, items: Vec<String>, permanent: bool) -> Res<u64> {
+    if let Some(p) = items.iter().find(|p| permanent && rfs::split(p).is_ok_and(|(_, l)| crate::linux::protected(&l))) {
+        return Err(crate::fileops::refused_delete(p));
+    }
     let all: Vec<&str> = items.iter().map(String::as_str).collect();
     let holds = hold_all(&all)?;
     let label = if items.len() == 1 {
@@ -190,13 +193,22 @@ pub fn delete(app: &AppHandle, items: Vec<String>, permanent: bool) -> Res<u64> 
         let _holds = holds;
         ctx.set_totals(0, items.len() as u64);
         let mut skip_all = false;
+        // For good: with `rm` there where the server runs commands (fast, and Cancel stops it),
+        // else item by item over SFTP.
+        let mut items = items;
+        if permanent {
+            let runs_commands = |p: &String| rfs::split(p).is_ok_and(|(id, _)| ssh::connected(&id).is_some_and(|s| s.arch.is_some()));
+            let (with_rm, over_sftp): (Vec<String>, Vec<String>) = items.into_iter().map(|p| paths::normalize(&p)).partition(runs_commands);
+            crate::fileops::delete_in_linux(ctx, &with_rm, &mut skip_all)?;
+            items = over_sftp;
+        }
         for p in items.iter().map(|p| paths::normalize(p)) {
             ctx.check()?;
             ctx.set_current(&name(&p));
             let (id, linux) = rfs::split(&p)?;
             let s = block(ssh::session(&id))?;
             if permanent {
-                per_item(ctx, &mut skip_all, &p, || block(rfs::remove_all(&s, &linux)).map_err(|e| format!("Couldn't delete “{}”: {e}", name(&p))))?;
+                per_item(ctx, &mut skip_all, &p, || block(rfs::remove_over_sftp(&s, &linux, &|| ctx.is_cancelled())).map_err(|e| format!("Couldn't delete “{}”: {e}", name(&p))))?;
             } else {
                 match block(rfs::trash_one(&s, &id, &linux)) {
                     Ok(at) => ctx.pair(p.clone(), at),

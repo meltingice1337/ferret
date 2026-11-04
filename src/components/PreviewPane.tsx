@@ -4,7 +4,7 @@ import { Portal } from "solid-js/web";
 import { formatDate, formatSize, kindOf, plural, typeLabel } from "../lib/format";
 import { copyText, openFile } from "../lib/ops";
 import { basename, folderLook, isRecycle, pathKey } from "../lib/path";
-import { fileList, activeTab, openEntry, persistSession, previewSpace, setUi, ui } from "../lib/state";
+import { fileList, activeTab, openEntry, persistSession, previewSpace, RESIZE_STEP, setUi, ui } from "../lib/state";
 import type { Entry } from "../lib/types";
 import FileIcon from "./FileIcon";
 import { Thumb } from "./FileView";
@@ -135,18 +135,32 @@ export default function PreviewPane() {
     if (had && !had.isConnected && (!a || a === document.body)) pane.focus({ preventScroll: true });
   }), { defer: true }));
 
+  const widthLimits = () => ({ min: 260, max: Math.round(window.innerWidth * 0.6) });
   const startResize = (e: MouseEvent) => {
     e.preventDefault();
     const sx = e.clientX, sw = ui.previewWidth;
-    const move = (m: MouseEvent) => setUi("previewWidth", Math.max(260, Math.min(window.innerWidth * 0.6, sw - (m.clientX - sx))));
+    const move = (m: MouseEvent) => setUi("previewWidth", Math.max(widthLimits().min, Math.min(widthLimits().max, sw - (m.clientX - sx))));
     const up = () => { window.removeEventListener("mousemove", move); window.removeEventListener("mouseup", up); persistSession(); };
     window.addEventListener("mousemove", move);
     window.addEventListener("mouseup", up);
   };
 
   return (
-    <aside class="preview" ref={pane} tabIndex={-1} style={{ width: `${previewSpace()}px` }} onFocusIn={(e) => (had = e.target as Element)}>
-      <div class="preview-resizer" onMouseDown={startResize} />
+    <aside class="preview" ref={pane} tabIndex={-1} aria-label="Preview" style={{ width: `${previewSpace()}px` }} onFocusIn={(e) => (had = e.target as Element)}>
+      {/* The line is on the pane's left, so the arrows follow it: ← makes the pane wider. */}
+      <div class="preview-resizer" role="separator" aria-orientation="vertical" aria-label="Preview pane width" tabIndex={0}
+        aria-valuenow={Math.round(ui.previewWidth)} aria-valuemin={widthLimits().min} aria-valuemax={widthLimits().max}
+        onMouseDown={startResize}
+        onKeyDown={(e) => {
+          const { min, max } = widthLimits();
+          const next = e.key === "ArrowLeft" ? ui.previewWidth + RESIZE_STEP : e.key === "ArrowRight" ? ui.previewWidth - RESIZE_STEP
+            : e.key === "Home" ? max : e.key === "End" ? min : null;
+          if (next === null) return;
+          e.preventDefault();
+          e.stopPropagation();
+          setUi("previewWidth", Math.max(min, Math.min(max, next)));
+          persistSession();
+        }} />
       <Show when={summary()}><div class="pv-multi" role="status">{summary()}</div></Show>
       <Show when={shown()}>
         {(e) => {
@@ -223,10 +237,17 @@ export function QuickLook() {
     setUi("quickLook", false);
     requestAnimationFrame(() => fileList()?.focus());
   };
+  // Moving to another file selects it in the list, and the list takes the focus back with that.
+  let box: HTMLDivElement | undefined;
+  createEffect(on(focused, () => requestAnimationFrame(() => {
+    if (box?.isConnected && !box.contains(document.activeElement)) box.focus({ preventScroll: true });
+  }), { defer: true }));
 
   onMount(() => {
     const onKey = (e: KeyboardEvent) => {
       const media = (e.target as HTMLElement).closest("video, audio, input, textarea");
+      // A focused button takes Enter and Space itself (Close shouldn't open the file).
+      if ((e.key === "Enter" || e.key === " ") && (e.target as HTMLElement).closest("button")) return;
       if (e.key === "Escape" || (e.key === " " && !media)) { e.preventDefault(); e.stopPropagation(); close(); }
       else if (e.key === "ArrowRight" || e.key === "ArrowDown") { if (media && e.key === "ArrowRight") return; e.preventDefault(); e.stopPropagation(); go(1); }
       else if (e.key === "ArrowLeft" || e.key === "ArrowUp") { if (media && e.key === "ArrowLeft") return; e.preventDefault(); e.stopPropagation(); go(-1); }
@@ -242,10 +263,14 @@ export function QuickLook() {
 
   return (
     <Portal>
-      <div class="ql-backdrop" onMouseDown={(e) => e.target === e.currentTarget && close()}>
+      <div class="ql-backdrop" role="dialog" aria-modal="true" aria-label="Quick Look" tabIndex={-1}
+        ref={(el) => { box = el; queueMicrotask(() => el.focus({ preventScroll: true })); }}
+        onMouseDown={(e) => e.target === e.currentTarget && close()}>
         <Show when={focused()} fallback={<div class="ql pv-note">Select a file to preview</div>}>
           {(e) => (
             <div class="ql">
+              {/* The arrow keys change the file without moving the focus: this says which one. */}
+              <div class="sr-only" role="status">{e().name}, {index() + 1} of {list().length}</div>
               <header class="ql-head">
                 <div class="pv-head-icon"><Thumb entry={e()} size={24} fallbackSize={20} /></div>
                 <div class="pv-head-text">

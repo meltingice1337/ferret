@@ -1,5 +1,5 @@
 //! Running programs inside WSL distros. Walking a distro's files is fast from Linux and slow
-//! through `\\wsl.localhost` from Windows, so folder sizes and search ask Linux directly.
+//! through `\\wsl.localhost` from Windows, so folder sizes, search and deleting ask Linux directly.
 
 use std::process::Command;
 
@@ -15,8 +15,16 @@ pub fn linux_path(p: &str) -> Option<(String, String)> {
     let n = paths::normalize(p);
     let distro = paths::wsl_distro(&n)?;
     let rest = &n[paths::wsl_root(&distro).len()..];
-    let linux = if rest.trim_matches('\\').is_empty() { "/".to_string() } else { rest.replace('\\', "/") };
+    let linux = if rest.trim_matches('\\').is_empty() { "/".to_string() } else { rest.replace('\\', "/").chars().map(linux_char).collect() };
     Some((distro, linux))
+}
+
+/// What Windows can't have in a name (`:`, `?`, a tab…) it shows as U+F000 + the character.
+fn linux_char(c: char) -> char {
+    match c as u32 {
+        v @ 0xF001..=0xF07F => char::from((v - 0xF000) as u8),
+        _ => c,
+    }
 }
 
 /// `program` inside `distro` (no shell, no console window), as the distro's default user.
@@ -54,5 +62,7 @@ mod tests {
         assert_eq!(super::linux_path(r"\\wsl.localhost\Arch"), Some(("Arch".into(), "/".into())));
         assert_eq!(super::linux_path(r"\\wsl$\Arch\home\me"), Some(("Arch".into(), "/home/me".into())));
         assert_eq!(super::linux_path(r"C:\Users"), None);
+        // As Windows shows names it can't have.
+        assert_eq!(super::linux_path("\\\\wsl.localhost\\Arch\\tmp\\a\u{F03A}b\u{F05C}c\u{F009}d"), Some(("Arch".into(), "/tmp/a:b\\c\td".into())));
     }
 }

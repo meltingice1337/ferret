@@ -21,6 +21,33 @@ pub fn is_recycle(p: &str) -> bool {
         .any(|a| t.eq_ignore_ascii_case(a))
 }
 
+/// Whether Windows has a Recycle Bin for this path: only fixed drives do. Elsewhere (WSL, network
+/// folders, USB sticks) `trash::delete` deletes for good and reports that it recycled.
+pub fn has_bin(path: &str) -> bool {
+    let n = paths::normalize(path);
+    let &[letter, b':', ..] = n.as_bytes() else { return false };
+    if !letter.is_ascii_alphabetic() {
+        return false;
+    }
+    #[cfg(windows)]
+    {
+        use windows::core::PCWSTR;
+        use windows::Win32::Storage::FileSystem::GetDriveTypeW;
+        const DRIVE_FIXED: u32 = 3;
+        let root: Vec<u16> = format!("{}:\\", letter as char).encode_utf16().chain(Some(0)).collect();
+        unsafe { GetDriveTypeW(PCWSTR(root.as_ptr())) == DRIVE_FIXED }
+    }
+    #[cfg(not(windows))]
+    false
+}
+
+/// Which of these a delete can't recycle, for asking first. Off the main thread: asking about a
+/// mapped drive that's gone can take a while.
+#[tauri::command(async)]
+pub fn no_recycle_bin(paths: Vec<String>) -> Vec<String> {
+    paths.into_iter().filter(|p| !has_bin(p)).collect()
+}
+
 /// Original full path, size (whole tree for folders) and deletion time (ms) from an item's `$I` record.
 fn read_info(r_path: &Path) -> Option<(String, u64, i64)> {
     let name = r_path.file_name()?.to_string_lossy().into_owned();
@@ -311,6 +338,22 @@ mod purge_tests {
             if i.original_path().to_string_lossy().contains("ferret-purge-test-") {
                 let _ = purge(&paths::normalize(&i.id.to_string_lossy()));
             }
+        }
+    }
+}
+
+#[cfg(test)]
+mod bin_tests {
+    #[test]
+    fn only_fixed_drives_have_a_bin() {
+        use super::has_bin;
+        for p in [r"\wsl.localhost\Ubuntu\home\me", r"\server\share\x", r"\localhost\C$\Users", r"\ssh:\home.local\srv", "relative", ""] {
+            assert!(!has_bin(p), "{p}");
+        }
+        #[cfg(windows)]
+        {
+            let system = std::env::var("SystemDrive").unwrap();
+            assert!(has_bin(&format!(r"{system}\Users")));
         }
     }
 }

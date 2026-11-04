@@ -11,7 +11,7 @@ import { Thumb } from "./FileView";
 export function Modal(props: { title: string; onClose: () => void; children: JSX.Element; width?: number; class?: string }) {
   return (
     <div class="modal-backdrop" onMouseDown={(e) => e.target === e.currentTarget && props.onClose()}>
-      <div class={`modal ${props.class ?? ""}`} role="dialog" aria-label={props.title} tabIndex={-1}
+      <div class={`modal ${props.class ?? ""}`} role="dialog" aria-modal="true" aria-label={props.title} tabIndex={-1}
         style={props.width ? { width: `min(${props.width}px, calc(100vw - 40px))` } : undefined}
         ref={(el) => queueMicrotask(() => { if (!el.contains(document.activeElement)) el.focus(); })}
         onKeyDown={(e) => { if (e.key === "Escape") { e.preventDefault(); props.onClose(); } e.stopPropagation(); }}>
@@ -113,6 +113,7 @@ export function ConflictDialog() {
               }}>
                 <button class="choice" onClick={() => done("replace")}>
                   <b>Replace</b><span>Overwrite the existing {n === 1 ? "item" : "items"}; folders are merged</span>
+                  <Show when={c.noBin}><span class="choice-warn">There's no Recycle Bin here: what's overwritten can't be brought back</span></Show>
                 </button>
                 {/* The safe choice has focus, so Enter never overwrites anything. */}
                 <button class="choice" onClick={() => done("keepBoth")} ref={(el) => queueMicrotask(() => el.focus())}>

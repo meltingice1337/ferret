@@ -18,7 +18,7 @@
   color-scheme: dark;
   --fg: #f4eef3;
   --fg-2: color-mix(in oklab, #f4eef3 72%, transparent);
-  --fg-3: color-mix(in oklab, #f4eef3 48%, transparent);
+  --fg-3: color-mix(in oklab, #f4eef3 55%, transparent);
   --panel: rgba(22, 14, 22, 0.7);
   --glass-base: rgba(12, 8, 13, 0.62);
   --panel-solid: #1c131c;
@@ -31,6 +31,11 @@
   --bg-solid: #120b12;
   --tint-a: 30%;
   --tint-b: 14%;
+  /* Lifted a little: magenta and violet are under 4.5:1 on the dark panels as they are. */
+  --accent-text: color-mix(in oklab, var(--accent) 80%, #fff);
+  --warn-text: #f59e0b;
+  --danger-text: #f87171;
+  --ok-text: #34d399;
 }
 
 :root[data-theme="light"] {
@@ -52,6 +57,10 @@
   --bg-solid: #efe6ec;
   --tint-a: 22%;
   --tint-b: 10%;
+  /* The dark theme's status colors are 2–3:1 on white. */
+  --warn-text: #b45309;
+  --danger-text: #b91c1c;
+  --ok-text: #047857;
 }
 
 /* ---------- base ---------- */
@@ -81,6 +90,8 @@ input::selection, textarea::selection { background: color-mix(in oklab, var(--ac
 ::-webkit-scrollbar-track { background: transparent; }
 
 .muted { color: var(--fg-3); }
+/* For screen readers only. */
+.sr-only { position: absolute; width: 1px; height: 1px; margin: 0; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
 .spin { animation: spin 0.9s linear infinite; }
 @keyframes spin { to { transform: rotate(360deg); } }
 
@@ -128,6 +139,7 @@ input::selection, textarea::selection { background: color-mix(in oklab, var(--ac
 .sidebar-foot .side-item { flex: 1; min-width: 0; }
 .resizer { position: absolute; top: 0; right: -6px; width: 8px; height: 100%; cursor: col-resize; z-index: 5; }
 .resizer:hover { background: linear-gradient(90deg, transparent 3px, var(--accent-line) 3px, var(--accent-line) 5px, transparent 5px); }
+.resizer:focus-visible { outline: none; background: linear-gradient(90deg, transparent 3px, var(--accent-text) 3px, var(--accent-text) 5px, transparent 5px); }
 
 .side-section { margin-bottom: 8px; }
 .side-title {
@@ -139,8 +151,15 @@ input::selection, textarea::selection { background: color-mix(in oklab, var(--ac
 :root[data-theme="light"] .side-title { color: color-mix(in oklab, var(--fg-2) 85%, var(--fg-3)); }
 .side-title-actions { display: flex; align-items: center; gap: 4px; }
 .side-title svg.rot { transform: rotate(-90deg); }
+/* The whole title toggles the section; its own buttons sit on top. */
+.side-title { position: relative; }
+.side-title-toggle { position: absolute; inset: 0; border-radius: 6px; }
+.side-title-toggle:focus-visible { outline-offset: -2px; }
+/* (Its text and chevron stay out of the pointer's way: a rotated chevron would paint over the toggle.) */
+.side-title > span { pointer-events: none; }
+.side-title-actions .icon-btn { position: relative; z-index: 1; pointer-events: auto; }
 .side-title .icon-btn { opacity: 0; }
-.side-title:hover .icon-btn { opacity: 1; }
+.side-title:hover .icon-btn, .side-title:focus-within .icon-btn { opacity: 1; }
 .side-empty { padding: 4px 10px 6px; color: var(--fg-3); font-size: 12px; }
 
 .side-item {
@@ -157,7 +176,8 @@ input::selection, textarea::selection { background: color-mix(in oklab, var(--ac
 /* Parent folder after a generic name ("debug  target"): dim, and the first to shorten. */
 .side-item:has(.side-hint) .side-label { flex: 0 1 auto; }
 .side-hint { flex: 1 1 0; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 11.5px; color: var(--fg-3); }
-.side-badge { font-size: 10px; color: var(--fg-3); border: 1px solid var(--line-2); border-radius: 5px; padding: 0 5px; }
+.side-badge { font-size: 11px; color: var(--fg-3); border: 1px solid var(--line-2); border-radius: 5px; padding: 0 5px; }
+.side-item.active .side-badge { color: var(--fg-2); }
 .side-x { display: none; color: var(--fg-3); padding: 2px; border-radius: 4px; }
 .side-x:hover { color: var(--fg); background: var(--press); }
 .side-item:hover .side-x { display: inline-flex; }
@@ -179,7 +199,8 @@ input::selection, textarea::selection { background: color-mix(in oklab, var(--ac
   border-radius: 5px; border: 1px solid var(--line-2); background: var(--hover);
   font-size: 10.5px; font-weight: 700; color: var(--fg-2); line-height: 1;
 }
-.drive.active .drive-letter { color: var(--accent-text); border-color: var(--accent-line); background: var(--accent-softer); }
+/* (Accent text falls under 4.5:1 on the active drive's tint; the border carries the accent.) */
+.drive.active .drive-letter { color: var(--fg); border-color: var(--accent-line); background: var(--accent-softer); }
 .drive-free { font-size: 11px; color: var(--fg-3); white-space: nowrap; }
 .drive-bar { height: 4px; margin: 6px 0 0 24px; border-radius: 4px; background: var(--line-2); overflow: hidden; }
 .drive-bar > div { height: 100%; border-radius: 4px; background: var(--accent); }
@@ -242,6 +263,7 @@ input::selection, textarea::selection { background: color-mix(in oklab, var(--ac
 .crumb:hover { background: var(--press); color: var(--fg); }
 .crumb.last { color: var(--fg); font-weight: 600; }
 .crumb.wsl { color: #7ee0a5; }
+:root[data-theme="light"] .crumb.wsl { color: #15803d; }
 .crumb-sep { flex: none; height: 24px; width: 18px; display: grid; place-items: center; border-radius: 5px; color: var(--fg-3); }
 .crumb-sep:hover { background: var(--press); color: var(--fg); }
 
@@ -262,7 +284,7 @@ input::selection, textarea::selection { background: color-mix(in oklab, var(--ac
 .filter { display: flex; align-items: center; gap: 4px; height: 32px; padding: 0 4px 0 10px; width: 250px; border-radius: 8px; background: var(--raised); border: 1px solid var(--accent-line); color: var(--fg-3); }
 .filter input { flex: 1; min-width: 0; border: 0; outline: none; background: none; color: var(--fg); user-select: text; }
 /* The type button, lit while a type: filter is on. */
-.filter .icon-btn.on { color: var(--accent); background: var(--accent-softer); }
+.filter .icon-btn.on { color: var(--accent-text); background: var(--accent-softer); }
 
 /* ---------- file view ---------- */
 .fileview { flex: 1; min-height: 0; display: flex; flex-direction: column; position: relative; }
@@ -299,6 +321,11 @@ body.col-resizing, body.col-resizing * { cursor: col-resize !important; user-sel
 .row.selected.join-down { border-bottom-left-radius: 0; border-bottom-right-radius: 0; }
 .row.selected .ficon, .row.selected .c-date, .row.selected .c-type, .row.selected .c-size { color: var(--on-accent); opacity: 0.92; }
 .row.cursor:not(.selected) { box-shadow: inset 0 0 0 1px var(--accent-line); }
+/* With the keyboard here, the cursor has to be easy to find. */
+.files:focus .row.cursor:not(.selected) { box-shadow: inset 0 0 0 2px var(--accent-text); }
+.files:focus .cell.cursor:not(.selected) { border-color: var(--accent-text); }
+/* Focus on a list with nothing marked (an empty folder, no cursor yet, or the cursor scrolled away). */
+.files:focus-visible:not(:has(.row.cursor, .cell.cursor, .row.selected, .cell.selected)) { outline: 2px solid var(--accent-text); outline-offset: -2px; }
 .row.dim { opacity: 0.55; }
 .c-name { display: flex; align-items: center; gap: 9px; color: var(--fg); }
 .row.selected .c-name { color: var(--on-accent); }
@@ -399,7 +426,7 @@ body.col-resizing, body.col-resizing * { cursor: col-resize !important; user-sel
 .menu-actions { display: flex; gap: 2px; padding: 2px 2px 3px; }
 .menu-action { flex: 1; height: 32px; display: grid; place-items: center; border-radius: 6px; color: var(--fg-2); }
 .menu-action:hover:not(:disabled) { background: var(--hover); color: var(--fg); }
-.menu-action.danger:hover:not(:disabled) { background: rgba(220, 38, 38, 0.16); color: #f87171; }
+.menu-action.danger:hover:not(:disabled) { background: rgba(220, 38, 38, 0.16); color: var(--danger-text); }
 .menu-action:disabled { opacity: 0.35; }
 
 /* ---------- toasts ---------- */
@@ -418,7 +445,7 @@ body.col-resizing, body.col-resizing * { cursor: col-resize !important; user-sel
 }
 .modal-head { display: flex; align-items: center; justify-content: space-between; padding: 14px 16px 10px 22px; border-bottom: 1px solid var(--line); }
 .modal-head h2 { margin: 0; font-size: 17px; font-weight: 600; }
-.modal-body { overflow-y: auto; padding: 14px 18px 20px; display: flex; flex-direction: column; gap: 14px; }
+.modal-body { overflow-y: auto; padding: 14px 22px 20px; display: flex; flex-direction: column; gap: 14px; }
 .card { background: var(--hover); border: 1px solid var(--line); border-radius: 11px; padding: 14px 16px; }
 .card h3 { margin: 0 0 2px; font-size: 13.5px; font-weight: 600; }
 .card-desc { margin: 2px 0 8px; color: var(--fg-3); font-size: 12px; }

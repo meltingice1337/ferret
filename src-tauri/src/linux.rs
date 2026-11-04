@@ -8,9 +8,10 @@
 
 use parking_lot::Mutex;
 use std::collections::HashMap;
-use std::io::{Read, Write};
+use std::io::{BufRead, BufReader, Read, Write};
 use std::process::Stdio;
 use std::sync::OnceLock;
+use std::sync::mpsc::{self, RecvTimeoutError};
 use std::time::{Duration, Instant};
 
 use crate::paths;
@@ -126,6 +127,100 @@ impl Child {
             Inner::Process(p) => p.wait().ok().and_then(|s| s.code()),
             Inner::Ssh(p) => p.wait().map(|c| c as i32),
         }
+    }
+}
+
+// ---------- deleting ----------
+
+/// Deletes the items given. `S n`: item n starts, `D n`: it's deleted, `F n why`: it isn't (and
+/// rm's messages come in between, on the same pipe). Its input closing stops it, rm included:
+/// that's how Cancel works, as ending `wsl.exe` or an SSH channel leaves Linux programs running.
+/// `--one-file-system`: never into something mounted inside a folder (a Windows drive).
+const REMOVE: &str = concat!(
+    r#"exec 3<&0 0</dev/null; o=; rm --help 2>&1 | grep -q one-file-system && o=--one-file-system; r=; "#,
+    r#"trap 'kill "$r" 2>/dev/null; exit 130' TERM; ( cat <&3 >/dev/null; kill -TERM "$$" ) >/dev/null 2>&1 & w=$!; i=0; "#,
+    r#"for p do printf 'S\t%d\n' "$i"; case "$HOME/" in "$p"/*) printf 'F\t%d\tIt holds your home folder\n' "$i";; "#,
+    r#"*) rm -rf $o -- "$p" 3<&- 2>&1 & r=$!; if wait "$r"; then printf 'D\t%d\n' "$i"; else printf 'F\t%d\t\n' "$i"; fi;; esac; i=$((i+1)); done; "#,
+    r#"kill "$w" 2>/dev/null"#,
+);
+
+/// How long a stopped delete gets to end by itself.
+const STOP_WAIT: Duration = Duration::from_secs(3);
+
+/// What happened to an item (by its place in the list) `Host::remove_all` was given.
+#[derive(Debug, PartialEq)]
+pub enum Removal {
+    Started(usize),
+    Deleted(usize),
+    Failed(usize, String),
+}
+
+/// Folders a delete must never take: the root, everything right under it (`/home`, `/mnt`) and
+/// a Windows drive in WSL. (The home folder is refused in Linux, where it's known.)
+pub fn protected(linux: &str) -> bool {
+    let parts: Vec<&str> = linux.split('/').filter(|p| !p.is_empty()).collect();
+    parts.len() < 2 || (parts.len() == 2 && parts[0] == "mnt")
+}
+
+impl Host {
+    /// `rm -rf` of `linux` (absolute paths) on this system. `stop` is asked all along; Ok(false)
+    /// when it stopped the delete, which leaves what wasn't deleted yet. An item not reported
+    /// as deleted or failed wasn't reached. rm is happy with what doesn't exist: `Deleted` means
+    /// it's not there, not that this path was the item meant.
+    pub fn remove_all(&self, linux: &[String], stop: &dyn Fn() -> bool, report: &mut dyn FnMut(Removal)) -> Result<bool, String> {
+        let mut args = vec!["-c", REMOVE, "sh"];
+        args.extend(linux.iter().map(String::as_str));
+        let mut child = self.spawn("sh", &args).map_err(|e| format!("Couldn't start it on {}: {e}", self.label()))?;
+        let out = child.stdout.take().ok_or("It has no output")?;
+        let (tx, rx) = mpsc::channel::<String>();
+        std::thread::spawn(move || {
+            for line in BufReader::new(out).split(b'\n').map_while(Result::ok) {
+                if tx.send(String::from_utf8_lossy(&line).trim_end_matches('\r').to_string()).is_err() {
+                    return;
+                }
+            }
+        });
+        if let Some(mut err) = child.stderr.take() {
+            std::thread::spawn(move || {
+                let _ = std::io::copy(&mut err, &mut std::io::sink());
+            });
+        }
+        // rm's first message about the item it's on, for when it fails.
+        let mut said: Option<String> = None;
+        loop {
+            if stop() {
+                child.stdin = None;
+                let asked = Instant::now();
+                while asked.elapsed() < STOP_WAIT && !matches!(rx.recv_timeout(Duration::from_millis(100)), Err(RecvTimeoutError::Disconnected)) {}
+                child.kill();
+                child.wait();
+                return Ok(false);
+            }
+            let line = match rx.recv_timeout(Duration::from_millis(100)) {
+                Ok(l) => l,
+                Err(RecvTimeoutError::Timeout) => continue,
+                Err(RecvTimeoutError::Disconnected) => break,
+            };
+            let mut f = line.splitn(3, '\t');
+            match (f.next(), f.next().and_then(|n| n.parse::<usize>().ok()).filter(|n| *n < linux.len()), f.next()) {
+                (Some("S"), Some(n), None) => {
+                    said = None;
+                    report(Removal::Started(n));
+                }
+                (Some("D"), Some(n), None) => report(Removal::Deleted(n)),
+                (Some("F"), Some(n), Some(why)) => {
+                    let why = if why.is_empty() { said.take().unwrap_or_else(|| "rm didn't say why".into()) } else { why.to_string() };
+                    report(Removal::Failed(n, why));
+                }
+                _ => {
+                    if said.is_none() {
+                        said = Some(line.strip_prefix("rm: ").unwrap_or(&line).to_string());
+                    }
+                }
+            }
+        }
+        child.wait();
+        Ok(true)
     }
 }
 
@@ -255,5 +350,96 @@ mod tests {
         assert_eq!(Host::of(r"\\wsl.localhost\Ubuntu\home\me"), Some((Host::Wsl("Ubuntu".into()), "/home/me".into())));
         assert_eq!(Host::of(r"\\ssh:\home.local\srv"), Some((Host::Ssh("home.local".into()), "/srv".into())));
         assert_eq!(Host::of(r"C:\Users"), None);
+    }
+
+    #[test]
+    fn protected_folders() {
+        for p in ["/", "/home", "/mnt", "/usr", "/mnt/c", "/mnt/d/"] {
+            assert!(protected(p), "{p}");
+        }
+        for p in ["/home/me", "/home/me/x", "/mnt/c/x", "/tmp/x", "/usr/lib"] {
+            assert!(!protected(p), "{p}");
+        }
+    }
+
+    fn sh(host: &Host, script: &str, arg: &str) -> String {
+        let mut c = host.spawn("sh", &["-c", script, "sh", arg]).unwrap();
+        let mut said = String::new();
+        c.stdout.take().unwrap().read_to_string(&mut said).unwrap();
+        c.wait();
+        said.trim().to_string()
+    }
+
+    /// Only in folders of the test's: names Windows can't have, a link to a folder (its target
+    /// stays), what can't be deleted, the home folder (a stand-in: a test must never hand the
+    /// real one to a delete), and stopping it midway (in `big`, on a real disk: /tmp can take
+    /// memory, and deletes too fast to catch).
+    fn removes_and_stops(host: &Host, dir: &str, big: &str) {
+        sh(host, r#"mkdir -p "$1/keep/inside" "$1/full/sub" "$1/locked/in"; cd "$1"; touch -- 'a:b' 'q?x' 'dq"x' 'back\slash' 'tab	x' '-rf' "it's" '$HOME' 'café 日本語' keep/inside/f full/sub/f locked/in/f; ln -s keep link; chmod 555 locked/in"#, dir);
+        let names = ["a:b", "q?x", "dq\"x", "back\\slash", "tab\tx", "-rf", "it's", "$HOME", "café 日本語", "full", "link"];
+        // rm -f is happy with what doesn't exist: it all has to be there first.
+        assert_eq!(sh(host, r#"ls -A "$1" | wc -l"#, dir), "13");
+        let mut items: Vec<String> = names.iter().map(|n| format!("{dir}/{n}")).collect();
+        items.push(format!("{dir}/locked/in/f"));
+        let mut seen = Vec::new();
+        assert_eq!(host.remove_all(&items, &|| false, &mut |r| seen.push(r)), Ok(true));
+        let n = names.len();
+        for (i, name) in names.iter().enumerate() {
+            assert!(seen.contains(&Removal::Deleted(i)), "{name}: {seen:?}");
+        }
+        assert!(seen.iter().any(|r| matches!(r, Removal::Failed(i, why) if *i == n && why.contains("ermission denied"))), "{seen:?}");
+        assert_eq!(sh(host, r#"cd "$1"; ls -A | sort | tr '\n' ' '; find keep locked/in -type f | sort | tr '\n' ' '"#, dir), "keep locked keep/inside/f locked/in/f");
+
+        let (home, holds) = (format!("{dir}/keep/inside"), format!("{dir}/keep"));
+        let mut c = host.spawn("env", &[format!("HOME={home}").as_str(), "sh", "-c", REMOVE, "sh", &home, &holds]).unwrap();
+        let mut said = String::new();
+        c.stdout.take().unwrap().read_to_string(&mut said).unwrap();
+        c.wait();
+        assert_eq!(said.lines().filter(|l| l.ends_with("It holds your home folder")).count(), 2, "{said}");
+        assert_eq!(sh(host, r#"find "$1/keep" -type f"#, dir), format!("{dir}/keep/inside/f"));
+        sh(host, r#"chmod -R u+w "$1"; rm -rf -- "$1""#, dir);
+
+        sh(host, r#"mkdir -p "$1"; cd "$1"; seq 1 300000 | xargs touch"#, big);
+        let began = std::cell::Cell::new(None::<Instant>);
+        let stop = || began.get().is_some_and(|t: Instant| t.elapsed() > Duration::from_millis(150));
+        let result = host.remove_all(&[big.to_string()], &stop, &mut |r| {
+            if matches!(r, Removal::Started(_)) {
+                began.set(Some(Instant::now()));
+            }
+        });
+        let took = began.get().unwrap().elapsed();
+        let left = || sh(host, r#"find "$1" | wc -l"#, big);
+        let a = left();
+        std::thread::sleep(Duration::from_millis(800));
+        let b = left();
+        let running = sh(host, r#"ps -eo args | grep '^rm ' | grep -c -- "$1""#, big);
+        sh(host, r#"rm -rf -- "$1""#, big);
+        assert_eq!(result, Ok(false));
+        assert!(took < STOP_WAIT, "took {took:?} to stop");
+        assert_eq!(a, b, "still deleting after it stopped");
+        assert_eq!(running, "0");
+        let a: u64 = a.parse().unwrap();
+        assert!(a > 1000 && a < 300_001, "{a} left of 300,001");
+        println!("{}: stopped in {took:?}, {a} of 300,001 left", host.label());
+    }
+
+    /// In a running distro. `cargo test --lib wsl_remove -- --ignored --nocapture`
+    #[test]
+    #[ignore]
+    fn wsl_remove() {
+        let Some(distro) = crate::wsl::running().into_iter().next() else { return };
+        let pid = std::process::id();
+        removes_and_stops(&Host::Wsl(distro), &format!("/tmp/ferret-rm-{pid}"), &format!("/var/tmp/ferret-rm-test-{pid}"));
+    }
+
+    /// `FERRET_TEST_SSH=<a ~/.ssh/config host> cargo test --lib ssh_remove -- --ignored --nocapture`
+    #[test]
+    #[ignore]
+    fn ssh_remove() {
+        let Ok(alias) = std::env::var("FERRET_TEST_SSH") else { return };
+        let id = crate::remote::test_connection(&alias).expect("connects");
+        let s = crate::remote::block(ssh::session(&id)).unwrap();
+        let pid = std::process::id();
+        removes_and_stops(&Host::Ssh(id), &format!("/tmp/ferret-rm-{pid}"), &format!("{}/ferret-rm-test-{pid}", s.home));
     }
 }

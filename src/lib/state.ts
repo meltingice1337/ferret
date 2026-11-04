@@ -149,7 +149,7 @@ export const [ui, setUi] = createStore({
   batchRename: null as null | string[],
   /** Videos or pictures open in the compress editor. */
   media: null as null | { kind: "video" | "image"; paths: string[] },
-  conflict: null as null | { conflicts: import("./types").Conflict[]; op: "copy" | "move"; dest: string; resolve: (p: import("./types").Policy | null) => void },
+  conflict: null as null | { conflicts: import("./types").Conflict[]; op: "copy" | "move"; dest: string; noBin: boolean; resolve: (p: import("./types").Policy | null) => void },
   /** Mirror of what Ferret put on the clipboard, to dim cut items. Server files can't go on
    *  Windows' clipboard: the window keeps them, with the clipboard's change count then (`seq`). */
   clipboard: null as null | { paths: string[]; cut: boolean; seq?: number },
@@ -365,6 +365,9 @@ export const fileList = () =>
 const focusList = () => requestAnimationFrame(() => fileList()?.focus({ preventScroll: true }));
 /** After a box closes, gives the focus back to the list, unless something else took it in the
  *  meantime (a quick Ctrl+L or F2 after Escape opens the next box before this runs). */
+/** How far one press of an arrow key moves a resize line (px). */
+export const RESIZE_STEP = 16;
+
 export const refocusList = () => requestAnimationFrame(() => {
   const a = document.activeElement;
   if (!a || a === document.body || !a.isConnected) fileList()?.focus({ preventScroll: true });
@@ -952,18 +955,20 @@ export function removeSavedSearch(query: string) {
 }
 
 /** Asks for a name, then pins the search. */
-export async function promptSaveSearch(query: string) {
+/** Resolves to false when the dialog was cancelled. */
+export async function promptSaveSearch(query: string): Promise<boolean> {
   const q = query.trim();
-  if (!q) return;
+  if (!q) return false;
   const existing = savedSearch(q);
   const name = await ask({
     title: existing ? "Rename saved search" : "Save search",
     message: `“${q}” goes in the sidebar under Searches. It opens as a tab that always lists the current matches.`,
     input: existing?.name ?? q, confirmLabel: existing ? "Rename" : "Save",
   });
-  if (name === null) return;
+  if (name === null) return false;
   saveSearch(name, q);
   if (!existing) toast(`Saved “${name.trim() || q}” to the sidebar`);
+  return true;
 }
 
 /** What a search tab is called: its saved name, or the query. */

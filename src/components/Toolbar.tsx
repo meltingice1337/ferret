@@ -32,7 +32,7 @@ export default function Toolbar() {
   };
 
   return (
-    <div class="toolbar">
+    <div class="toolbar" role="group" aria-label="Folder navigation">
       <div class="nav-btns">
         <Show when={!sidebarDocked()}>
           <button class="icon-btn sidebar-toggle" title="Show sidebar (Ctrl+B)"
@@ -48,7 +48,7 @@ export default function Toolbar() {
         <button class="icon-btn refresh" title="Refresh (F5)" onClick={() => refresh(tab())}>
           <RotateCw size={15} classList={{ spin: tab().loading[0]() }} />
         </button>
-        <button class="icon-btn star" classList={{ on: isFavorite(tab().p) }}
+        <button class="icon-btn star" classList={{ on: isFavorite(tab().p) }} aria-pressed={isFavorite(tab().p)}
           title={isFavorite(tab().p) ? "Remove this folder from favorites" : "Add this folder to favorites (Ctrl+D with nothing selected)"}
           onClick={() => toggleFavorite(tab().p, true)}>
           <Star size={15} fill={isFavorite(tab().p) ? "currentColor" : "none"} />
@@ -274,6 +274,7 @@ function PathEditor() {
         ref={input}
         value={text()}
         spellcheck={false}
+        aria-label="Folder path"
         onInput={(e) => { setText(e.currentTarget.value); suggest(e.currentTarget.value); }}
         // Late, so a click on a suggestion lands first. Only for this box: after Escape, a quick
         // Ctrl+L opens a new one, which this one's blur must not close.
@@ -355,7 +356,7 @@ function FilterBox() {
     }>
       <div class="filter">
         <ListFilter size={14} />
-        <input ref={input} placeholder="Filter folder…" value={tab().filter[0]()} spellcheck={false}
+        <input ref={input} aria-label="Filter this folder" placeholder="Filter folder…" value={tab().filter[0]()} spellcheck={false}
           title={"Shows names with these words. Also understands type:image, ext:pdf,docx and !word (leave out)"}
           onInput={(e) => tab().filter[1](e.currentTarget.value)}
           onBlur={() => !tab().filter[0]() && setUi("filterOpen", false)}

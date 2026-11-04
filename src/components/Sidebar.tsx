@@ -18,7 +18,7 @@ const GENERIC_NAMES = new Set([
 ]);
 import {
   connections, remoteState,
-  activeTab, favorites, goTo, navigate, newTab, openMenu, persistSession, persistSettings, places, promptSaveSearch, recents,
+  activeTab, favorites, goTo, navigate, newTab, openMenu, persistSession, persistSettings, places, promptSaveSearch, recents, RESIZE_STEP,
   removeFromShelf, removeSavedSearch, setFavorites, setRecents, setSettings, settings, setUi, SHELF, ui, type MenuItem,
 } from "../lib/state";
 import FileIcon from "./FileIcon";
@@ -54,15 +54,31 @@ const customize: MenuItem = { label: "Customize sidebar…", icon: SlidersHorizo
 
 export const FAVORITE_COLORS = ["#ef4444", "#f59e0b", "#22c55e", "#06b6d4", "#3b82f6", "#a855f7", "#ec4899"];
 
-/** ↑ ↓ Home End move between the sidebar's items (as in Explorer's navigation pane) instead of
- *  Tab through each one; Enter opens the one with the focus. */
-function arrowKeys(e: KeyboardEvent) {
-  if (!["ArrowDown", "ArrowUp", "Home", "End"].includes(e.key) || e.altKey || e.ctrlKey || e.shiftKey) return;
+const SIDE_STOPS = ".side-item, .drive, .side-title-toggle, .side-title .icon-btn";
+
+/** ↑ ↓ Home End move between everything in the sidebar's list (as in Explorer's navigation pane),
+ *  and Enter opens the one with the focus. Tab goes on to the rest of the window, so the whole
+ *  list is one stop instead of a couple of dozen. */
+function sidebarKeys(e: KeyboardEvent) {
+  const box = e.currentTarget as HTMLElement;
   const at = e.target as HTMLElement;
   if (at.closest("input, textarea")) return;
-  const items = [...(e.currentTarget as HTMLElement).querySelectorAll<HTMLElement>(".side-item")].filter((el) => el.offsetParent);
+  if (e.key === "Tab" && !e.altKey && !e.ctrlKey) {
+    const stops = [...document.querySelectorAll<HTMLElement>("button, [href], input, select, textarea, [tabindex]")]
+      .filter((el) => el.tabIndex >= 0 && !(el as HTMLButtonElement).disabled && el.offsetParent && !box.contains(el));
+    const after = stops.filter((el) => box.compareDocumentPosition(el) & Node.DOCUMENT_POSITION_FOLLOWING);
+    const before = stops.filter((el) => box.compareDocumentPosition(el) & Node.DOCUMENT_POSITION_PRECEDING);
+    const next = e.shiftKey ? before[before.length - 1] ?? after[after.length - 1] : after[0] ?? before[0];
+    if (!next) return;
+    e.preventDefault();
+    e.stopPropagation();
+    next.focus();
+    return;
+  }
+  if (!["ArrowDown", "ArrowUp", "Home", "End"].includes(e.key) || e.altKey || e.ctrlKey || e.shiftKey) return;
+  const items = [...box.querySelectorAll<HTMLElement>(SIDE_STOPS)].filter((el) => el.offsetParent);
   if (!items.length) return;
-  const i = items.indexOf(at.closest<HTMLElement>(".side-item")!);
+  const i = items.indexOf(at.closest<HTMLElement>(SIDE_STOPS)!);
   const step = e.key === "ArrowDown" ? 1 : -1;
   const next = e.key === "Home" ? 0 : e.key === "End" ? items.length - 1 : i < 0 ? 0 : Math.min(items.length - 1, Math.max(0, i + step));
   e.preventDefault();
@@ -103,8 +119,8 @@ export default function Sidebar(props: { overlay?: boolean }) {
   };
 
   return (
-    <aside class="sidebar panel" classList={{ overlay: props.overlay }} style={{ width: `${ui.sidebarWidth}px` }}>
-      <div class="sidebar-scroll" onKeyDown={arrowKeys}>
+    <aside class="sidebar panel" classList={{ overlay: props.overlay }} role="navigation" aria-label="Places and drives" style={{ width: `${ui.sidebarWidth}px` }}>
+      <div class="sidebar-scroll" onKeyDown={sidebarKeys}>
 
         <Section id="favorites" title="Favorites">
           <Show when={favorites().length} fallback={<div class="side-empty">Ctrl+D pins the selected item (or the folder you're in) here</div>}>
@@ -120,6 +136,7 @@ export default function Sidebar(props: { overlay?: boolean }) {
                 const open = (inNewTab = false) => (inNewTab ? newTab(path(), false) : navigate(activeTab(), path()));
                 return (
                   <button class="side-item" classList={{ active: isSearch(current()) && searchQuery(current()).toLowerCase() === s.query.toLowerCase() }}
+                    aria-current={isSearch(current()) && searchQuery(current()).toLowerCase() === s.query.toLowerCase() ? "location" : undefined}
                     title={`${s.name}\n${s.query}\nAlways lists the current matches`}
                     onClick={() => open()}
                     onMouseDown={(e) => e.button === 1 && (e.preventDefault(), open(true))}
@@ -136,7 +153,8 @@ export default function Sidebar(props: { overlay?: boolean }) {
                     }}>
                     <Search size={15} />
                     <span class="side-label">{s.name}</span>
-                    <span class="side-x" title="Remove from sidebar" onClick={(e) => { e.stopPropagation(); removeSavedSearch(s.query); }}><X size={12} /></span>
+                    {/* For the mouse; the keyboard has this in the item's menu (Shift+F10). */}
+                    <span class="side-x" title="Remove from sidebar" aria-hidden="true" onClick={(e) => { e.stopPropagation(); removeSavedSearch(s.query); }}><X size={12} /></span>
                   </button>
                 );
               }}
@@ -153,7 +171,7 @@ export default function Sidebar(props: { overlay?: boolean }) {
             )}
           </For>
           <Show when={placeShown("recycle")}>
-            <button class="side-item" classList={{ active: isRecycle(current()) }} data-drop={RECYCLE}
+            <button class="side-item" classList={{ active: isRecycle(current()) }} aria-current={isRecycle(current()) ? "location" : undefined} data-drop={RECYCLE}
               title={places().recycle.items ? `Recycle Bin: ${places().recycle.items} items, ${formatSize(places().recycle.bytes)}\nDrop files here to delete them` : "Recycle Bin (empty)\nDrop files here to delete them"}
               onClick={() => goTo(RECYCLE)}
               onMouseDown={(e) => e.button === 1 && (e.preventDefault(), goTo(RECYCLE, true))}
@@ -192,6 +210,7 @@ export default function Sidebar(props: { overlay?: boolean }) {
               const used = () => (d.total ? 1 - d.free / d.total : 0);
               return (
                 <button class="drive" classList={{ active: isWithin(current(), d.path) }}
+                  aria-current={samePath(current(), d.path) ? "location" : isWithin(current(), d.path) ? "true" : undefined}
                   data-drop={d.path}
                   onContextMenu={(e) => { e.preventDefault(); openMenu(e.clientX, e.clientY, placeMenu(d.path, goTo, e.clientX, e.clientY)); }}
                   onClick={() => goTo(d.path)}
@@ -238,7 +257,18 @@ export default function Sidebar(props: { overlay?: boolean }) {
         </button>
         <AppVersion />
       </div>
-      <div class="resizer" onMouseDown={startResize} onDblClick={() => { setUi("sidebarWidth", 248); persistSession(); }} />
+      <div class="resizer" role="separator" aria-orientation="vertical" aria-label="Sidebar width" tabIndex={0}
+        aria-valuenow={Math.round(ui.sidebarWidth)} aria-valuemin={190} aria-valuemax={420}
+        onMouseDown={startResize} onDblClick={() => { setUi("sidebarWidth", 248); persistSession(); }}
+        onKeyDown={(e) => {
+          const next = e.key === "ArrowLeft" ? ui.sidebarWidth - RESIZE_STEP : e.key === "ArrowRight" ? ui.sidebarWidth + RESIZE_STEP
+            : e.key === "Home" ? 190 : e.key === "End" ? 420 : e.key === "Enter" ? 248 : null;
+          if (next === null) return;
+          e.preventDefault();
+          e.stopPropagation();
+          setUi("sidebarWidth", Math.max(190, Math.min(420, next)));
+          persistSession();
+        }} />
     </aside>
   );
 }
@@ -304,7 +334,7 @@ function Section(props: { id: string; title: string; children: JSX.Element; acti
   return (
     <Show when={sectionShown(props.id)}>
     <section class="side-section">
-      <div class="side-title" onClick={toggle}
+      <div class="side-title"
         onContextMenu={(e) => {
           e.preventDefault();
           openMenu(e.clientX, e.clientY, [
@@ -313,6 +343,7 @@ function Section(props: { id: string; title: string; children: JSX.Element; acti
             customize,
           ]);
         }}>
+        <button class="side-title-toggle" aria-expanded={!collapsed()} aria-label={props.title} onClick={toggle} />
         <span>{props.title}</span>
         <span class="side-title-actions">
           {props.action}
@@ -332,7 +363,7 @@ function SideItem(props: {
   badge?: string;
 }) {
   return (
-    <button class="side-item" classList={{ active: props.active }} title={props.title ?? props.path}
+    <button class="side-item" classList={{ active: props.active }} aria-current={props.active ? "location" : undefined} title={props.title ?? props.path}
       data-drop={props.path}
       onClick={() => goTo(props.path)}
       onMouseDown={(e) => e.button === 1 && (e.preventDefault(), goTo(props.path, true))}
@@ -350,7 +381,8 @@ function SideItem(props: {
       <span class="side-label">{props.label}</span>
       {props.extra}
       <Show when={props.onRemove}>
-        <span class="side-x" title="Remove" onClick={(e) => { e.stopPropagation(); props.onRemove!(); }}><X size={12} /></span>
+        {/* For the mouse; the keyboard has this in the item's menu (Shift+F10). */}
+        <span class="side-x" title="Remove" aria-hidden="true" onClick={(e) => { e.stopPropagation(); props.onRemove!(); }}><X size={12} /></span>
       </Show>
     </button>
   );
@@ -370,7 +402,7 @@ function FavoriteList(props: { current: string }) {
     <For each={favorites()}>
       {(f, i) => (
         <Show when={renaming() !== f.path} fallback={
-          <input class="side-rename" value={f.name} ref={(el) => queueMicrotask(() => { el.focus(); el.select(); })}
+          <input class="side-rename" aria-label="Favorite's name" value={f.name} ref={(el) => queueMicrotask(() => { el.focus(); el.select(); })}
             onKeyDown={async (e) => {
               e.stopPropagation();
               if (e.key === "Enter") { setFavorites(await api.updateFavorite(f.path, e.currentTarget.value || f.name, f.color)); setRenaming(null); }
@@ -381,6 +413,7 @@ function FavoriteList(props: { current: string }) {
           <button
             class="side-item fav"
             classList={{ active: samePath(f.path, props.current) }}
+            aria-current={samePath(f.path, props.current) ? "location" : undefined}
             title={f.path}
             data-index={i()}
             data-drop={f.isDir ? f.path : undefined}

@@ -544,6 +544,111 @@ export const tests = [
     },
   },
   {
+    name: "WSL: Delete asks, then deletes for good in Linux, with nothing in the Recycle Bin",
+    soft: true,
+    async run(t) {
+      // Only in a distro that's already running: a test never starts one.
+      const running = execFileSync("wsl.exe", ["--list", "--running", "--quiet"]).toString("utf16le")
+        .split(/\r?\n/).map((l) => l.replace(/\0/g, "").replace(/^﻿/, "").trim()).filter(Boolean);
+      if (!running.length) return t.note("no WSL distro running: skipped");
+      const distro = running[0];
+      const dir = `${t.wslDir}-delete`;
+      const inWsl = (script) => execFileSync("wsl.exe", ["-d", distro, "--exec", "sh", "-c", script, "sh", dir]).toString().trim();
+      inWsl(`mkdir -p "$1/folder/sub"; cd "$1"; touch folder/sub/f 'odd:name' other`);
+      const left = () => inWsl(`ls -A "$1" | tr '\\n' ' '`);
+      const remove = async (name) => {
+        await clickRow(t, name);
+        await t.c.key("Delete");
+        await t.c.waitFor(`document.querySelector(".modal")?.innerText.includes("WSL has no Recycle Bin")`, { what: "the confirmation" });
+        await t.c.click(".modal button", { text: "Delete permanently" });
+      };
+      try {
+        const bin = binCount();
+        await go(t, `\\\\wsl.localhost\\${distro}${dir.replace(/\//g, "\\")}`);
+        await t.c.waitFor(`${tab}.entries[0]().length === 3`, { timeoutMs: 15000, what: "the WSL folder listed" });
+        // Cancel leaves it where it is.
+        await clickRow(t, "folder");
+        await t.c.key("Delete");
+        await t.c.waitFor(`document.querySelector(".modal")?.innerText.includes("WSL has no Recycle Bin")`, { what: "the confirmation" });
+        await t.c.click(".modal button", { text: "Cancel" });
+        await t.c.waitFor(`!document.querySelector(".modal")`, { what: "the confirmation gone" });
+        assert(left() === "folder odd:name other", `after Cancel: ${left()}`);
+        await remove("folder");
+        await t.c.waitFor(`${tab}.entries[0]().length === 2`, { timeoutMs: 15000, what: "the folder gone from the list" });
+        // As Windows shows a name it can't have.
+        await remove("oddname");
+        await t.c.waitFor(`${tab}.entries[0]().length === 1`, { timeoutMs: 15000, what: "the file gone from the list" });
+        assert(left() === "other", `left in Linux: ${left()}`);
+        assert(binCount() === bin, "something went to the Recycle Bin");
+      } finally {
+        await go(t, t.root);
+        inWsl(`rm -rf -- "$1"`);
+      }
+    },
+  },
+  {
+    name: "network folder: Delete asks and deletes for good, Replace warns, X stops a delete",
+    soft: true,
+    async run(t) {
+      // The fixture again, as a network path (the loopback share Windows has for administrators).
+      const unc = (...parts) => `\\\\localhost\\C$${t.p(...parts).slice(2)}`;
+      if (!t.root.toUpperCase().startsWith("C:") || !existsSync(unc())) return t.note("no loopback share: skipped");
+      mkdirSync(t.p("net", "bulk"), { recursive: true });
+      mkdirSync(t.p("net-from"), { recursive: true });
+      writeFileSync(t.p("net", "one.txt"), "one");
+      writeFileSync(t.p("net", "two.txt"), "old");
+      writeFileSync(t.p("net-from", "two.txt"), "new");
+      for (let i = 0; i < 4000; i++) writeFileSync(t.p("net", "bulk", `f${i}.txt`), "x");
+      const bin = binCount();
+      try {
+        await go(t, unc("net"));
+        await t.c.waitFor(`${tab}.entries[0]().some((e) => e.name === "one.txt")`, { timeoutMs: 15000, what: "the network folder listed" });
+        const asks = async () => {
+          await clickRow(t, "one.txt");
+          await t.c.key("Delete");
+          await t.c.waitFor(`document.querySelector(".modal")?.innerText.includes("A network folder has no Recycle Bin")`, { what: "the confirmation" });
+        };
+        await asks();
+        await t.c.click(".modal button", { text: "Cancel" });
+        await t.c.waitFor(`!document.querySelector(".modal")`, { what: "the confirmation gone" });
+        assert(existsSync(t.p("net", "one.txt")), "Cancel deleted it");
+        await asks();
+        await t.c.click(".modal button", { text: "Delete permanently" });
+        const start = Date.now();
+        while (existsSync(t.p("net", "one.txt")) && Date.now() - start < 8000) await sleep(100);
+        assert(!existsSync(t.p("net", "one.txt")), "not deleted");
+        await t.c.waitFor(`!${tab}.entries[0]().some((e) => e.name === "one.txt")`, { timeoutMs: 15000, what: "the file gone from the list" });
+
+        // Replace says it can't be brought back, and does it.
+        await t.c.eval(`void ${T}.ops.transferTo("copy", ${JSON.stringify([t.p("net-from", "two.txt")])}, ${JSON.stringify(unc("net"))})`);
+        await t.c.waitFor(`document.querySelector(".modal .choice-warn")?.textContent.includes("can't be brought back")`, { what: "the warning on Replace" });
+        await t.c.click(".modal .choice", { text: "Replace" });
+        const began = Date.now();
+        while (readFileSync(t.p("net", "two.txt"), "utf8") !== "new" && Date.now() - began < 8000) await sleep(100);
+        assert(readFileSync(t.p("net", "two.txt"), "utf8") === "new", "not replaced");
+
+        // X stops a delete of a folder midway, and what's left stays.
+        const count = () => readdirSync(t.p("net", "bulk")).length;
+        const job = await t.c.eval(`${T}.api.deleteItems(${JSON.stringify([unc("net", "bulk")])}, true)`);
+        const running = Date.now();
+        while (count() === 4000 && Date.now() - running < 8000) await sleep(10);
+        await t.c.eval(`${T}.api.cancelJob(${job})`);
+        await sleep(300);
+        const a = count();
+        await sleep(500);
+        assert(a > 0 && a < 4000, `${a} of 4000 left after X`);
+        assert(count() === a, `still deleting after X: ${a}, then ${count()}`);
+        t.note(`${a} of 4000 left after X`);
+        assert(binCount() === bin, "something went to the Recycle Bin");
+      } finally {
+        await go(t, t.root);
+        // The list stays as the later tests expect (more rows would push theirs off screen).
+        rmSync(t.p("net"), { recursive: true, force: true });
+        rmSync(t.p("net-from"), { recursive: true, force: true });
+      }
+    },
+  },
+  {
     name: "WSL folder sizes come from Linux, all folders at once, with file counts",
     soft: true,
     async run(t) {
@@ -646,6 +751,163 @@ export const tests = [
         await t.c.eval(`${T}.state.closeTab(${tab}.id)`);
       } finally {
         if (await t.c.eval(`!!document.querySelector(".palette")`)) await t.c.key("Escape");
+      }
+    },
+  },
+  {
+    name: "Ctrl+K: dragging a result copies it to a folder, and Esc only ends the drag",
+    soft: true,
+    async run(t) {
+      const mouse = (type, at, extra = {}) => t.c.send("Input.dispatchMouseEvent", { type, x: at.x, y: at.y, ...extra });
+      const center = (expr) => t.c.eval(`(() => { const b = ${expr}.getBoundingClientRect(); return { x: b.left + b.width / 2, y: b.top + b.height / 2 }; })()`);
+      const result = `[...document.querySelectorAll(".palette-item.file")].find((e) => e.innerText.includes(${JSON.stringify(t.needle)}))`;
+      const name = `${t.needle}.txt`;
+      await go(t, t.root);
+      await t.c.waitFor(`[...document.querySelectorAll(".files .row .name")].some((e) => e.textContent === "docs")`, { what: "the folder to drop on" });
+      await t.c.key("k", ["Control"]);
+      await t.c.waitFor(`document.querySelector(".palette input")`, { what: "the search box" });
+      await t.c.type(t.needle);
+      await t.c.waitFor(`!!${result}`, { timeoutMs: 20000, what: "the file in the results" });
+      const from = await center(result);
+      const start = async () => {
+        await mouse("mousePressed", from, { button: "left", buttons: 1, clickCount: 1 });
+        await mouse("mouseMoved", { x: from.x + 12, y: from.y + 12 }, { buttons: 1 });
+        await t.c.waitFor(`!!document.querySelector(".palette-backdrop.dragging")`, { what: "the search out of the way" });
+      };
+      let at = { x: from.x + 12, y: from.y + 12 };
+      const release = () => mouse("mouseReleased", at, { button: "left", buttons: 0, clickCount: 1 });
+      try {
+        // Esc: the search comes back with its results, nothing was copied, and the mouse coming
+        // up doesn't open the file.
+        await start();
+        await t.c.key("Escape");
+        await t.c.waitFor(`!!document.querySelector(".palette") && !document.querySelector(".palette-backdrop.dragging")`, { what: "the search back after Esc" });
+        await release();
+        await sleep(200);
+        assert(await t.c.eval(`!!${result}`), "the results are gone after Esc");
+        assert(!existsSync(t.p("docs", name)), "Esc copied it");
+        // Dropped on a folder: a copy, the original stays, and the search closes. (On a local
+        // disk a drag from the list would have moved it.)
+        await start();
+        at = await center(`[...document.querySelectorAll(".files .row")].find((r) => r.querySelector(".name")?.textContent === "docs")`);
+        await mouse("mouseMoved", at, { buttons: 1 });
+        await t.c.waitFor(`document.querySelector(".drag-ghost span:last-child")?.textContent.startsWith("Copy ")`, { what: "“Copy … to docs” by the pointer" });
+        await release();
+        const began = Date.now();
+        while (!existsSync(t.p("docs", name)) && Date.now() - began < 8000) await sleep(150);
+        assert(existsSync(t.p("docs", name)), "not copied to the folder");
+        assert(existsSync(t.p(name)), "the original is gone");
+        await t.c.waitFor(`!document.querySelector(".palette")`, { what: "the search closed" });
+      } finally {
+        // Whatever happened, no drag or search is left for the next test.
+        await release().catch(() => {});
+        await t.c.eval(`${T}.state.setUi("palette", null)`);
+        rmSync(t.p("docs", name), { force: true });
+      }
+    },
+  },
+  {
+    name: "keyboard: the list reports its selection, and Shift+F10 opens the focused item's menu",
+    async run(t) {
+      await t.c.eval(`document.querySelector(".files")?.focus()`);
+      await t.c.key("Home");
+      const active = `(() => { const l = document.querySelector(".files"); return document.getElementById(l.getAttribute("aria-activedescendant") ?? ""); })()`;
+      await t.c.waitFor(`${active}?.getAttribute("aria-selected") === "true"`, { what: "the picked row to be the list's active, selected option" });
+      assert(await t.c.eval(`document.querySelector(".files").getAttribute("role") === "listbox" && document.querySelector(".toasts").getAttribute("role") === "status"`), "the list and the toasts should have their roles");
+      await t.c.key("Escape");
+
+      // A sidebar section: its own menu, and the keyboard back where it was.
+      await t.c.eval(`document.querySelector(".side-title-toggle").focus()`);
+      await t.c.key("F10", ["Shift"]);
+      await t.c.waitFor(`document.querySelector(".menu .menu-item")`, { what: "the section's menu" });
+      const first = await t.c.eval(`document.querySelector(".menu .menu-label").innerText`);
+      assert(first === "Collapse" || first === "Expand", `the section's menu starts with “${first}”`);
+      await t.c.key("ArrowDown");
+      await t.c.waitFor(`document.getElementById(document.querySelector(".menu").getAttribute("aria-activedescendant") ?? "")?.classList.contains("focus")`, { what: "the menu to report its highlighted item" });
+      await t.c.key("Escape");
+      await t.c.waitFor(`!document.querySelector(".menu") && document.activeElement?.classList.contains("side-title-toggle")`, { what: "the keyboard back on the section" });
+
+      // Nothing in a title may sit over the toggle, collapsed or open (a rotated chevron did).
+      const onTop = `(() => { const t = document.querySelector(".side-title"), s = t.querySelector("svg").getBoundingClientRect(); return document.elementFromPoint(s.left + s.width / 2, s.top + s.height / 2)?.classList.contains("side-title-toggle"); })()`;
+      assert(await t.c.eval(onTop), "the chevron of an open section should let clicks through");
+      await t.c.eval(`document.querySelector(".side-title-toggle").click()`);
+      await t.c.waitFor(`document.querySelector(".side-title-toggle").getAttribute("aria-expanded") === "false"`, { what: "the section to collapse" });
+      assert(await t.c.eval(onTop), "the chevron of a collapsed section should let clicks through");
+      await t.c.eval(`document.querySelector(".side-title-toggle").click()`);
+      await t.c.waitFor(`document.querySelector(".side-title-toggle").getAttribute("aria-expanded") === "true"`, { what: "the section to open again" });
+    },
+  },
+  {
+    name: "keyboard: the sidebar is one Tab stop, resize lines move, Quick Look keeps the focus",
+    async run(t) {
+      // Tab from anywhere in the sidebar's list goes on to the rest of the window.
+      await t.c.eval(`document.querySelector(".sidebar-scroll .side-item").focus()`);
+      await t.c.key("Tab");
+      await t.c.waitFor(`!document.activeElement?.closest(".sidebar-scroll")`, { what: "Tab to leave the sidebar's list" });
+      // …and the arrows reach what's in it, drives too.
+      await t.c.eval(`document.querySelector(".drive").focus()`);
+      await t.c.key("ArrowUp");
+      await t.c.waitFor(`document.activeElement?.closest(".sidebar-scroll") && !document.activeElement.classList.contains("drive")`, { what: "the arrows to move on from a drive" });
+
+      // The sidebar's line: an arrow moves it, the opposite one puts it back.
+      const width = `document.querySelector(".resizer").getAttribute("aria-valuenow")`;
+      await t.c.eval(`document.querySelector(".resizer").focus()`);
+      const before = await t.c.eval(width);
+      await t.c.key("ArrowRight");
+      await t.c.waitFor(`${width} !== ${JSON.stringify(before)}`, { what: "the sidebar to get wider" });
+      await t.c.key("ArrowLeft");
+      await t.c.waitFor(`${width} === ${JSON.stringify(before)}`, { what: "the sidebar to go back" });
+
+      // Quick Look has the focus, keeps it from file to file, and its buttons take Enter themselves.
+      await t.c.eval(`document.querySelector(".files").focus()`);
+      await t.c.key("Home");
+      await t.c.eval(`${T}.state.setUi("quickLook", true)`);
+      const onDialog = `document.activeElement === document.querySelector(".ql-backdrop")`;
+      await t.c.waitFor(onDialog, { what: "Quick Look to take the focus" });
+      const says = `document.querySelector(".ql .sr-only")?.innerText`;
+      const first = await t.c.eval(says);
+      await t.c.key("ArrowDown");
+      await t.c.waitFor(`${says} !== ${JSON.stringify(first)}`, { what: "Quick Look to say the next file" });
+      await sleep(200);
+      assert(await t.c.eval(onDialog), "Quick Look should keep the focus on the next file");
+      await t.c.eval(`document.querySelector('.ql button[title^="Close"]').focus()`);
+      // With its text, unlike key("Enter"): a focused button only reacts to the whole key press.
+      const enter = { key: "Enter", code: "Enter", windowsVirtualKeyCode: 13 };
+      await t.c.send("Input.dispatchKeyEvent", { type: "keyDown", ...enter, text: "\r" });
+      await t.c.send("Input.dispatchKeyEvent", { type: "keyUp", ...enter });
+      await t.c.waitFor(`!document.querySelector(".ql")`, { what: "Enter on Close to close Quick Look" });
+    },
+  },
+  {
+    name: "keyboard: ← and → collapse and expand groups, even when every group is closed",
+    async run(t) {
+      const view = `${tab}.view[0]().groupBy`;
+      const before = await t.c.eval(view);
+      const heads = `document.querySelectorAll(".group-head")`;
+      const shut = `[...${heads}].filter((h) => h.querySelector(".lucide-chevron-right")).length`;
+      await t.c.eval(`document.querySelector(".files").focus()`);
+      await t.c.key("g", ["Control"]);
+      try {
+        await t.c.waitFor(`${heads}.length > 0`, { what: "the list to be grouped" });
+        const groups = await t.c.eval(`${heads}.length`);
+        await t.c.key("Home");
+        // Close them all: the keyboard has to stay on the list, on something still visible.
+        for (let i = 1; i <= groups; i++) {
+          await t.c.key("ArrowLeft");
+          await t.c.waitFor(`${shut} === ${i}`, { what: `group ${i} of ${groups} to collapse` });
+          assert(await t.c.eval(`document.activeElement === document.querySelector(".files")`), "the list should keep the focus");
+          if (i < groups) assert(await t.c.eval(`!!document.querySelector(".row.cursor, .cell.cursor")`), "the cursor should move to what's left");
+        }
+        assert(await t.c.eval(`document.querySelector(".fileview .sr-only[role=status]").innerText.includes("collapsed")`), "collapsing should be announced");
+        // → brings them back, and the first one back has the cursor.
+        await t.c.key("ArrowRight");
+        await t.c.waitFor(`${shut} === ${groups - 1} && document.querySelector(".row.cursor, .cell.cursor")`, { what: "→ to reopen a group, with the cursor in it" });
+        for (let i = groups - 2; i >= 0; i--) {
+          await t.c.key("ArrowRight");
+          await t.c.waitFor(`${shut} === ${i}`, { what: "→ to reopen the rest" });
+        }
+      } finally {
+        await t.c.eval(`${T}.state.updateView(${tab}, { groupBy: ${JSON.stringify(before)} })`);
       }
     },
   },
@@ -771,24 +1033,31 @@ export const tests = [
     },
   },
   {
-    name: "SSH: Delete moves to the server's trash and Ctrl+Z brings it back",
+    name: "SSH: Delete asks, then deletes for good on the server",
     async run(t) {
       await go(t, t.ssh.path);
       await t.c.waitFor(`[...document.querySelectorAll(".files .row .name")].some((e) => e.textContent === "on-server.txt")`, { what: "the server's file" });
-      await clickRow(t, "on-server.txt");
-      await t.c.key("Delete");
-      await t.c.waitFor(`${tab}.selection[0]().length === 0`, { what: "nothing selected after Delete" });
-      const trashed = join(t.ssh.home, ".local", "share", "Trash", "files", "on-server.txt");
-      let start = Date.now();
-      while (!existsSync(trashed) && Date.now() - start < 8000) await sleep(150);
-      assert(existsSync(trashed) && !existsSync(join(t.ssh.home, "on-server.txt")), "not in the server's trash");
-      const info = readFileSync(join(t.ssh.home, ".local", "share", "Trash", "info", "on-server.txt.trashinfo"), "utf8");
-      assert(info.includes("Path=/home/tester/on-server.txt"), `trashinfo: ${info}`);
-      await t.c.eval(`document.querySelector(".files").focus()`);
-      await t.c.key("z", ["Control"]);
-      start = Date.now();
-      while (!existsSync(join(t.ssh.home, "on-server.txt")) && Date.now() - start < 10_000) await sleep(150);
-      assert(existsSync(join(t.ssh.home, "on-server.txt")) && !existsSync(trashed), "undo didn't bring it back");
+      const asks = async (name) => {
+        await clickRow(t, name);
+        await t.c.key("Delete");
+        await t.c.waitFor(`document.querySelector(".modal")?.innerText.includes("Permanently delete")`, { what: "the confirmation" });
+      };
+      // Cancel leaves it where it is.
+      await asks("on-server.txt");
+      await t.c.click(".modal button", { text: "Cancel" });
+      await t.c.waitFor(`!document.querySelector(".modal")`, { what: "the confirmation gone" });
+      assert(existsSync(join(t.ssh.home, "on-server.txt")), "Cancel deleted it");
+      // A file, and a folder with what's in it (this server runs no commands: over SFTP).
+      for (const name of ["on-server.txt", "docs"]) {
+        await asks(name);
+        await t.c.click(".modal button", { text: "Delete permanently" });
+        await t.c.waitFor(`${tab}.selection[0]().length === 0`, { what: "nothing selected after Delete" });
+        const start = Date.now();
+        while (existsSync(join(t.ssh.home, name)) && Date.now() - start < 8000) await sleep(150);
+        assert(!existsSync(join(t.ssh.home, name)), `${name} is still on the server`);
+        await t.c.waitFor(`![...document.querySelectorAll(".files .row .name")].some((e) => e.textContent === ${JSON.stringify(name)})`, { what: `${name} gone from the list` });
+      }
+      assert(!existsSync(join(t.ssh.home, ".local", "share", "Trash")), "something went to the server's trash");
     },
   },
   {
@@ -797,7 +1066,7 @@ export const tests = [
       await t.c.eval(`window.__TAURI_INTERNALS__.invoke("remote_disconnect", { id: "ferret-e2e" })`);
       await t.c.waitFor(`!!document.querySelector(".files-offline")`, { what: "the Connect button" });
       await t.c.click(".files-offline button", { text: "Connect" });
-      await t.c.waitFor(`[...document.querySelectorAll(".files .row .name")].some((e) => e.textContent === "on-server.txt")`, { what: "the folder listed again", timeoutMs: 15_000 });
+      await t.c.waitFor(`[...document.querySelectorAll(".files .row .name")].some((e) => e.textContent === "readme.txt")`, { what: "the folder listed again", timeoutMs: 15_000 });
       await go(t, t.root);
     },
   },

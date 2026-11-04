@@ -453,14 +453,25 @@ pub async fn remove_all(s: &Session, linux: &str) -> Res<()> {
             return Ok(());
         }
     }
-    remove_tree(s, linux).await
+    remove_tree(s, linux, &|| false).await
 }
 
-async fn remove_tree(s: &Session, linux: &str) -> Res<()> {
+/// Deletes for good item by item over SFTP, until `stop` says so.
+pub async fn remove_over_sftp(s: &Session, linux: &str, stop: &dyn Fn() -> bool) -> Res<()> {
+    if linux == "/" || linux == s.home {
+        return Err("Ferret doesn't delete a server's root or home folder".into());
+    }
+    remove_tree(s, linux, stop).await
+}
+
+async fn remove_tree(s: &Session, linux: &str, stop: &dyn Fn() -> bool) -> Res<()> {
+    if stop() {
+        return Err("Cancelled".into());
+    }
     let m = s.sftp.symlink_metadata(linux.to_string()).await.map_err(|e| sftp_err(linux, e))?;
     if m.is_dir() {
         for e in s.sftp.read_dir(linux.to_string()).await.map_err(|e| sftp_err(linux, e))? {
-            Box::pin(remove_tree(s, &linux_join(linux, &e.file_name()))).await?;
+            Box::pin(remove_tree(s, &linux_join(linux, &e.file_name()), stop)).await?;
         }
         s.sftp.remove_dir(linux.to_string()).await.map_err(|e| sftp_err(linux, e))
     } else {

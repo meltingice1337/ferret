@@ -144,7 +144,7 @@ function Shell(props: {
 }) {
   return (
     <div class="modal-backdrop">
-      <div class="modal mx" role="dialog" aria-label={props.title} tabIndex={-1}
+      <div class="modal mx" role="dialog" aria-modal="true" aria-label={props.title} tabIndex={-1}
         ref={(el) => queueMicrotask(() => el.focus())}
         onKeyDown={(e) => {
           e.stopPropagation();

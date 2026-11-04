@@ -3,9 +3,18 @@ import { createEffect, createSignal, For, on, onCleanup, Show } from "solid-js";
 import { Dynamic } from "solid-js/web";
 import { closeMenu, ui, type MenuItem } from "../lib/state";
 
+let nextMenuId = 0;
+
 export default function ContextMenu() {
   createEffect(() => {
     if (!ui.menu) return;
+    // Where the keyboard was: it goes back there when the menu closes.
+    const opener = document.activeElement as HTMLElement | null;
+    onCleanup(() => queueMicrotask(() => {
+      if (ui.menu || !opener?.isConnected || opener === document.body) return;
+      const now = document.activeElement;
+      if (!now || now === document.body) opener.focus({ preventScroll: true });
+    }));
     const onDown = (e: MouseEvent) => !(e.target as HTMLElement).closest(".menu") && closeMenu();
     const onKey = (e: KeyboardEvent) => {
       // A submenu with focus handles Escape itself (closing just that level).
@@ -60,6 +69,7 @@ type Pt = { x: number; y: number };
 function MenuList(props: ListProps) {
   let el!: HTMLDivElement;
   let subEl: HTMLDivElement | undefined;
+  const menuId = `menu-${++nextMenuId}`;
   const [open, setOpen] = createSignal<{ index: number; items: MenuItem[] | null; x: number; y: number; w: number; kb: boolean } | null>(null);
   const [focus, setFocus] = createSignal(-1);
   let hoverTimer: number | undefined;
@@ -162,7 +172,9 @@ function MenuList(props: ListProps) {
 
   return (
     <>
+      {/* Focus stays on the menu and the arrow keys move the highlight, so that's what's announced. */}
       <div ref={place} class="menu" classList={{ sub: !props.root }} tabIndex={-1} role="menu"
+        aria-activedescendant={focus() >= 0 ? `${menuId}-${focus()}` : undefined}
         style={{ left: `${props.x}px`, top: `${props.y}px`, visibility: "hidden" }}
         onContextMenu={(e) => e.preventDefault()} onKeyDown={onKeyDown}
         onMouseEnter={() => props.onEnter?.()}
@@ -196,7 +208,12 @@ function MenuList(props: ListProps) {
                 }>
                   <button
                     class="menu-item"
-                    role="menuitem"
+                    id={`${menuId}-${i()}`}
+                    tabIndex={-1}
+                    role={it.checked !== undefined ? "menuitemcheckbox" : "menuitem"}
+                    aria-checked={it.checked !== undefined ? !!it.checked : undefined}
+                    aria-haspopup={hasSub(it) ? "menu" : undefined}
+                    aria-expanded={hasSub(it) ? open()?.index === i() : undefined}
                     data-i={i()}
                     classList={{ danger: it.danger, focus: focus() === i(), "sub-open": open()?.index === i() }}
                     disabled={it.disabled}

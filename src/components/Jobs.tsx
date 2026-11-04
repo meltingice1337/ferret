@@ -53,7 +53,7 @@ export function JobsPanel() {
                 <div class="job-bar"><div classList={{ indet: pct() < 0 || (j.status === "running" && pct() === 0) }} style={{ width: `${Math.max(0, pct()) * 100}%` }} /></div>
                 {/* Paused on an item it can't handle, like Explorer's "File in use" dialog. */}
                 <Show when={j.status === "waiting"}>
-                  <div class="job-ask">
+                  <div class="job-ask" role="alert">
                     <span class="job-question">{friendly(j.question ?? "")}</span>
                     <div class="job-ask-actions">
                       <button class="btn" onClick={() => api.answerJob(j.id, "retry")}><RotateCw size={13} />Try again</button>
