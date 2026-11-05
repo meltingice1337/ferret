@@ -4,7 +4,7 @@ import { Dynamic } from "solid-js/web";
 import { api } from "../lib/api";
 import { drag, dragLabel, externalDrag } from "../lib/drag";
 import { formatSize } from "../lib/format";
-import { jobs } from "../lib/ops";
+import { jobs, NO_BIN } from "../lib/ops";
 import { friendly } from "../lib/state";
 import { createSignal, onCleanup } from "solid-js";
 import { basename } from "../lib/path";
@@ -14,20 +14,35 @@ const ICON: Record<string, any> = {
   rename: Pencil, new: FilePlus, restore: ArchiveRestore, media: Minimize2,
 };
 
-function eta(j: { bytesTotal: number; bytesDone: number }, r: number) {
-  if (!r || !j.bytesTotal) return "";
-  const s = (j.bytesTotal - j.bytesDone) / r;
+function timeLeft(left: number, perSecond: number) {
+  if (perSecond <= 0) return "";
+  const s = left / perSecond;
   if (s < 1) return "";
   return s < 60 ? `${Math.ceil(s)}s left` : `${Math.ceil(s / 60)} min left`;
 }
 
+/** How far a job is: bytes when it has them (a copy), else items (a delete). */
+function howFar(j: (typeof jobs)[number]) {
+  const parts: string[] = [];
+  if (j.bytesTotal) {
+    parts.push(`${formatSize(j.bytesDone)} / ${formatSize(j.bytesTotal)}`);
+    if ((j.rate ?? 0) > 0) parts.push(`${formatSize(j.rate!)}/s`, timeLeft(j.bytesTotal - j.bytesDone, j.rate!));
+  } else if (j.filesTotal) {
+    parts.push(`${j.filesDone.toLocaleString()} / ${j.filesTotal.toLocaleString()}`);
+    // A busy delete: items are what it's measured in.
+    if ((j.itemRate ?? 0) >= 1 && j.filesTotal > 1) parts.push(`${Math.round(j.itemRate!).toLocaleString()} items/s`, timeLeft(j.filesTotal - j.filesDone, j.itemRate!));
+  }
+  return parts.filter(Boolean).join(" · ");
+}
+
 export function JobsPanel() {
-  // Jobs that finish within ~0.6 s never get a card (the toast is enough).
+  // Jobs that finish within ~0.6 s never get a card (the toast is enough). A recycle refused so
+  // that nothing gets destroyed isn't a failure to show: the UI is asking what to do about it.
   const [now, setNow] = createSignal(performance.now());
   const timer = setInterval(() => setNow(performance.now()), 250);
   onCleanup(() => clearInterval(timer));
   const list = () => Object.values(jobs)
-    .filter((j) => j.status === "error" || j.status === "waiting" || (j.started !== undefined && now() - j.started > 600 && (j.status === "running" || (j.filesTotal > 1 || j.bytesTotal > 8 * 1024 * 1024))))
+    .filter((j) => !j.error?.startsWith(NO_BIN) && (j.status === "error" || j.status === "waiting" || (j.started !== undefined && now() - j.started > 600 && (j.status === "running" || (j.filesTotal > 1 || j.bytesTotal > 8 * 1024 * 1024)))))
     .sort((a, b) => a.id - b.id);
   return (
     <Show when={list().length}>
@@ -66,15 +81,12 @@ export function JobsPanel() {
                 <div class="job-sub" style={j.status === "waiting" ? { display: "none" } : undefined}>
                   <Show when={j.status === "running"} fallback={<span>{j.status === "done" ? "Done" : j.status === "cancelled" ? "Cancelled" : friendly(j.error ?? "Failed")}</span>}>
                     {/* One item taking long (a big folder): say so, so it doesn't look stuck. */}
-                    <span class="job-cur" title={j.current}>
-                      {!j.current ? "Preparing…" : now() - (j.currentSince ?? now()) > 3000
+                    <span class="job-cur" title={j.note || j.current}>
+                      {j.note ? j.note : !j.current ? "Preparing…" : now() - (j.currentSince ?? now()) > 3000
                         ? (j.kind === "recycle" || j.kind === "delete" ? `Still on “${j.current}”, big folders take a while` : `Still on “${j.current}”…`)
                         : j.current}
                     </span>
-                    <span>
-                      {j.bytesTotal ? `${formatSize(j.bytesDone)} / ${formatSize(j.bytesTotal)}` : j.filesTotal ? `${j.filesDone} / ${j.filesTotal}` : ""}
-                      {(j.rate ?? 0) > 0 ? ` · ${formatSize(j.rate!)}/s${eta(j, j.rate!) ? ` · ${eta(j, j.rate!)}` : ""}` : ""}
-                    </span>
+                    <span class="job-far">{howFar(j)}</span>
                   </Show>
                 </div>
               </div>

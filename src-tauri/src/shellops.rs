@@ -29,6 +29,18 @@
 //! ERROR_CANCELLED and FOFX_EARLYFAILURE stops the rest; an error from
 //! `UpdateProgress` stops the engine mid-file (it removes the partial copy).
 //! A declined UAC prompt (or any "no" in shell UI) ends the job as cancelled.
+//! Recycling a folder: the engine first looks through it, calling `UpdateProgress` for
+//! each item, so Cancel works there (6 ms in a test, nothing touched). The move that follows
+//! makes no calls (3 s for 30,000 files) and can't be stopped; an item that made it counts as
+//! done even if Cancel came during its move.
+//!
+//! What Windows does when an item can't go to the Recycle Bin (too big): with FOF_WANTNUKEWARNING
+//! it asks in a dialog of its own, so that flag isn't used: Ferret does the asking. Without it, a
+//! folder's `PostDeleteItem` says COPYENGINE_S_NOT_HANDLED, then the engine destroys what's inside,
+//! calling `PreDeleteItem` before each. A normal recycle never calls for anything inside, so that
+//! call is where the sink stops it, with nothing lost (see `State::recycling`). A lone file gets no
+//! such call: it's just gone, `PostDeleteItem` without a new item. So what fits is checked before
+//! starting (`recycle::refuse_too_big`, exact for files); this is for a folder that check misjudged.
 
 use std::collections::{HashMap, HashSet};
 use std::ffi::c_void;
@@ -57,10 +69,10 @@ use windows::Win32::UI::Shell::{
     COPYENGINE_E_PATH_NOT_FOUND_SRC, COPYENGINE_E_RECYCLE_BIN_NOT_FOUND, COPYENGINE_E_RECYCLE_FORCE_NUKE,
     COPYENGINE_E_RECYCLE_PATH_TOO_LONG, COPYENGINE_E_RECYCLE_SIZE_TOO_BIG, COPYENGINE_E_RECYCLE_UNKNOWN_ERROR,
     COPYENGINE_E_REQUIRES_ELEVATION, COPYENGINE_E_SAME_FILE, COPYENGINE_E_SHARING_VIOLATION_DEST,
-    COPYENGINE_E_SHARING_VIOLATION_SRC, COPYENGINE_E_USER_CANCELLED, FILEOPERATION_FLAGS, FOFX_EARLYFAILURE,
+    COPYENGINE_E_SHARING_VIOLATION_SRC, COPYENGINE_E_USER_CANCELLED, COPYENGINE_S_NOT_HANDLED, FILEOPERATION_FLAGS, FOFX_EARLYFAILURE,
     FOFX_PRESERVEFILEEXTENSIONS, FOFX_RECYCLEONDELETE, FOFX_REQUIREELEVATION, FOFX_SHOWELEVATIONPROMPT,
     FOF_ALLOWUNDO, FOF_NOCONFIRMATION, FOF_NOCONFIRMMKDIR, FOF_NOERRORUI, FOF_RENAMEONCOLLISION, FOF_SILENT,
-    FOF_WANTNUKEWARNING, PID_DISPLACED_FROM, PSGUID_DISPLACED, SIGDN, SIGDN_DESKTOPABSOLUTEPARSING,
+    PID_DISPLACED_FROM, PSGUID_DISPLACED, SIGDN, SIGDN_DESKTOPABSOLUTEPARSING,
     SIGDN_FILESYSPATH, SIGDN_PARENTRELATIVE,
 };
 
@@ -102,21 +114,30 @@ pub fn shell_op(app: AppHandle, window: tauri::WebviewWindow, op: ShellOp, eleva
     let owner = window.hwnd().ok().map(|h| h.0 as isize);
     let (kind, label) = describe(&op);
     log::info!("shell op (elevate={elevate}): {op:?}");
-    Ok(jobs::spawn(&app, kind, &label, move |ctx| perform(&op, owner.map(hwnd_from_raw), elevate, ctx)))
+    Ok(jobs::spawn(&app, kind, &label, move |ctx| {
+        if let ShellOp::Delete { items, permanent: false } = &op {
+            crate::recycle::refuse_too_big(ctx, items)?;
+        }
+        perform(&op, owner.map(hwnd_from_raw), elevate, ctx)
+    }))
 }
 
 /// Progress / result sink for [`perform`]. `JobCtx` implements it for real jobs.
 pub trait Report: Sync {
-    fn cancelled(&self) -> bool;
+    fn cancelled(&self) -> bool {
+        false
+    }
     /// The operation was cancelled from outside the app (e.g. UAC declined).
-    fn mark_cancelled(&self);
-    fn totals(&self, bytes: u64, files: u64);
-    fn current(&self, name: &str);
-    fn add_bytes(&self, n: u64);
-    fn file_done(&self);
-    fn created(&self, path: &str);
-    fn pair(&self, from: &str, to: &str);
-    fn skipped(&self);
+    fn mark_cancelled(&self) {}
+    fn totals(&self, _bytes: u64, _files: u64) {}
+    fn current(&self, _name: &str) {}
+    /// What it's doing when that isn't an item; "" when that's over.
+    fn note(&self, _text: &str) {}
+    fn add_bytes(&self, _n: u64) {}
+    fn file_done(&self) {}
+    fn created(&self, _path: &str) {}
+    fn pair(&self, _from: &str, _to: &str) {}
+    fn skipped(&self) {}
     /// Debug trace of every shell callback (tests only).
     fn wants_trace(&self) -> bool {
         false
@@ -136,6 +157,9 @@ impl Report for JobCtx {
     }
     fn current(&self, name: &str) {
         self.set_current(name)
+    }
+    fn note(&self, text: &str) {
+        self.set_note(text)
     }
     fn add_bytes(&self, n: u64) {
         JobCtx::add_bytes(self, n)
@@ -487,11 +511,11 @@ pub fn restore_direct(recycled: &str, original: &str) -> Res<String> {
     Ok(to)
 }
 
-/// The copy engine moves/deletes only the `$R` item and leaves its `$I`
-/// companion behind (also for the Recycle Bin's own shell items), so remove
-/// the `$I` files of items that are gone. Best effort: an orphaned `$I` file
-/// is ignored by the Recycle Bin.
-fn drop_info_files(recycled: &[String]) {
+/// The copy engine (also behind `trash::os_limited::restore_all`) moves/deletes
+/// only the `$R` item and leaves its `$I` companion behind (also for the Recycle
+/// Bin's own shell items), so remove the `$I` files of items that are gone. Best
+/// effort: an orphaned `$I` file is ignored by the Recycle Bin.
+pub fn drop_info_files(recycled: &[String]) {
     for r in recycled {
         if !exists(r) {
             if let Some(info) = info_file(r) {
@@ -730,14 +754,18 @@ fn plan(op: &ShellOp, report: &dyn Report) -> Res<Plan> {
         }
         ShellOp::Delete { items, permanent } => {
             for p in items {
-                actions.push(act(Verb::Delete, Some(paths::normalize(p)), None, None));
+                // Already gone (an earlier step of the same delete, say) is nothing to do.
+                if exists(p) {
+                    actions.push(act(Verb::Delete, Some(paths::normalize(p)), None, None));
+                }
             }
             let extra = if *permanent {
                 FOF_NOCONFIRMATION
             } else {
-                // WANTNUKEWARNING: if an item can't be recycled the shell asks
-                // before deleting it for good instead of doing so silently.
-                FOF_NOCONFIRMATION | FOF_ALLOWUNDO | FOFX_RECYCLEONDELETE | FOF_WANTNUKEWARNING
+                // No FOF_WANTNUKEWARNING: that makes Windows ask in its own dialog when an item
+                // can't be recycled. Ferret asks instead: `recycle::refuse_too_big` before starting,
+                // and the sink stops the engine if it gets that far (`State::recycling`).
+                FOF_NOCONFIRMATION | FOF_ALLOWUNDO | FOFX_RECYCLEONDELETE
             };
             (Mode::Delete, extra)
         }
@@ -859,6 +887,15 @@ struct State {
     /// Real byte total of a transfer; progress is the shell's fraction of it.
     bytes_total: u64,
     bytes_sent: u64,
+    /// A delete to the Recycle Bin. What comes after an item's COPYENGINE_S_NOT_HANDLED, or a
+    /// delete of anything inside one, is the engine destroying it instead: never let through.
+    recycling: bool,
+    /// Queued items (keys) the engine said it can't recycle.
+    not_handled: HashSet<String>,
+    /// The item the engine was stopped from destroying.
+    would_destroy: Option<String>,
+    /// How many items the note about looking through them last said.
+    noted: u32,
 }
 
 type Shared = Arc<Mutex<State>>;
@@ -900,6 +937,18 @@ impl Sink {
         if rep.cancelled() {
             return Err(cancel_err());
         }
+        if st.recycling && matches!(ev, Ev::Delete) {
+            let key = src.as_deref().map(paths::key).unwrap_or_default();
+            let queued = st.top.contains_key(&key);
+            if !queued || st.not_handled.contains(&key) {
+                log::warn!("recycling: Windows would destroy {src:?} instead, stopped it");
+                // The item that was asked for, not whatever inside it came up first.
+                let item = st.top.iter().find(|(k, _)| key == **k || key.starts_with(&format!("{k}\\"))).map(|(_, p)| p.clone());
+                st.would_destroy = item.or(src);
+                return Err(cancel_err());
+            }
+            rep.note("Moving to the Recycle Bin…");
+        }
         let shown = new_name.clone().or_else(|| src.as_deref().map(file_name)).unwrap_or_default();
         rep.current(&shown);
         if matches!(ev, Ev::Copy | Ev::Move) {
@@ -935,6 +984,14 @@ impl Sink {
         // everything inside a copied (or merged) folder.
         let top = src.as_ref().and_then(|s| st.top.get(&paths::key(s)).cloned());
         let key = paths::key(top.as_deref().or(src.as_deref()).unwrap_or_default());
+        if st.recycling {
+            rep.note("");
+            // Not recycled, and what comes next would destroy it: that's not done.
+            if hr == COPYENGINE_S_NOT_HANDLED {
+                st.not_handled.insert(key);
+                return Ok(());
+            }
+        }
         if hr.is_err() {
             if !st.errors.iter().any(|(k, _)| *k == key) {
                 let what = new_name
@@ -947,10 +1004,12 @@ impl Sink {
                     (_, Ev::Copy) => "copy",
                     (_, Ev::Move) => "move",
                     (_, Ev::Rename) => "rename",
+                    (_, Ev::Delete) if st.recycling => "recycle",
                     (_, Ev::Delete) => "delete",
                     (_, Ev::New) => "create",
                 };
-                st.errors.push((key, ItemError { hr, verb, what }));
+                let folder = src.as_deref().is_some_and(|s| Path::new(&paths::for_io(s)).is_dir());
+                st.errors.push((key, ItemError { hr, verb, what, folder }));
             }
             return Ok(());
         }
@@ -992,6 +1051,10 @@ impl Sink {
                     // Recycled: `new` is the item in the Recycle Bin (for Restore).
                     if let Some(new) = new {
                         rep.pair(&top, &new);
+                    } else if st.recycling {
+                        // A file over the limit goes this way, with no call before it to stop it:
+                        // `recycle::too_big` catches those first, this is for the log if one got by.
+                        log::warn!("recycling: Windows deleted {top} for good, it isn't in the Recycle Bin");
                     }
                     rep.file_done();
                 }
@@ -1023,6 +1086,11 @@ impl Sink {
         // the item fails with COPYENGINE_E_USER_CANCELLED.
         if rep.cancelled() {
             return Err(cancel_err());
+        }
+        // While it looks through a folder to recycle, the total is how many items it has found.
+        if st.recycling && sofar == 0 && total >= st.noted + 1000 {
+            st.noted = total;
+            rep.note(&format!("Looking through it… {} items", jobs::grouped(u64::from(total))));
         }
         // The shell's work units aren't bytes (≈32 KB per unit plus a little per
         // item, and the total grows as it discovers items), so report its
@@ -1170,7 +1238,8 @@ fn run(op: &ShellOp, owner: Option<HWND>, elevate: bool, report: &dyn Report) ->
 
     let fo: IFileOperation =
         unsafe { CoCreateInstance(&FileOperation, None, CLSCTX_ALL) }.map_err(|e| format!("Shell file operations unavailable: {}", hr_text(&e)))?;
-    let shared: Shared = Arc::new(Mutex::new(State { mode: plan.mode, bytes_total, ..Default::default() }));
+    let recycling = matches!(op, ShellOp::Delete { permanent: false, .. });
+    let shared: Shared = Arc::new(Mutex::new(State { mode: plan.mode, bytes_total, recycling, ..Default::default() }));
     // SAFETY: the sink only uses `report` while `State::report` is Some, and
     // `Detach` clears it (under the same lock) before this function returns.
     let rep: &'static dyn Report = unsafe { std::mem::transmute::<&dyn Report, &'static dyn Report>(report) };
@@ -1204,6 +1273,9 @@ fn run(op: &ShellOp, owner: Option<HWND>, elevate: bool, report: &dyn Report) ->
     }
 
     let (hr, aborted) = result?;
+    if let Some(item) = lock(&shared).would_destroy.take() {
+        return Err(format!("{}Windows can't put “{}” in the Recycle Bin", crate::recycle::NO_BIN, file_name(&item)));
+    }
     if hr.is_ok() && !aborted {
         confirm_on_disk(&plan, &shared, report);
     }
@@ -1215,6 +1287,11 @@ fn run(op: &ShellOp, owner: Option<HWND>, elevate: bool, report: &dyn Report) ->
     // A denial without elevation becomes an "elevate:" error (the convention
     // fileops uses), so the UI can offer to retry with `elevate = true`.
     let offer_elevation = !elevate && !is_elevated();
+    // Cancel came while the last item was moving to the Recycle Bin, which can't be stopped: it
+    // did get there, so that's what the job says (and Undo can bring it back).
+    if recycling && lock(&shared).confirmed.len() >= plan.actions.len() {
+        return blocked_result(&plan);
+    }
     match conclude(report.cancelled(), failed, aborted, first_error, offer_elevation) {
         Outcome::Done => blocked_result(&plan),
         Outcome::Cancelled => Err("Cancelled".into()),
@@ -1242,15 +1319,23 @@ struct ItemError {
     hr: HRESULT,
     verb: &'static str,
     what: String,
+    /// The item's a folder.
+    folder: bool,
 }
 
 impl ItemError {
     fn message(&self, offer_elevation: bool) -> String {
         if offer_elevation && needs_elevation(self.hr) {
-            format!("elevate:You'll need administrator permission to {} “{}”", self.verb, self.what)
-        } else {
-            format!("Couldn't {} “{}”: {}", self.verb, self.what, reason(self.hr))
+            return format!("elevate:You'll need administrator permission to {} “{}”", self.verb, self.what);
         }
+        // Recycling says a locked file blocks "the destination": the place in the Bin isn't the problem.
+        let in_use = self.verb == "recycle" && (self.hr == COPYENGINE_E_SHARING_VIOLATION_DEST || self.hr == COPYENGINE_E_SHARING_VIOLATION_SRC);
+        let why = match (in_use, self.folder) {
+            (true, true) => "something inside it is open in another program".to_string(),
+            (true, false) => "it is open in another program".to_string(),
+            _ => reason(self.hr),
+        };
+        format!("Couldn't {} “{}”: {why}", self.verb, self.what)
     }
 }
 
@@ -1495,7 +1580,14 @@ mod tests {
 
     impl TempDir {
         fn new(tag: &str) -> TempDir {
-            let p = join(&temp_base(), &format!("ferret-shellops-test-{}-{tag}", std::process::id()));
+            Self::under(&temp_base(), tag)
+        }
+        /// In `%USERPROFILE%\FerretQA`, the folder the Recycle Bin's undo tests work in.
+        fn in_qa(tag: &str) -> TempDir {
+            Self::under(&dirs::home_dir().unwrap().join("FerretQA").to_string_lossy(), tag)
+        }
+        fn under(base: &str, tag: &str) -> TempDir {
+            let p = join(base, &format!("ferret-shellops-test-{}-{tag}", std::process::id()));
             let _ = fs::remove_dir_all(&p);
             fs::create_dir_all(&p).unwrap();
             TempDir(paths::normalize(&p))
@@ -1544,6 +1636,8 @@ mod tests {
                 println!("    (purging leftover test items {left:?})");
                 let _ = perform(&ShellOp::Purge { items: left }, None, false, &Collect::default());
             }
+            // A failed assertion mustn't leave records behind either.
+            drop_info_files(&self.0.lock().unwrap());
         }
     }
 
@@ -1920,6 +2014,91 @@ mod tests {
         }
     }
 
+    fn undo_recycle(items: &[String]) -> Res<Vec<String>> {
+        tauri::async_runtime::block_on(fileops::restore_from_trash(items.to_vec()))
+    }
+
+    /// Undo goes through `restore_all`, which moves only the `$R` data. The `$I` record has to go
+    /// with it: the Recycle Bin ignores a record with no data, so nothing would ever clean it up.
+    #[test]
+    fn undo_of_a_recycle_leaves_no_record() {
+        let bin = BinGuard::default();
+        let t = TempDir::in_qa("undo-record");
+        let stem = unique("ferret-undo");
+        let file = t.write(&format!("{stem}.txt"), "a file");
+        let bare = t.write(&format!("{stem}-no-extension"), "no extension");
+        let inner = t.write(&format!("{stem}-folder\\inner.txt"), "inside");
+        let items = vec![file.clone(), bare.clone(), t.p(&format!("{stem}-folder"))];
+
+        let (r, g) = run_op(ShellOp::Delete { items: items.clone(), permanent: false });
+        r.unwrap();
+        let recycled: Vec<String> = g.pairs.iter().map(|(_, to)| bin.track(to)).collect();
+        assert_eq!(recycled.len(), items.len());
+        let records: Vec<String> = recycled.iter().map(|r| info_file(r).unwrap()).collect();
+        assert!(records.iter().all(|i| exists(i)), "recycling should write {records:?}");
+
+        same(&undo_recycle(&items).unwrap(), &items);
+        assert_eq!((read(&file), read(&bare), read(&inner)), ("a file".into(), "no extension".into(), "inside".into()));
+        for (data, record) in recycled.iter().zip(&records) {
+            assert!(!exists(data), "{data} should be gone");
+            assert!(!exists(record), "undo left the record {record} behind");
+        }
+        assert!(items.iter().all(|i| in_bin(i).is_empty()));
+    }
+
+    /// What an undo doesn't bring back stays in the Recycle Bin, record included.
+    #[test]
+    fn undo_that_fails_keeps_the_record() {
+        use std::os::windows::fs::OpenOptionsExt;
+        let bin = BinGuard::default();
+        let t = TempDir::in_qa("undo-fails");
+
+        // The name is taken again: nothing moves.
+        let f = t.write(&format!("{}.txt", unique("ferret-undo-taken")), "one");
+        let (r, g) = run_op(ShellOp::Delete { items: vec![f.clone()], permanent: false });
+        r.unwrap();
+        let data = bin.track(&g.pairs[0].1);
+        let record = info_file(&data).unwrap();
+        fs::write(&f, "newcomer").unwrap();
+        assert!(undo_recycle(&[f.clone()]).is_err());
+        assert!(exists(&data) && exists(&record), "the item should still be in the Recycle Bin");
+        assert_eq!(read(&f), "newcomer");
+        fs::remove_file(&f).unwrap();
+        undo_recycle(&[f.clone()]).unwrap();
+        assert_eq!(read(&f), "one");
+        assert!(!exists(&data) && !exists(&record));
+
+        // One item is locked, so the undo fails there. Each in turn: the other one may have moved
+        // before that, and then its record has to go even though the undo reports a failure.
+        for locked in 0..2 {
+            let free = 1 - locked;
+            let items: Vec<String> = (0..2).map(|i| t.write(&format!("{}-{i}.txt", unique("ferret-undo-locked")), "back")).collect();
+            let (r, g) = run_op(ShellOp::Delete { items: items.clone(), permanent: false });
+            r.unwrap();
+            let data: Vec<String> = items
+                .iter()
+                .map(|item| bin.track(&g.pairs.iter().find(|(from, _)| paths::key(from) == paths::key(item)).unwrap().1))
+                .collect();
+            let records: Vec<String> = data.iter().map(|d| info_file(d).unwrap()).collect();
+
+            let lock = fs::OpenOptions::new().read(true).share_mode(0).open(paths::for_io(&data[locked])).unwrap();
+            let first = undo_recycle(&items);
+            println!("    undo with one item locked: {first:?}, the other one back: {}", exists(&items[free]));
+            assert!(!exists(&items[locked]));
+            assert!(exists(&data[locked]) && exists(&records[locked]), "the locked item should still be in the Recycle Bin");
+            assert_eq!(exists(&data[free]), exists(&records[free]), "the other item's data and record go together");
+            assert_ne!(exists(&items[free]), exists(&data[free]));
+            drop(lock);
+
+            let left: Vec<String> = items.iter().filter(|p| !exists(p)).cloned().collect();
+            undo_recycle(&left).unwrap();
+            for i in 0..2 {
+                assert_eq!(read(&items[i]), "back");
+                assert!(!exists(&data[i]) && !exists(&records[i]), "{} should be gone", data[i]);
+            }
+        }
+    }
+
     #[test]
     fn restore_recreates_folder_and_keeps_both() {
         let bin = BinGuard::default();
@@ -1987,6 +2166,114 @@ mod tests {
         assert!(exists(&other));
     }
 
+    /// Makes `path` a file this long that takes no room. False if Windows won't.
+    fn sparse(path: &str, size: u64) -> bool {
+        fs::write(path, "").unwrap();
+        let ok = |args: &[&str]| std::process::Command::new("fsutil").args(args).output().is_ok_and(|o| o.status.success());
+        ok(&["sparse", "setflag", path]) && ok(&["file", "seteof", path, &size.to_string()])
+    }
+
+    /// Far over any Recycle Bin's limit.
+    const HUGE: u64 = 2 << 40;
+
+    /// Windows would destroy this, and must neither do that nor ask in a dialog of its own (a
+    /// dialog would hang this test on someone's screen: that's how the flag asking for one was found).
+    #[test]
+    fn recycling_stops_windows_destroying_a_folder_the_bin_cant_take() {
+        let t = TempDir::new("too-big");
+        let folder = t.mkdir(&unique("ferret-too-big"));
+        let small = join(&folder, "small.txt");
+        fs::write(&small, "small").unwrap();
+        let huge = join(&folder, "huge.bin");
+        if !sparse(&huge, HUGE) {
+            println!("no sparse files here: skipped");
+            return;
+        }
+        let (r, g) = run_op(ShellOp::Delete { items: vec![folder.clone()], permanent: false });
+        let e = r.unwrap_err();
+        assert!(e.starts_with(crate::recycle::NO_BIN), "{e}");
+        assert!(e.contains(&file_name(&folder)), "names the folder, not what's inside: {e}");
+        assert!(g.pairs.is_empty() && g.files_done == 0, "{g:?}");
+        assert_eq!(read(&small), "small");
+        assert_eq!(fs::metadata(&huge).unwrap().len(), HUGE);
+        assert!(in_bin(&folder).is_empty());
+    }
+
+    /// A lone file gets no warning from the engine: only the check before starting protects it.
+    #[test]
+    fn a_lone_file_over_the_limit_is_caught_before_starting() {
+        let t = TempDir::new("too-big-file");
+        let lone = t.p(&unique("ferret-lone-huge"));
+        if !sparse(&lone, HUGE) {
+            println!("no sparse files here: skipped");
+            return;
+        }
+        let big = crate::recycle::too_big(std::slice::from_ref(&lone), &|| false, &mut |_| {}).unwrap().unwrap();
+        assert_eq!(big.items, vec![lone.clone()]);
+        assert!(big.why.contains("2.0 TB, too big for the Recycle Bin"), "{}", big.why);
+        assert_eq!(fs::metadata(&lone).unwrap().len(), HUGE);
+    }
+
+    /// A folder with something in it, for the recycling tests: (the folder, how many files).
+    fn folder_of_files(t: &TempDir, tag: &str, dirs: usize, per_dir: usize) -> String {
+        let folder = t.mkdir(&unique(tag));
+        for d in 0..dirs {
+            let sub = join(&folder, &format!("d{d}"));
+            fs::create_dir_all(&sub).unwrap();
+            for f in 0..per_dir {
+                fs::write(join(&sub, &format!("f{f}.txt")), "x").unwrap();
+            }
+        }
+        folder
+    }
+
+    fn files_in(p: &str) -> usize {
+        fs::read_dir(p).map(|rd| rd.flatten().map(|e| if e.path().is_dir() { files_in(&e.path().to_string_lossy()) } else { 1 }).sum()).unwrap_or(0)
+    }
+
+    #[test]
+    fn cancel_stops_a_recycle_while_it_looks_through_the_folder() {
+        let t = TempDir::new("recycle-cancel");
+        let folder = folder_of_files(&t, "ferret-recycle-cancel", 40, 25);
+        let c = Collect { cancel_on: Some(("progress", 100)), ..Default::default() };
+        let (r, g) = run_with(ShellOp::Delete { items: vec![folder.clone()], permanent: false }, c, false);
+        assert_eq!(r.unwrap_err(), "Cancelled");
+        assert!(g.pairs.is_empty(), "{:?}", g.pairs);
+        assert_eq!(files_in(&folder), 1000, "nothing inside was touched");
+        assert!(in_bin(&folder).is_empty());
+    }
+
+    #[test]
+    fn cancel_during_the_move_still_counts_as_recycled() {
+        let bin = BinGuard::default();
+        let t = TempDir::new("recycle-late-cancel");
+        let folder = folder_of_files(&t, "ferret-recycle-late", 3, 3);
+        let c = Collect { cancel_on: Some(("post Delete", 1)), ..Default::default() };
+        let (r, g) = run_with(ShellOp::Delete { items: vec![folder.clone()], permanent: false }, c, false);
+        r.unwrap();
+        assert!(!exists(&folder));
+        assert_eq!(g.pairs.len(), 1);
+        let recycled = bin.track(&g.pairs[0].1);
+        // It's really there: put it back.
+        run_op(ShellOp::Restore { items: vec![recycled] }).0.unwrap();
+        assert_eq!(files_in(&folder), 9);
+    }
+
+    #[test]
+    fn recycling_a_folder_with_a_locked_file_says_so() {
+        use std::os::windows::fs::OpenOptionsExt;
+        let t = TempDir::new("recycle-locked");
+        let folder = folder_of_files(&t, "ferret-recycle-locked", 2, 2);
+        let hold = fs::OpenOptions::new().read(true).share_mode(0).open(join(&folder, "d0\\f0.txt")).unwrap();
+        let (r, g) = run_op(ShellOp::Delete { items: vec![folder.clone()], permanent: false });
+        let e = r.unwrap_err();
+        assert!(e.contains("something inside it is open in another program"), "{e}");
+        assert!(!e.starts_with(crate::recycle::NO_BIN), "{e}");
+        assert!(g.pairs.is_empty());
+        drop(hold);
+        assert_eq!(files_in(&folder), 4);
+    }
+
     #[test]
     fn delete_permanently() {
         let t = TempDir::new("delete");
@@ -2041,7 +2328,7 @@ mod tests {
 
     #[test]
     fn outcomes() {
-        let item = |hr: HRESULT| Some(ItemError { hr, verb: "copy", what: "a.txt".into() });
+        let item = |hr: HRESULT| Some(ItemError { hr, verb: "copy", what: "a.txt".into(), folder: false });
         let denied = COPYENGINE_E_ACCESS_DENIED_DEST;
         assert_eq!(conclude(false, None, false, None, true), Outcome::Done);
         assert_eq!(conclude(true, Some(E_CANCELLED), true, None, true), Outcome::Cancelled);

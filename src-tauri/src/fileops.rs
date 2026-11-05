@@ -267,40 +267,6 @@ fn remove_any(p: &Path) -> std::io::Result<()> {
     }
 }
 
-/// Deletes for good one item at a time, so Cancel can stop it midway (a folder in one call couldn't
-/// be): what was reached is gone, the rest stays. Links go, never what they point to.
-fn remove_until(p: &Path, stop: &dyn Fn() -> bool) -> std::io::Result<()> {
-    if stop() {
-        return Err(std::io::Error::other("Cancelled"));
-    }
-    let m = fs::symlink_metadata(p)?;
-    if m.is_dir() {
-        for e in fs::read_dir(p)? {
-            remove_until(&e?.path(), stop)?;
-        }
-    }
-    #[cfg(windows)]
-    let as_folder = {
-        use std::os::windows::fs::FileTypeExt;
-        m.is_dir() || m.file_type().is_symlink_dir()
-    };
-    #[cfg(not(windows))]
-    let as_folder = m.is_dir();
-    let remove = || if as_folder { fs::remove_dir(p) } else { fs::remove_file(p) };
-    match remove() {
-        // Read-only: as for Explorer, that doesn't stop a delete (through a link it would change
-        // what the link points to, so not those).
-        Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied && m.permissions().readonly() && !m.file_type().is_symlink() => {
-            let mut writable = m.permissions();
-            #[allow(clippy::permissions_set_readonly_false)] // On Windows it only clears the attribute.
-            writable.set_readonly(false);
-            fs::set_permissions(p, writable)?;
-            remove()
-        }
-        done => done,
-    }
-}
-
 /// Copy or move `sources` into `dest`. Returns a job id; progress via `job-update`.
 // Off the main thread: with thousands of items this can take a moment, and the window
 // must keep answering meanwhile.
@@ -556,6 +522,10 @@ pub fn delete_items(app: AppHandle, items: Vec<String>, permanent: bool) -> Res<
     if let Some(p) = items.iter().find(|p| crate::wsl::linux_path(p).is_some_and(|(_, l)| crate::linux::protected(&l))) {
         return Err(refused_delete(p));
     }
+    // A whole drive or network share: nothing in the app means that.
+    if let Some(p) = items.iter().find(|p| crate::wsl::linux_path(p).is_none() && paths::parent(p).is_none()) {
+        return Err(refused_delete(p));
+    }
     if let Some(p) = items.iter().take(256).find(|p| crate::shellops::needs_admin_delete(p)) {
         return Err(admin_err(format!("delete “{}”", file_name(p))));
     }
@@ -584,85 +554,168 @@ pub fn delete_items(app: AppHandle, items: Vec<String>, permanent: bool) -> Res<
         if items.is_empty() {
             return Ok(());
         }
-        let job_start = std::time::Instant::now();
-        let (mut fast_ok, mut fast_failed, mut slowest) = (0usize, 0usize, (std::time::Duration::ZERO, String::new()));
-        for batch in recycle_units(&items, permanent).iter() {
-            ctx.check()?;
-            let started = std::time::Instant::now();
-            // Fast path: a group of files in one Windows operation. It stops at the first item
-            // that can't go; the group is then retried one by one below.
-            if batch.len() > 1 {
-                ctx.set_current(&file_name(&batch[0]));
-                match trash::delete_all(batch.iter().map(|p| io(p))) {
-                    Ok(()) => {
-                        fast_ok += 1;
-                        batch.iter().for_each(|_| ctx.file_done());
-                        if started.elapsed() > SLOW {
-                            log::info!("recycle: {} files from “{}” took {:?}", batch.len(), file_name(&batch[0]), started.elapsed());
-                        }
-                        continue;
-                    }
-                    Err(e) => {
-                        fast_failed += 1;
-                        log::info!("recycle: group of {} from “{}” stopped after {:?} ({e}); one by one", batch.len(), file_name(&batch[0]), started.elapsed());
-                    }
-                }
+        if permanent {
+            delete_for_good(ctx, &items, &mut skip_all)
+        } else {
+            crate::recycle::refuse_too_big(ctx, &items)?;
+            recycle_items(ctx, &items, &mut skip_all)
+        }
+    }))
+}
+
+/// Deletes `items` for good: counts everything, then deletes it with the job showing how far it
+/// got, and Cancel stopping it midway (what was reached is gone, the rest stays).
+fn delete_for_good(ctx: &JobCtx, items: &[String], skip_all: &mut bool) -> Res<()> {
+    let threads = crate::remove::threads_for(&items[0]);
+    let started = std::time::Instant::now();
+    let stop = || ctx.is_cancelled();
+    let mut rest: Vec<&String> = items.iter().collect();
+    while !rest.is_empty() {
+        let tops: Vec<PathBuf> = rest.iter().map(|p| io(p)).collect();
+        ctx.set_note("Counting…");
+        let scan = crate::remove::scan(&tops, &stop, &mut |n| ctx.set_note(&format!("Counting… {} items", jobs::grouped(n)))).ok_or("Cancelled")?;
+        ctx.set_note("");
+        ctx.set_left(scan.entries());
+        let failures = crate::remove::run(scan, threads, &stop, &|n, last| {
+            ctx.files_done(n);
+            ctx.set_current(&last.file_name().unwrap_or_default().to_string_lossy());
+        });
+        ctx.check()?;
+        let mut again = Vec::new();
+        for f in failures {
+            let item = rest[f.top];
+            let others = if f.more > 0 { format!(" and {} more", jobs::grouped(f.more)) } else { String::new() };
+            let name = f.path.file_name().unwrap_or_default().to_string_lossy();
+            let why = format!("Couldn't delete “{name}”{others}: {}", crate::remove::reason(&f.error));
+            if *skip_all {
+                ctx.failed(item.clone(), why);
+                continue;
             }
-            for p in batch.iter() {
-                ctx.check()?;
-                let path = io(p);
-                // Already recycled by the batch attempt before it stopped (or gone meanwhile).
-                if fs::symlink_metadata(&path).is_err() {
-                    ctx.file_done();
-                    continue;
+            match ctx.ask(why.clone()).as_str() {
+                "retry" => again.push(item),
+                "skip" => ctx.failed(item.clone(), why),
+                "skipAll" => {
+                    *skip_all = true;
+                    ctx.failed(item.clone(), why);
                 }
-                ctx.set_current(&file_name(p));
-                let item_start = std::time::Instant::now();
-                loop {
-                    let res = if permanent {
-                        remove_until(&path, &|| ctx.is_cancelled()).map_err(|e| format!("Couldn't delete “{}”: {e}", file_name(p)))
-                    } else {
-                        trash::delete(&path).map_err(|e| explain_delete_failure(&path, &file_name(p), &e.to_string()))
-                    };
-                    let Err(why) = res else { break };
-                    // Cancelled while it ran: nothing to ask about.
-                    ctx.check()?;
-                    if skip_all {
-                        ctx.failed(p.clone(), why);
-                        break;
-                    }
-                    match ctx.ask(why.clone()).as_str() {
-                        "retry" => continue,
-                        "skip" => ctx.failed(p.clone(), why),
-                        "skipAll" => {
-                            skip_all = true;
-                            ctx.failed(p.clone(), why);
-                        }
-                        _ => {
-                            ctx.mark_cancelled();
-                            return Err("Cancelled".into());
-                        }
-                    }
-                    break;
+                _ => {
+                    ctx.mark_cancelled();
+                    return Err("Cancelled".into());
                 }
-                // Slow items, to see what a long job spent its time on (includes any wait for
-                // the user's answer).
-                let took = item_start.elapsed();
-                if took > SLOW {
-                    log::info!("{}: “{}” took {took:?}", if permanent { "delete" } else { "recycle" }, file_name(p));
-                }
-                if took > slowest.0 {
-                    slowest = (took, file_name(p));
-                }
-                ctx.file_done();
             }
         }
-        log::info!(
-            "{}: {} items in {:?}; {fast_ok} file groups in one go, {fast_failed} redone one by one; slowest “{}” {:?}",
-            if permanent { "delete" } else { "recycle" }, items.len(), job_start.elapsed(), slowest.1, slowest.0
-        );
-        Ok(())
-    }))
+        rest = again;
+    }
+    log::info!("delete: {} items on {threads} threads in {:?}", items.len(), started.elapsed());
+    Ok(())
+}
+
+/// What a recycle tells its job: the job counts the items itself, since a group that stopped
+/// midway is gone through again one by one.
+struct RecycleReport<'a>(&'a JobCtx);
+
+impl crate::shellops::Report for RecycleReport<'_> {
+    fn cancelled(&self) -> bool {
+        self.0.is_cancelled()
+    }
+    fn mark_cancelled(&self) {
+        self.0.mark_cancelled()
+    }
+    fn current(&self, name: &str) {
+        self.0.set_current(name)
+    }
+    fn note(&self, text: &str) {
+        self.0.set_note(text)
+    }
+    fn pair(&self, from: &str, to: &str) {
+        self.0.pair(from, to)
+    }
+}
+
+/// Moves `items` to the Recycle Bin (`recycle::refuse_too_big` has said they fit), through the
+/// engine that lets Cancel stop it and stops Windows from destroying what it can't recycle.
+fn recycle_items(ctx: &JobCtx, items: &[String], skip_all: &mut bool) -> Res<()> {
+    let send = |paths: &[String]| {
+        crate::shellops::perform(&crate::shellops::ShellOp::Delete { items: paths.to_vec(), permanent: false }, None, false, &RecycleReport(ctx))
+    };
+    // Windows refused, or wants an administrator: the UI takes it from there.
+    let for_the_ui = |why: &str| why.starts_with(crate::recycle::NO_BIN) || why.starts_with("elevate:");
+    let job_start = std::time::Instant::now();
+    let (mut fast_ok, mut fast_failed, mut slowest) = (0usize, 0usize, (std::time::Duration::ZERO, String::new()));
+    for batch in recycle_units(items).iter() {
+        ctx.check()?;
+        let started = std::time::Instant::now();
+        // Fast path: a group of files in one Windows operation. It stops at the first item
+        // that can't go; the group is then retried one by one below.
+        if batch.len() > 1 {
+            ctx.set_current(&file_name(&batch[0]));
+            match send(batch) {
+                Ok(()) => {
+                    fast_ok += 1;
+                    batch.iter().for_each(|_| ctx.file_done());
+                    if started.elapsed() > SLOW {
+                        log::info!("recycle: {} files from “{}” took {:?}", batch.len(), file_name(&batch[0]), started.elapsed());
+                    }
+                    continue;
+                }
+                Err(e) => {
+                    fast_failed += 1;
+                    log::info!("recycle: group of {} from “{}” stopped after {:?} ({e}); one by one", batch.len(), file_name(&batch[0]), started.elapsed());
+                }
+            }
+        }
+        for p in batch.iter() {
+            ctx.check()?;
+            // Already recycled by the batch attempt before it stopped (or gone meanwhile).
+            if fs::symlink_metadata(io(p)).is_err() {
+                ctx.file_done();
+                continue;
+            }
+            ctx.set_current(&file_name(p));
+            let item_start = std::time::Instant::now();
+            loop {
+                let Err(why) = send(std::slice::from_ref(p)) else { break };
+                // Cancelled while it ran: nothing to ask about.
+                ctx.check()?;
+                if for_the_ui(&why) {
+                    ctx.failed(p.clone(), why.clone());
+                    return Err(why);
+                }
+                if *skip_all {
+                    ctx.failed(p.clone(), why);
+                    break;
+                }
+                match ctx.ask(why.clone()).as_str() {
+                    "retry" => continue,
+                    "skip" => ctx.failed(p.clone(), why),
+                    "skipAll" => {
+                        *skip_all = true;
+                        ctx.failed(p.clone(), why);
+                    }
+                    _ => {
+                        ctx.mark_cancelled();
+                        return Err("Cancelled".into());
+                    }
+                }
+                break;
+            }
+            // Slow items, to see what a long job spent its time on (includes any wait for
+            // the user's answer).
+            let took = item_start.elapsed();
+            if took > SLOW {
+                log::info!("recycle: “{}” took {took:?}", file_name(p));
+            }
+            if took > slowest.0 {
+                slowest = (took, file_name(p));
+            }
+            ctx.file_done();
+        }
+    }
+    log::info!(
+        "recycle: {} items in {:?}; {fast_ok} file groups in one go, {fast_failed} redone one by one; slowest “{}” {:?}",
+        items.len(), job_start.elapsed(), slowest.1, slowest.0
+    );
+    Ok(())
 }
 
 /// Why a delete won't take a folder a whole system depends on (`linux::protected`).
@@ -738,16 +791,16 @@ fn rm_in_linux(ctx: &JobCtx, host: &Host, items: &[String]) -> Res<Vec<Option<St
 /// Anything slower than this gets a log line (where did a long delete spend its time?).
 const SLOW: std::time::Duration = std::time::Duration::from_secs(1);
 
-/// The delete job's units of work: files go in groups (one Windows operation each, fast for
+/// The recycle job's units of work: files go in groups (one Windows operation each, fast for
 /// thousands), folders one at a time. A folder can take long (Windows goes through everything
 /// inside it), so the progress names it, and one locked folder doesn't send a whole group
-/// down the slow path. Deleting permanently goes item by item.
-fn recycle_units(items: &[String], permanent: bool) -> Vec<Vec<String>> {
+/// down the slow path.
+fn recycle_units(items: &[String]) -> Vec<Vec<String>> {
     let mut units: Vec<Vec<String>> = Vec::new();
     let mut files: Vec<String> = Vec::new();
     for p in items {
         let is_dir = fs::symlink_metadata(io(p)).map(|m| m.is_dir()).unwrap_or(false);
-        if permanent || is_dir {
+        if is_dir {
             if !files.is_empty() {
                 units.push(std::mem::take(&mut files));
             }
@@ -763,30 +816,6 @@ fn recycle_units(items: &[String], permanent: bool) -> Vec<Vec<String>> {
         units.push(files);
     }
     units
-}
-
-/// Turns the Recycle Bin's vague failures ("Some operations were aborted") into a
-/// reason the user can act on, by probing the item directly.
-fn explain_delete_failure(path: &Path, name: &str, raw: &str) -> String {
-    if fs::symlink_metadata(path).is_err() {
-        return format!("“{name}” no longer exists");
-    }
-    if path.is_file() {
-        if let Err(e) = fs::OpenOptions::new().read(true).write(true).open(path) {
-            match e.raw_os_error() {
-                Some(32) | Some(33) => return format!("“{name}” is open in another program"),
-                Some(5) => return format!("Access denied: you can't delete “{name}”"),
-                _ => {}
-            }
-            if e.kind() == std::io::ErrorKind::PermissionDenied {
-                return format!("“{name}” is read-only or protected");
-            }
-        }
-    } else if path.is_dir() {
-        // A locked file somewhere inside usually blocks recycling the folder.
-        return format!("Couldn't recycle “{name}”: something inside it is open in another program");
-    }
-    format!("Couldn't recycle “{name}”: {raw}")
 }
 
 /// The most recently recycled item for each original path.
@@ -835,7 +864,11 @@ pub async fn restore_from_trash(items: Vec<String>) -> Res<Vec<String>> {
                 }
             }
             if !pick.is_empty() {
-                trash::os_limited::restore_all(pick).map_err(err)?;
+                let recycled: Vec<String> = pick.iter().map(|i| paths::normalize(&i.id.to_string_lossy())).collect();
+                let result = trash::os_limited::restore_all(pick);
+                // Also after a failure: some items may have made it back.
+                crate::shellops::drop_info_files(&recycled);
+                result.map_err(err)?;
             }
             log::info!("restored from Recycle Bin: {}", crate::logging::paths(&restored));
             Ok(restored)
@@ -1138,42 +1171,6 @@ pub async fn read_bytes(path: String, count: Option<u64>) -> Res<Vec<u8>> {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    /// A folder with a read-only file and folder, and a link to a folder that must stay.
-    #[test]
-    fn remove_until_deletes_and_stops() {
-        let root = std::env::temp_dir().join(format!("ferret-remove-until-{}", std::process::id()));
-        let _ = fs::remove_dir_all(&root);
-        let (dir, keep) = (root.join("dir"), root.join("keep"));
-        fs::create_dir_all(dir.join("sub/readonly")).unwrap();
-        fs::create_dir_all(&keep).unwrap();
-        fs::write(keep.join("kept.txt"), "kept").unwrap();
-        fs::write(dir.join("sub/a.txt"), "a").unwrap();
-        fs::write(dir.join("sub/readonly/f.txt"), "f").unwrap();
-        for p in [dir.join("sub/a.txt"), dir.join("sub/readonly")] {
-            let mut perm = fs::metadata(&p).unwrap().permissions();
-            perm.set_readonly(true);
-            fs::set_permissions(&p, perm).unwrap();
-        }
-        // A junction needs no special rights.
-        #[cfg(windows)]
-        {
-            let out = std::process::Command::new("cmd").args(["/c", "mklink", "/J"]).arg(dir.join("junction")).arg(&keep).output().unwrap();
-            assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
-        }
-        // Stopped right away: nothing goes.
-        let e = remove_until(&dir, &|| true).unwrap_err();
-        assert_eq!(e.to_string(), "Cancelled");
-        assert!(dir.join("sub/a.txt").exists());
-        // Stopped midway: some goes, the folder stays.
-        let asked = std::cell::Cell::new(0);
-        assert!(remove_until(&dir, &|| { asked.set(asked.get() + 1); asked.get() > 2 }).is_err());
-        assert!(dir.exists());
-        remove_until(&dir, &|| false).unwrap();
-        assert!(!dir.exists());
-        assert_eq!(fs::read_to_string(keep.join("kept.txt")).unwrap(), "kept", "the link's target stays");
-        fs::remove_dir_all(&root).unwrap();
-    }
 
     #[test]
     fn names() {

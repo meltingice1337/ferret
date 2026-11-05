@@ -17,6 +17,7 @@ mod protocol;
 mod recycle;
 mod redirect;
 mod remote;
+mod remove;
 pub mod search;
 mod shell;
 mod shellmenu;

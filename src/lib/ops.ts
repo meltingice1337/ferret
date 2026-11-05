@@ -21,30 +21,34 @@ import type { Entry, JobUpdate, Policy } from "./types";
 
 // ---------- jobs ----------
 
-/** `currentSince`: when the job moved on to its current item (one that takes long gets a note). */
-export const [jobs, setJobs] = createStore<Record<number, JobUpdate & { rate?: number; started?: number; currentSince?: number }>>({});
+/** `currentSince`: when the job moved on to its current item (one that takes long gets a note).
+ *  `rate`: bytes a second; `itemRate`: items a second. */
+export const [jobs, setJobs] = createStore<Record<number, JobUpdate & { rate?: number; itemRate?: number; started?: number; currentSince?: number }>>({});
 type JobDone = (u: JobUpdate) => void;
 const jobCallbacks = new Map<number, JobDone>();
 /** Final updates of recently finished jobs. Fast jobs can finish before `invoke`
  *  even returns their id, so `track` must be able to pick up a result that already arrived. */
 const finished = new Map<number, JobUpdate>();
-const speed = new Map<number, { t: number; b: number; rate: number }>();
+const speed = new Map<number, { t: number; b: number; f: number; rate: number; itemRate: number }>();
+const smooth = (old: number, latest: number) => (old ? old * 0.6 + latest * 0.4 : latest);
 
 listen<JobUpdate>("job-update", (ev) => {
   const u = ev.payload;
   // Smoothed throughput for the progress card.
   const now = performance.now();
-  const s = speed.get(u.id) ?? { t: now, b: u.bytesDone, rate: 0 };
+  const s = speed.get(u.id) ?? { t: now, b: u.bytesDone, f: u.filesDone, rate: 0, itemRate: 0 };
   if (now - s.t >= 400) {
-    const r = ((u.bytesDone - s.b) / (now - s.t)) * 1000;
-    s.rate = s.rate ? s.rate * 0.6 + r * 0.4 : r;
+    const seconds = (now - s.t) / 1000;
+    s.rate = smooth(s.rate, (u.bytesDone - s.b) / seconds);
+    s.itemRate = smooth(s.itemRate, (u.filesDone - s.f) / seconds);
     s.t = now;
     s.b = u.bytesDone;
+    s.f = u.filesDone;
   }
   speed.set(u.id, s);
   const prev = jobs[u.id];
   const currentSince = prev && prev.current === u.current && prev.filesDone === u.filesDone ? prev.currentSince ?? now : now;
-  setJobs(u.id, { ...u, rate: s.rate, started: prev?.started ?? now, currentSince });
+  setJobs(u.id, { ...u, rate: s.rate, itemRate: s.itemRate, started: prev?.started ?? now, currentSince });
   setJobsRunning(Object.values(jobs).filter((j) => j.status === "running" || j.status === "waiting").length);
   // "waiting" (paused on an item, asking in the jobs panel) isn't the end either.
   if (u.status !== "running" && u.status !== "waiting") {
@@ -54,7 +58,7 @@ listen<JobUpdate>("job-update", (ev) => {
     const cb = jobCallbacks.get(u.id);
     jobCallbacks.delete(u.id);
     // Password prompts are handled by the caller; everything else is reported here.
-    if (u.status === "error" && !quietJobs && !/password/.test(u.error ?? "") && !u.error?.startsWith(ADMIN)) toast(`${u.label} failed: ${u.error}`, "error");
+    if (u.status === "error" && !quietJobs && !/password/.test(u.error ?? "") && !u.error?.startsWith(ADMIN) && !u.error?.startsWith(NO_BIN)) toast(`${u.label} failed: ${u.error}`, "error");
     if (u.status === "cancelled") toast(`Cancelled: ${u.label}`);
     cb?.(u);
     // A finished job ticks to "Done" and leaves: the toast (with Undo) reports the result.
@@ -225,6 +229,9 @@ function fail(what: string, e: unknown) {
 
 /** Errors from operations Windows only allows administrators to do start with this. */
 const ADMIN = "elevate:";
+/** Errors from a recycle that was refused because it can't go to the Recycle Bin (too big). Nothing
+ *  has happened to it yet: Ferret asks here, instead of Windows asking in a dialog of its own. */
+export const NO_BIN = "nobin:";
 /** The user declined to continue as administrator. */
 class Declined extends Error {}
 
@@ -555,10 +562,35 @@ export async function deleteItems(paths: string[], permanent: boolean) {
   }
   const t = activeTab();
   const gone = new Set(paths.map(pathKey));
+  const asked = paths;
   paths.forEach((p) => busy.add(pathKey(p)));
   stepPastDeleted(t, paths);
   try {
-    const u = await tracked(permanent ? destroy(paths) : recycle(paths));
+    let u: JobUpdate;
+    try {
+      u = await tracked(permanent ? destroy(paths) : recycle(paths));
+    } catch (e) {
+      const refused = e instanceof JobEnded ? e.update : null;
+      if (!refused?.error?.startsWith(NO_BIN)) throw e;
+      // Nothing has happened to them yet: it's up to the user whether they go for good.
+      const big = refused.failed.length ? refused.failed.map(([p]) => p) : paths;
+      const ok = await ask({
+        title: `Permanently delete ${describe(big)}?`,
+        message: `${refused.error.slice(NO_BIN.length)}, so this can't be undone.`,
+        confirmLabel: "Delete permanently", danger: true,
+      });
+      if (ok === null) throw new Declined();
+      // Others in the selection that do fit (on another drive) still get recycled.
+      const bigKeys = new Set(big.map(pathKey));
+      const rest = paths.filter((p) => !bigKeys.has(pathKey(p)));
+      if (rest.length) {
+        rest.forEach((p) => busy.delete(pathKey(p)));
+        void deleteItems(rest, false);
+      }
+      paths = big;
+      permanent = true;
+      u = await tracked(destroy(paths));
+    }
     // Items skipped after "Skip" / "Skip all" stay where they were.
     const left = (u?.failed ?? []).map(([p]) => p);
     const leftKeys = new Set(left.map(pathKey));
@@ -579,11 +611,14 @@ export async function deleteItems(paths: string[], permanent: boolean) {
     if (ui.shelf.some((p) => gone.has(pathKey(p)))) setUi("shelf", ui.shelf.filter((p) => !gone.has(pathKey(p))));
   } catch (e) {
     fail("Delete failed", e);
+    // Cancelled partway: what already reached the Recycle Bin can still be brought back.
+    const moved = !permanent && e instanceof JobEnded && e.update.status === "cancelled" ? e.update.pairs.map(([from]) => from) : [];
+    if (moved.length) record({ label: `Delete ${describe(moved)}`, undo: () => unrecycle(moved), redo: () => recycle(moved) }, `Moved ${describe(moved)} to the Recycle Bin before stopping`);
     // Put the selection back on whatever is still there (e.g. a file locked by another program).
-    const still = await stillThere(paths);
+    const still = await stillThere(asked);
     if (still.length) selectAfterReload(t, still);
   } finally {
-    paths.forEach((p) => busy.delete(pathKey(p)));
+    asked.forEach((p) => busy.delete(pathKey(p)));
   }
 }
 

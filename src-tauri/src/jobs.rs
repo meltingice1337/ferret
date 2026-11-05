@@ -47,6 +47,8 @@ pub struct JobUpdate {
     pub files_done: u64,
     pub files_total: u64,
     pub current: String,
+    /// What it's doing when that isn't an item ("Counting… 12,000 items"); shown instead of `current`.
+    pub note: String,
     pub error: Option<String>,
     /// Paths created by the job (for undo / selecting results).
     pub created: Vec<String>,
@@ -127,10 +129,25 @@ impl JobCtx {
         self.emit_locked(&mut s, true);
     }
 
+    /// The total, now that it's known how many items are left to do.
+    pub fn set_left(&self, left: u64) {
+        let mut s = self.state.lock().unwrap();
+        s.0.files_total = s.0.files_done + left;
+        self.emit_locked(&mut s, true);
+    }
+
     pub fn set_current(&self, current: &str) {
         let mut s = self.state.lock().unwrap();
         s.0.current = current.to_string();
         self.emit_locked(&mut s, false);
+    }
+
+    pub fn set_note(&self, note: &str) {
+        let mut s = self.state.lock().unwrap();
+        if s.0.note != note {
+            s.0.note = note.to_string();
+            self.emit_locked(&mut s, false);
+        }
     }
 
     pub fn add_bytes(&self, n: u64) {
@@ -140,8 +157,12 @@ impl JobCtx {
     }
 
     pub fn file_done(&self) {
+        self.files_done(1);
+    }
+
+    pub fn files_done(&self, n: u64) {
         let mut s = self.state.lock().unwrap();
-        s.0.files_done += 1;
+        s.0.files_done += n;
         self.emit_locked(&mut s, false);
     }
 
@@ -174,6 +195,19 @@ impl JobCtx {
             s.2 = true;
         }
     }
+}
+
+/// 1234567 → "1,234,567", for notes.
+pub fn grouped(n: u64) -> String {
+    let digits = n.to_string();
+    let mut out = String::with_capacity(digits.len() + digits.len() / 3);
+    for (i, c) in digits.chars().enumerate() {
+        if i > 0 && (digits.len() - i) % 3 == 0 {
+            out.push(',');
+        }
+        out.push(c);
+    }
+    out
 }
 
 /// Starts a job and returns its id immediately. The closure does the work;

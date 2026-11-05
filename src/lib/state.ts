@@ -285,7 +285,7 @@ export function showToast(text: string, kind: "info" | "error" = "info", action?
 /** Turns raw OS error text into something readable. */
 export function friendly(text: string) {
   return text
-    .replace(/elevate:/g, "")
+    .replace(/elevate:|nobin:/g, "")
     .replace(/denied:.*$/, "Access denied: Windows keeps this folder closed")
     .replace(/Error during `trash` operation: Os \{ code: -2147024894[^}]*\}/gi, "it no longer exists")
     .replace(/Error during (?:a )?`trash` operation: Unknown \{ description: "([^"]*)" \}/gi, "$1")

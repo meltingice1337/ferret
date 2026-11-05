@@ -474,6 +474,139 @@ export const tests = [
     },
   },
   {
+    name: "Delete of several files recycles them all and Ctrl+Z brings them all back",
+    async run(t) {
+      const files = ["several-1.txt", "several-2.txt", "several-3.txt"].map((n) => t.p(n));
+      files.forEach((f) => writeFileSync(f, "x"));
+      const bin = binCount();
+      try {
+        await t.c.eval(`void ${T}.ops.deleteItems(${JSON.stringify(files)}, false)`);
+        let start = Date.now();
+        while (files.some(existsSync) && Date.now() - start < 8000) await sleep(100);
+        assert(!files.some(existsSync), "not all recycled");
+        assert(binCount() === bin + 3, "not in the Recycle Bin");
+        await t.c.waitFor(`${T}.ops.undoLabel() === "Delete 3 items"`, { what: "the undo step" });
+        await t.c.eval(`void ${T}.ops.undo()`);
+        start = Date.now();
+        while (!files.every(existsSync) && Date.now() - start < 10000) await sleep(100);
+        assert(files.every(existsSync), "undo didn't restore them all");
+        assert(binCount() === bin, "the Recycle Bin still holds some");
+      } finally {
+        files.forEach((f) => rmSync(f, { force: true }));
+      }
+    },
+  },
+  {
+    name: "too big for the Recycle Bin: Ferret asks (never Windows), Cancel keeps it, then it goes for good",
+    async run(t) {
+      // Far over any Recycle Bin's limit, and takes no room. A prompt of Windows' own would leave
+      // the job hanging and time this out. A lone file is the risky one: past Ferret's check,
+      // Windows would destroy it without any warning.
+      const dir = t.p("too-big");
+      const inDir = t.p("too-big", "huge.bin");
+      const lone = t.p("too-big-file.bin");
+      mkdirSync(dir);
+      writeFileSync(t.p("too-big", "small.txt"), "small");
+      try {
+        for (const f of [inDir, lone]) {
+          writeFileSync(f, "");
+          execFileSync("fsutil", ["sparse", "setflag", f]);
+          execFileSync("fsutil", ["file", "seteof", f, String(2 ** 41)]);
+        }
+      } catch {
+        rmSync(dir, { recursive: true, force: true });
+        rmSync(lone, { force: true });
+        return t.note("no sparse files here: skipped");
+      }
+      const bin = binCount();
+      try {
+        await go(t, t.root);
+        await t.c.waitFor(`${tab}.entries[0]().some((e) => e.name === "too-big-file.bin")`, { what: "the test items listed" });
+        const asks = async (name) => {
+          await clickRow(t, name);
+          await t.c.key("Delete");
+          await t.c.waitFor(`/Permanently delete[\\s\\S]*Recycle Bin/.test(document.querySelector(".modal")?.innerText ?? "")`, { what: `Ferret's question about ${name}` });
+        };
+        await asks("too-big-file.bin");
+        const said = await modalText(t);
+        assert(said.includes("2.0 TB"), `the question doesn't give the size: ${said}`);
+        t.note(said.replace(/\s+/g, " "));
+        await t.c.click(".modal button", { text: "Cancel" });
+        await t.c.waitFor(`!document.querySelector(".modal")`, { what: "the question gone" });
+        assert(existsSync(lone), "Cancel lost the file");
+
+        await asks("too-big");
+        await t.c.click(".modal button", { text: "Cancel" });
+        await t.c.waitFor(`!document.querySelector(".modal")`, { what: "the question gone" });
+        assert(existsSync(inDir) && readFileSync(t.p("too-big", "small.txt"), "utf8") === "small", "Cancel lost something");
+        await sleep(300);
+
+        await asks("too-big");
+        await t.c.click(".modal button", { text: "Delete permanently" });
+        const start = Date.now();
+        while (existsSync(dir) && Date.now() - start < 8000) await sleep(100);
+        assert(!existsSync(dir), "not deleted");
+        assert(binCount() === bin, "the Recycle Bin changed");
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+        rmSync(lone, { force: true });
+      }
+    },
+  },
+  {
+    name: "X stops a recycle of a big folder, with nothing lost",
+    async run(t) {
+      const bulk = t.p("recycle-bulk");
+      for (let d = 0; d < 60; d++) {
+        mkdirSync(join(bulk, `d${d}`), { recursive: true });
+        for (let f = 0; f < 100; f++) writeFileSync(join(bulk, `d${d}`, `f${f}.txt`), "x");
+      }
+      const count = () => readdirSync(bulk, { recursive: true, withFileTypes: true }).filter((e) => e.isFile()).length;
+      const bin = binCount();
+      try {
+        const job = await t.c.eval(`${T}.api.deleteItems(${JSON.stringify([bulk])}, false)`);
+        await t.c.eval(`${T}.api.cancelJob(${job})`);
+        await t.c.waitFor(`${T}.ops.jobs[${job}]?.status !== "running"`, { what: "the job to stop" });
+        await sleep(200);
+        assert(existsSync(bulk), "the folder went anyway");
+        assert(count() === 6000, `${count()} of 6000 files left`);
+        assert(binCount() === bin, "something went to the Recycle Bin");
+      } finally {
+        if (!existsSync(bulk)) await t.c.eval(`${T}.api.restoreFromTrash(${JSON.stringify([bulk])})`).catch(() => {});
+        rmSync(bulk, { recursive: true, force: true });
+      }
+    },
+  },
+  {
+    name: "deleting for good counts first and shows how far it got",
+    async run(t) {
+      const bulk = t.p("delete-bulk");
+      for (let d = 0; d < 300; d++) {
+        mkdirSync(join(bulk, `d${d}`), { recursive: true });
+        for (let f = 0; f < 100; f++) writeFileSync(join(bulk, `d${d}`, `f${f}.txt`), "x");
+      }
+      const bin = binCount();
+      try {
+        const job = await t.c.eval(`${T}.api.deleteItems(${JSON.stringify([bulk])}, true)`);
+        let total = 0, card = "", cancelled = null;
+        const start = Date.now();
+        while (existsSync(bulk) && Date.now() - start < 60000) {
+          const now = await t.c.eval(`({ total: ${T}.ops.jobs[${job}]?.filesTotal ?? 0, card: document.querySelector(".job .job-sub")?.innerText ?? "" })`);
+          total = Math.max(total, now.total);
+          if (now.card.includes("/")) card = now.card;
+          await sleep(25);
+        }
+        assert(!existsSync(bulk), "not deleted");
+        assert(total === 30301, `counted ${total} of 30,000 files and 301 folders`);
+        assert(binCount() === bin, "something went to the Recycle Bin");
+        t.note(`card: ${card.replace(/\s+/g, " ") || "(finished before it showed)"}`);
+        if (card) assert(/30.?301/.test(card), `the card doesn't show the total: ${card}`);
+      } finally {
+        rmSync(bulk, { recursive: true, force: true });
+      }
+    },
+  },
+  {
     name: "stays responsive while deleting 300 files",
     async run(t) {
       await go(t, t.p("bulk"));

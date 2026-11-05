@@ -84,6 +84,7 @@ body.reordering, body.reordering * { cursor: grabbing !important; }
 .job.done .job-bar > div { background: #22c55e; }
 .job-sub { display: flex; justify-content: space-between; gap: 10px; font-size: 11.5px; color: var(--fg-3); }
 .job-cur { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
+.job-far { flex: none; white-space: nowrap; font-variant-numeric: tabular-nums; }
 
 /* ---------- update card ---------- */
 .update-card { position: absolute; right: calc(12px + var(--pv-w, 0px)); bottom: 46px; z-index: 41; width: 340px; }

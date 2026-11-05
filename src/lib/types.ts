@@ -81,6 +81,8 @@ export interface JobUpdate {
   filesDone: number;
   filesTotal: number;
   current: string;
+  /** What it's doing when that isn't an item ("Counting… 12,000 items"); shown instead of `current`. */
+  note: string;
   error: string | null;
   created: string[];
   /** Pre-existing items recycled because they were replaced. */

@@ -21,31 +21,215 @@ pub fn is_recycle(p: &str) -> bool {
         .any(|a| t.eq_ignore_ascii_case(a))
 }
 
-/// Whether Windows has a Recycle Bin for this path: only fixed drives do. Elsewhere (WSL, network
-/// folders, USB sticks) `trash::delete` deletes for good and reports that it recycled.
-pub fn has_bin(path: &str) -> bool {
+pub const DRIVE_FIXED: u32 = 3;
+pub const DRIVE_REMOTE: u32 = 4;
+/// Starts the error of a recycle that was refused because it can't go to the Recycle Bin: Ferret
+/// asks (never Windows, in its own dialog), then deletes for good if that's what's wanted. The rest
+/// of the text says why.
+pub const NO_BIN: &str = "nobin:";
+
+fn drive_letter(path: &str) -> Option<u8> {
     let n = paths::normalize(path);
-    let &[letter, b':', ..] = n.as_bytes() else { return false };
-    if !letter.is_ascii_alphabetic() {
-        return false;
+    match *n.as_bytes() {
+        [letter, b':', ..] if letter.is_ascii_alphabetic() => Some(letter.to_ascii_uppercase()),
+        _ => None,
     }
-    #[cfg(windows)]
-    {
-        use windows::core::PCWSTR;
-        use windows::Win32::Storage::FileSystem::GetDriveTypeW;
-        const DRIVE_FIXED: u32 = 3;
-        let root: Vec<u16> = format!("{}:\\", letter as char).encode_utf16().chain(Some(0)).collect();
-        unsafe { GetDriveTypeW(PCWSTR(root.as_ptr())) == DRIVE_FIXED }
+}
+
+fn type_of_drive(letter: u8) -> u32 {
+    use windows::core::PCWSTR;
+    use windows::Win32::Storage::FileSystem::GetDriveTypeW;
+    let root: Vec<u16> = format!("{}:\\", letter as char).encode_utf16().chain(Some(0)).collect();
+    unsafe { GetDriveTypeW(PCWSTR(root.as_ptr())) }
+}
+
+/// The type of drive a path with a drive letter is on.
+pub fn drive_type(path: &str) -> Option<u32> {
+    drive_letter(path).map(type_of_drive)
+}
+
+/// What Windows gives a Recycle Bin until someone sets it: 10% of the first 40 GB and 5% of the
+/// rest (C: here: 930.5 GB → 49,691 MB, exactly what it stored).
+fn default_bin_limit(volume: u64) -> u64 {
+    const FIRST: u64 = 40 << 30;
+    if volume <= FIRST { volume / 10 } else { FIRST / 10 + (volume - FIRST) / 20 }
+}
+
+/// What the Recycle Bin on a fixed drive holds, in bytes. None: it's set to delete right away.
+/// Not knowing means no limit: the check in `shellops` (`State::recycling`) still catches it.
+fn bin_limit(letter: u8) -> Option<u64> {
+    use windows::core::{HSTRING, PCWSTR};
+    use windows::Win32::Storage::FileSystem::{GetDiskFreeSpaceExW, GetVolumeNameForVolumeMountPointW};
+    use winreg::{enums::HKEY_CURRENT_USER, RegKey};
+    let root = HSTRING::from(format!("{}:\\", letter as char));
+    let mut name = [0u16; 64];
+    let guid = unsafe { GetVolumeNameForVolumeMountPointW(PCWSTR(root.as_ptr()), &mut name) }.ok().and_then(|()| {
+        let name = String::from_utf16_lossy(&name);
+        Some(name[name.find('{')?..=name.find('}')?].to_string())
+    });
+    let settings = guid.and_then(|g| {
+        RegKey::predef(HKEY_CURRENT_USER).open_subkey(format!(r"Software\Microsoft\Windows\CurrentVersion\Explorer\BitBucket\Volume\{g}")).ok()
+    });
+    if let Some(key) = &settings {
+        if key.get_value::<u32, _>("NukeOnDelete").is_ok_and(|n| n != 0) {
+            return None;
+        }
+        if let Ok(mb) = key.get_value::<u32, _>("MaxCapacity") {
+            return Some(u64::from(mb) << 20);
+        }
     }
-    #[cfg(not(windows))]
-    false
+    let mut volume = 0u64;
+    match unsafe { GetDiskFreeSpaceExW(PCWSTR(root.as_ptr()), None, Some(&mut volume), None) } {
+        Ok(()) => Some(default_bin_limit(volume)),
+        Err(_) => Some(u64::MAX),
+    }
+}
+
+/// Whether Windows has a Recycle Bin for this path: only fixed drives do, and only when it's not
+/// set to delete right away. Elsewhere (WSL, network folders, USB sticks) recycling deletes for
+/// good and reports that it recycled.
+pub fn has_bin(path: &str) -> bool {
+    drive_letter(path).is_some_and(|l| type_of_drive(l) == DRIVE_FIXED && bin_limit(l).is_some())
 }
 
 /// Which of these a delete can't recycle, for asking first. Off the main thread: asking about a
 /// mapped drive that's gone can take a while.
 #[tauri::command(async)]
 pub fn no_recycle_bin(paths: Vec<String>) -> Vec<String> {
-    paths.into_iter().filter(|p| !has_bin(p)).collect()
+    let mut known = std::collections::HashMap::new();
+    paths
+        .into_iter()
+        .filter(|p| match drive_letter(p) {
+            Some(l) => !*known.entry(l).or_insert_with(|| has_bin(p)),
+            None => true,
+        })
+        .collect()
+}
+
+/// Items that are too big for their Recycle Bin, and why, for a person.
+#[derive(Debug)]
+pub struct TooBig {
+    pub items: Vec<String>,
+    pub why: String,
+}
+
+/// "148 GB", "48.5 GB", "512 MB".
+fn size_text(bytes: u64) -> String {
+    let (value, unit) = if bytes >= 1 << 40 {
+        (bytes as f64 / (1u64 << 40) as f64, "TB")
+    } else if bytes >= 1 << 30 {
+        (bytes as f64 / (1u64 << 30) as f64, "GB")
+    } else {
+        (bytes as f64 / (1u64 << 20) as f64, "MB")
+    };
+    if value >= 100.0 { format!("{value:.0} {unit}") } else { format!("{value:.1} {unit}") }
+}
+
+/// Answers from the drive index for some folders, in the order asked (see `service_folder_sizes`).
+type Index<'a> = &'a dyn Fn(&[String]) -> Option<Vec<Option<crate::search::ipc::FolderTotal>>>;
+
+/// How big `items` are together, as far as it matters: it stops counting once they're over `limit`
+/// (the bool says the number is the whole size). None once `stop` says so. Links count for
+/// nothing: what they point to doesn't go. Folders come from the drive index when it knows them,
+/// else they're walked.
+fn measure(items: &[&String], limit: u64, index: Index, stop: &dyn Fn() -> bool, seen: &mut dyn FnMut(u64)) -> Option<(u64, bool)> {
+    let mut bytes = 0u64;
+    let mut folders: Vec<String> = Vec::new();
+    for p in items {
+        let Ok(meta) = fs::symlink_metadata(paths::for_io(p)) else { continue };
+        if meta.is_dir() {
+            folders.push((*p).clone());
+        } else if !meta.file_type().is_symlink() {
+            bytes += meta.len();
+        }
+    }
+    if bytes > limit {
+        return Some((bytes, folders.is_empty()));
+    }
+    let answers = if folders.is_empty() { None } else { index(&folders) };
+    let mut to_walk = Vec::new();
+    for (i, folder) in folders.iter().enumerate() {
+        match answers.as_ref().and_then(|a| a.get(i)).and_then(|a| a.as_ref()) {
+            Some(total) => bytes += total.bytes,
+            None => to_walk.push(std::path::PathBuf::from(paths::for_io(folder))),
+        }
+    }
+    let mut count = 0u64;
+    while let Some(dir) = to_walk.pop() {
+        if bytes > limit {
+            return Some((bytes, false));
+        }
+        if stop() {
+            return None;
+        }
+        let Ok(entries) = fs::read_dir(&dir) else { continue };
+        for entry in entries.flatten() {
+            let Ok(kind) = entry.file_type() else { continue };
+            if kind.is_dir() {
+                to_walk.push(entry.path());
+            } else if !kind.is_symlink() {
+                bytes += entry.metadata().map(|m| m.len()).unwrap_or(0);
+            }
+            count += 1;
+            if count % 4096 == 0 {
+                seen(count);
+            }
+        }
+    }
+    Some((bytes, true))
+}
+
+/// What of `items` won't fit its Recycle Bin, for Ferret to ask about before anything starts.
+/// Windows would delete such a thing for good, file by file, while the job said "Recycling". All
+/// selected on a drive count together: one by one, the last ones would push the first ones out for
+/// good. Err once `stop` says so.
+pub fn too_big(items: &[String], stop: &dyn Fn() -> bool, seen: &mut dyn FnMut(u64)) -> Result<Option<TooBig>, ()> {
+    too_big_with(items, &crate::search::service_folder_sizes, &|letter| (type_of_drive(letter) == DRIVE_FIXED).then(|| bin_limit(letter)).flatten(), stop, seen)
+}
+
+fn too_big_with(items: &[String], index: Index, limit_of: &dyn Fn(u8) -> Option<u64>, stop: &dyn Fn() -> bool, seen: &mut dyn FnMut(u64)) -> Result<Option<TooBig>, ()> {
+    let mut drives: std::collections::BTreeMap<u8, Vec<&String>> = Default::default();
+    for p in items {
+        if let Some(letter) = drive_letter(p) {
+            drives.entry(letter).or_default().push(p);
+        }
+    }
+    let mut found: Option<TooBig> = None;
+    for (letter, group) in drives {
+        let Some(limit) = limit_of(letter) else { continue };
+        let (bytes, whole) = measure(&group, limit, index, stop, seen).ok_or(())?;
+        if bytes <= limit {
+            continue;
+        }
+        let name = |p: &str| paths::normalize(p).rsplit('\\').next().unwrap_or_default().to_string();
+        let what = match group.as_slice() {
+            [one] => format!("“{}” is", name(one)),
+            many => format!("These {} items are", crate::jobs::grouped(many.len() as u64)),
+        };
+        let bin = size_text(limit);
+        let why = if whole {
+            format!("{what} {}, too big for the Recycle Bin on {}: (it holds {bin})", size_text(bytes), letter as char)
+        } else {
+            format!("{what} too big for the Recycle Bin on {}: (it holds {bin})", letter as char)
+        };
+        let found = found.get_or_insert_with(|| TooBig { items: Vec::new(), why });
+        found.items.extend(group.into_iter().cloned());
+    }
+    Ok(found)
+}
+
+/// For a job about to recycle `items`: ends it if they don't fit, saying which and why, before
+/// anything has happened to them.
+pub fn refuse_too_big(ctx: &crate::jobs::JobCtx, items: &[String]) -> Result<(), String> {
+    let big = too_big(items, &|| ctx.is_cancelled(), &mut |n| ctx.set_note(&format!("Checking the size… {} items", crate::jobs::grouped(n))))
+        .map_err(|()| "Cancelled".to_string())?;
+    ctx.set_note("");
+    let Some(big) = big else { return Ok(()) };
+    log::info!("too big to recycle: {}", big.why);
+    for p in &big.items {
+        ctx.failed(p.clone(), big.why.clone());
+    }
+    Err(format!("{NO_BIN}{}", big.why))
 }
 
 /// Original full path, size (whole tree for folders) and deletion time (ms) from an item's `$I` record.
@@ -265,6 +449,69 @@ pub fn bin_dirs() -> Vec<String> {
 
 #[cfg(all(test, windows))]
 mod tests {
+    use super::{default_bin_limit, has_bin, size_text, too_big_with};
+    use crate::search::ipc::FolderTotal;
+    use std::fs;
+
+    #[test]
+    fn default_limit_is_what_windows_stores() {
+        const MB: u64 = 1 << 20;
+        // C: on the machine this was measured on: 930.5 GB, and Windows stored 49,691 MB.
+        assert_eq!(default_bin_limit(952_860 * MB) / MB, 49_691);
+        assert_eq!(default_bin_limit(20 << 30), 2 << 30);
+    }
+
+    #[test]
+    fn sizes_read_well() {
+        assert_eq!(size_text(148 << 30), "148 GB");
+        assert_eq!(size_text(49_691 << 20), "48.5 GB");
+        assert_eq!(size_text(512 << 20), "512 MB");
+        assert_eq!(size_text(2 << 40), "2.0 TB");
+    }
+
+    #[test]
+    fn only_fixed_drives_have_a_bin() {
+        assert!(!has_bin(r"\\server\share\x"));
+        assert!(!has_bin(r"\\wsl.localhost\Ubuntu\home"));
+        assert!(!has_bin("shell:RecycleBinFolder"));
+    }
+
+    #[test]
+    fn too_big_counts_a_selection_together() {
+        let root = std::env::temp_dir().join(format!("ferret-too-big-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(root.join("dir/sub")).unwrap();
+        fs::write(root.join("dir/a"), vec![0u8; 1000]).unwrap();
+        fs::write(root.join("dir/sub/b"), vec![0u8; 1000]).unwrap();
+        fs::write(root.join("c.txt"), vec![0u8; 500]).unwrap();
+        let s = |p: &str| root.join(p).to_string_lossy().to_string();
+        let (dir, file) = (s("dir"), s("c.txt"));
+        let no_index = |_: &[String]| None;
+        let no_stop = || false;
+        let check = |items: &[String], limit: u64| too_big_with(items, &no_index, &|_| Some(limit), &no_stop, &mut |_| {}).unwrap();
+
+        // Exactly full still fits.
+        assert!(check(std::slice::from_ref(&dir), 2000).is_none());
+        let big = check(std::slice::from_ref(&dir), 1999).unwrap();
+        assert_eq!(big.items, vec![dir.clone()]);
+        assert!(big.why.starts_with("“dir” is ") && big.why.contains("too big for the Recycle Bin on "), "{}", big.why);
+        // Each fits alone, together they don't.
+        let both = [dir.clone(), file.clone()];
+        assert!(check(std::slice::from_ref(&file), 2200).is_none());
+        let big = check(&both, 2200).unwrap();
+        assert_eq!(big.items, both.to_vec());
+        assert!(big.why.starts_with("These 2 items are"), "{}", big.why);
+        // No Recycle Bin to fit in: not this check's business.
+        assert!(too_big_with(&both, &no_index, &|_| None, &no_stop, &mut |_| {}).unwrap().is_none());
+        // The drive index's answer is used instead of walking, and gives the whole size.
+        let index = |_: &[String]| Some(vec![Some(FolderTotal { bytes: 5 << 30, files: 1, partial: false })]);
+        let big = too_big_with(std::slice::from_ref(&dir), &index, &|_| Some(1 << 30), &no_stop, &mut |_| {}).unwrap().unwrap();
+        assert!(big.why.contains("is 5.0 GB, too big"), "{}", big.why);
+        // Stopped while walking.
+        assert!(too_big_with(std::slice::from_ref(&dir), &no_index, &|_| Some(1 << 30), &|| true, &mut |_| {}).is_err());
+        fs::remove_dir_all(&root).unwrap();
+    }
+
     /// Read-only: lists the real Recycle Bin and checks every item resolved its origin.
     #[test]
     fn lists_recycle_bin() {

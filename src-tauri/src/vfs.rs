@@ -147,7 +147,16 @@ impl Vfs for Local {
         if !crate::recycle::has_bin(p) {
             return self.remove(p).map(|_| None).map_err(|e| format!("Couldn't replace {p}: {e}"));
         }
-        trash::delete(io(p)).map(|()| Some(p.to_string())).map_err(|e| format!("Couldn't replace {p}: {e}"))
+        // Too big for the Recycle Bin, it would be gone for good while undo says it can bring it back.
+        let item = [p.to_string()];
+        if let Ok(Some(big)) = crate::recycle::too_big(&item, &|| false, &mut |_| {}) {
+            return Err(format!("Couldn't replace it: {}", big.why));
+        }
+        struct Quiet;
+        impl crate::shellops::Report for Quiet {}
+        crate::shellops::perform(&crate::shellops::ShellOp::Delete { items: item.to_vec(), permanent: false }, None, false, &Quiet)
+            .map(|()| Some(p.to_string()))
+            .map_err(|e| format!("Couldn't replace {p}: {}", e.trim_start_matches(crate::recycle::NO_BIN)))
     }
     fn same(&self, a: &str, b: &str) -> bool {
         let root = |p: &str| -> String {
