@@ -1,5 +1,5 @@
 import {
-  ChevronDown, Clock, Download, EyeOff, FileText, FolderOpen, HardDrive, House, Image, Monitor, Music, Pencil, Plug, Plus, Server,
+  ChevronDown, Clock, Download, EyeOff, FileText, FolderOpen, HardDrive, House, Image, Monitor, Music, Network, Pencil, Plug, Plus, RotateCw, Server,
   Inbox, Search, Settings as SettingsIcon, SlidersHorizontal, Star, Terminal, Trash2, Unplug, Usb, Video, X,
 } from "../lib/icons";
 import { disconnect, editConnection, openConnection, removeConnection } from "../lib/remote";
@@ -19,7 +19,7 @@ const GENERIC_NAMES = new Set([
 import {
   connections, remoteState,
   activeTab, favorites, goTo, navigate, newTab, openMenu, persistSession, persistSettings, places, promptSaveSearch, recents, RESIZE_STEP,
-  removeFromShelf, removeSavedSearch, setFavorites, setRecents, setSettings, settings, setUi, SHELF, ui, type MenuItem,
+  removeFromShelf, removeNetworkPlace, removeSavedSearch, scanNetwork, setFavorites, setRecents, setSettings, settings, setUi, SHELF, signOutOfNetwork, ui, type MenuItem,
 } from "../lib/state";
 import FileIcon from "./FileIcon";
 import { binPlaceMenu, placeMenu } from "./menus";
@@ -34,7 +34,7 @@ const KNOWN_ICONS: Record<string, any> = {
 /** Sidebar sections that can be hidden (Settings → Sidebar). */
 export const SECTIONS = [
   { id: "favorites", name: "Favorites" }, { id: "searches", name: "Saved searches" }, { id: "places", name: "Places" }, { id: "linux", name: "Linux (WSL)" },
-  { id: "servers", name: "Servers" }, { id: "drives", name: "Drives" }, { id: "recents", name: "Recent" }, { id: "dropzone", name: "Dropzone" },
+  { id: "servers", name: "Servers" }, { id: "network", name: "Network" }, { id: "drives", name: "Drives" }, { id: "recents", name: "Recent" }, { id: "dropzone", name: "Dropzone" },
 ];
 
 const placeShown = (id: string) => !settings.hiddenPlaces.includes(id);
@@ -201,6 +201,34 @@ export default function Sidebar(props: { overlay?: boolean }) {
             <button class="side-empty side-add" onClick={() => editConnection(null)}>Add a server to browse its files over SSH</button>
           }>
             <For each={connections()}>{(c) => <ServerItem connection={c} current={current()} />}</For>
+          </Show>
+        </Section>
+
+        <Section id="network" title="Network" action={
+          <>
+            <button class="icon-btn tiny" title={ui.networkScanning ? "Looking for computers…" : "Look for computers again"} disabled={ui.networkScanning}
+              onClick={(e) => { e.stopPropagation(); scanNetwork(); }}><RotateCw size={12} classList={{ spin: ui.networkScanning }} /></button>
+            <button class="icon-btn tiny" title="Add a network folder or NAS" onClick={(e) => { e.stopPropagation(); setUi("networkForm", true); }}><Plus size={13} /></button>
+          </>
+        }>
+          <For each={settings.networkPlaces}>
+            {(p) => (
+              <SideItem icon={Network} label={p.name} path={p.path} active={isWithin(current(), p.path)} title={p.path}
+                menuExtra={[
+                  { separator: true },
+                  { label: "Sign out and forget password", icon: Unplug, action: () => signOutOfNetwork(p.path) },
+                  { label: "Remove from sidebar", icon: X, action: () => removeNetworkPlace(p.path) },
+                ]} />
+            )}
+          </For>
+          <For each={settings.networkFound.filter((c) => !settings.networkPlaces.some((p) => samePath(p.path, c.path)))}>
+            {(c) => (
+              <SideItem icon={Monitor} label={c.name} path={c.path} active={isWithin(current(), c.path)} title={c.path}
+                menuExtra={[{ separator: true }, { label: "Sign out and forget password", icon: Unplug, action: () => signOutOfNetwork(c.path) }]} />
+            )}
+          </For>
+          <Show when={!settings.networkPlaces.length && !settings.networkFound.length}>
+            <button class="side-empty side-add" onClick={() => setUi("networkForm", true)}>Add a NAS or shared folder</button>
           </Show>
         </Section>
 

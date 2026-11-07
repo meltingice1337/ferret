@@ -115,7 +115,8 @@ pub async fn list_dir(state: State<'_, AppState>, path: String) -> Res<DirListin
     }
     if let Some(server) = listing::server_root(&path).map(str::to_string) {
         let path = format!(r"\\{server}");
-        let entries = tauri::async_runtime::spawn_blocking(move || listing::list_server(&server)).await.map_err(err)??;
+        let p = path.clone();
+        let entries = tauri::async_runtime::spawn_blocking(move || listing::list_server(&server).map_err(|e| crate::network::explain(&p, e))).await.map_err(err)??;
         let resolved = with_db(&state, |c| Ok(db::resolve_view(c, &db::load_settings(c), &path, None)))?;
         return Ok(DirListing { path, entries, resolved });
     }
@@ -129,7 +130,8 @@ pub async fn list_dir(state: State<'_, AppState>, path: String) -> Res<DirListin
             return crate::archive::list_children(&p).map(|e| (p, e));
         }
         // Compatibility junctions open their target; truly protected folders say "denied:".
-        listing::list_following(&p)
+        // A network folder's failure says what it means: it may just need a sign-in.
+        listing::list_following(&p).map_err(|e| crate::network::explain(&p, e))
     })
     .await
     .map_err(err)??;
@@ -159,6 +161,10 @@ pub async fn resolve_input(input: String, current: Option<String>) -> Res<Resolv
     }
     tauri::async_runtime::spawn_blocking(move || {
         let mut s = input.trim().trim_matches('"').to_string();
+        // How a NAS's own pages write its address.
+        if s.get(..6).is_some_and(|p| p.eq_ignore_ascii_case("smb://")) {
+            s = format!(r"\\{}", s[6..].replace('/', "\\"));
+        }
         if recycle::is_recycle(&s) {
             return Ok(ResolvedInput { path: recycle::PATH.into(), kind: "dir" });
         }
@@ -209,12 +215,14 @@ pub async fn resolve_input(input: String, current: Option<String>) -> Res<Resolv
             // Archives (and paths inside them) browse like folders.
             Ok(_) if crate::archive::archive_kind(&path).is_some() => "dir",
             Ok(_) => "file",
-            Err(_) => match crate::archive::split_virtual(&path) {
+            Err(e) => match crate::archive::split_virtual(&path) {
                 Some(_) => match crate::archive::list_children(&path) {
                     Ok(_) => "dir",
                     Err(e) if e.contains("password") => "dir",
                     Err(_) => "file",
                 },
+                // A NAS that wants a sign-in, or isn't reachable: opening it asks, or says so.
+                None if crate::network::worth_opening(&path, &e) => "dir",
                 None => "missing",
             },
         };

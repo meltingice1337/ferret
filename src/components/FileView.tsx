@@ -10,7 +10,7 @@ import { formatDate, formatSize, kindOf, plural, timeAgo, typeLabel } from "../l
 import { emptyBin, extractFromInside, isCut, newFolder, renamePath, restoreFromBin, startRename, targetsOf, visibleEntries } from "../lib/ops";
 import { groupEntries, sortEntries, type Group } from "../lib/sortgroup";
 import { entryFilter } from "../lib/filter";
-import { archiveRoot, basename, folderLook, isRecycle, isSearch, isWithin, pathKey, samePath, searchQuery } from "../lib/path";
+import { archiveRoot, basename, folderLook, isRecycle, isSearch, isWithin, networkServer, pathKey, samePath, searchQuery } from "../lib/path";
 import { enter } from "../lib/motion";
 import { openSearchPalette } from "./SearchPalette";
 import { folderSizes, requestFolderSizes, sizeOrder, sizesApply, sizesEpoch, uncounted } from "../lib/foldersizes";
@@ -902,7 +902,7 @@ export default function FileView(props: { tab: Tab }) {
           <Show when={t.error[0]() !== OFFLINE} fallback={
             // A server folder whose connection isn't open: only a click connects.
             <div class="files-empty files-offline">
-              <span>Not connected to {connectionOf(t.p)?.name ?? "this server"}</span>
+              <span>Not connected to {connectionOf(t.p)?.name ?? networkServer(t.p) ?? "this server"}</span>
               <button class="btn accent" onClick={() => navigate(t, t.p, { history: "none" })}><Plug size={14} />Connect</button>
             </div>
           }>

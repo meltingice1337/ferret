@@ -1204,6 +1204,256 @@ export const tests = [
     },
   },
   {
+    name: "a folder changing during a navigation doesn't drop it or leave the tab loading",
+    async run(t) {
+      const S = `${T}.state`;
+      const A = `${T}.api`;
+      await go(t, t.root);
+      // The listing is slowed down so a change arrives while it's under way, as a watcher's does.
+      await t.c.eval(`(() => {
+        const real = ${A}.listDir;
+        window.__slowList = { real, calls: 0 };
+        ${A}.listDir = async (path) => { window.__slowList.calls++; await new Promise((r) => setTimeout(r, 250)); return real(path); };
+      })()`);
+      try {
+        const sub = t.p("docs");
+        await t.c.eval(`void ${S}.navigate(${tab}, ${JSON.stringify(sub)})`);
+        await t.c.eval(`void ${S}.reload(${tab})`);
+        await t.c.waitFor(`${tab}.p === ${JSON.stringify(sub)} && !${tab}.loading[0]()`, { what: "the folder to open, and the tab to stop loading" });
+        // What changed while it was opening is looked at again afterwards.
+        await t.c.waitFor(`window.__slowList.calls >= 2`, { what: "the folder to be listed again" });
+        // Keys act on the list again (nothing is selected-but-ignored).
+        await t.c.waitFor(`document.querySelectorAll(".files .row").length > 0`, { what: "the list" });
+        const name = readdirSync(sub).find((n) => n.endsWith(".md") || n.endsWith(".txt"));
+        await clickRow(t, name);
+        assert((await t.c.eval(`${T}.ops.targetsOf(${tab}).length`)) === 1, "the selected file isn't a target for keys");
+      } finally {
+        await t.c.eval(`${A}.listDir = window.__slowList.real`);
+        await go(t, t.root);
+      }
+    },
+  },
+  {
+    name: "network folder: add one, sign in, wrong password, Cancel, and a restored tab waits",
+    async run(t) {
+      const S = `${T}.state`;
+      const A = `${T}.api`;
+      // A NAS that wants an account can't be stood up here, so its answers are stood in for: the
+      // backend's real error, and the real dialogs and navigation around it. (Rust tests cover
+      // Windows' side, against this computer's own file sharing.)
+      await t.c.eval(`(() => {
+        const real = { listDir: ${A}.listDir, networkConnect: ${A}.networkConnect };
+        window.__netTest = { real, signedIn: false, calls: [] };
+        ${A}.listDir = (path) => {
+          if (!/^\\\\\\\\testnas(\\\\|$)/i.test(path)) return real.listDir(path);
+          if (!window.__netTest.signedIn) return Promise.reject("netlogin:");
+          return real.listDir(${JSON.stringify(t.root)}).then((r) => ({ ...r, path }));
+        };
+        ${A}.networkConnect = (path, user, password, remember) => {
+          window.__netTest.calls.push({ path, user, remember });
+          if (password !== "right") return Promise.reject("wrong-login");
+          window.__netTest.signedIn = true;
+          return Promise.resolve(remember);
+        };
+      })()`);
+      const restore = () => t.c.eval(`(() => {
+        Object.assign(${A}, window.__netTest.real);
+        ${S}.setSettings("networkPlaces", []);
+        ${S}.setSettings("networkFound", []);
+        ${S}.persistSettings();
+        return ${S}.navigate(${tab}, ${JSON.stringify(t.root)});
+      })()`);
+      const login = (what) => t.c.waitFor(`document.querySelector(".modal")?.getAttribute("aria-label") === "Sign in to testnas"`, { what });
+      const fill = async (user, password) => {
+        await t.c.eval(`(() => {
+          const set = (el, v) => { el.value = v; el.dispatchEvent(new InputEvent("input", { bubbles: true })); };
+          const inputs = document.querySelectorAll(".modal .text-input");
+          set(inputs[0], ${JSON.stringify(user)});
+          set(inputs[1], ${JSON.stringify(password)});
+        })()`);
+      };
+      try {
+        // Nothing yet: the sidebar offers to add one.
+        await t.c.eval(`${S}.setSettings("networkPlaces", []), ${S}.setSettings("networkFound", [])`);
+        await t.c.click(".sidebar .side-add", { text: "Add a NAS or shared folder" });
+        await t.c.waitFor(`document.activeElement?.matches(".net-form .text-input")`, { what: "the form, ready to type" });
+        // Written the way a NAS's own pages write it, and it says how it reads that.
+        await t.c.type("smb://testnas/media");
+        await t.c.waitFor(`/Opens\\s*\\\\\\\\testnas\\\\media/.test(document.querySelector(".net-note").textContent)`, { what: "the address as Ferret reads it" });
+        // A real Enter, with its character: that's what submits a form.
+        await t.c.send("Input.dispatchKeyEvent", { type: "keyDown", key: "Enter", code: "Enter", windowsVirtualKeyCode: 13, text: "\r" });
+        await t.c.send("Input.dispatchKeyEvent", { type: "keyUp", key: "Enter", code: "Enter", windowsVirtualKeyCode: 13 });
+
+        // It wants an account. Nothing is said about it being gone.
+        await login("the sign-in");
+        await fill("me", "wrong");
+        await t.c.click(".modal .btn.accent");
+        await t.c.waitFor(`/wasn't accepted/.test(document.querySelector(".modal .conn-test")?.textContent ?? "")`, { what: "a wrong password to be told" });
+        assert(await t.c.eval(`document.querySelector(".modal input[type=password]").value === ""`), "the wrong password stayed in the box");
+        assert(await t.c.eval(`document.activeElement?.type === "password"`), "the keyboard should be on the password");
+
+        // Cancel leaves everything as it was, without an error.
+        const before = await t.c.eval(`${tab}.p`);
+        await t.c.key("Escape");
+        await t.c.waitFor(`!document.querySelector(".modal")`, { what: "the sign-in to close" });
+        assert((await t.c.eval(`${tab}.p`)) === before, "Cancel moved the tab");
+        assert(!(await t.c.eval(`${S}.ui.toasts.some((x) => x.kind === "error")`)), "Cancel raised an error");
+
+        // The place stayed in the sidebar; a click on it asks again, and the right one opens it.
+        await t.c.click(".sidebar .side-item", { text: "media on testnas" });
+        await login("the sign-in again");
+        await fill("me", "right");
+        await t.c.eval(`document.querySelector(".prompt-remember input").click()`);
+        await t.c.click(".modal .btn.accent");
+        await t.c.waitFor(`${tab}.p === "\\\\\\\\testnas\\\\media"`, { what: "the folder to open once signed in" });
+        const call = await t.c.eval(`window.__netTest.calls.at(-1)`);
+        assert(call.user === "me" && call.remember === true, `signed in with ${JSON.stringify(call)}`);
+        assert(!("password" in call), "the test kept a password");
+
+        // A tab restored at startup doesn't ask by itself: it waits with a Connect button.
+        await t.c.eval(`(window.__netTest.signedIn = false, ${S}.navigate(${tab}, "\\\\\\\\testnas\\\\media", { quiet: true }))`);
+        await t.c.waitFor(`/Not connected to testnas/.test(document.querySelector(".files-offline")?.textContent ?? "")`, { what: "the Connect button" });
+        assert(!(await t.c.eval(`!!${S}.ui.networkLogin`)), "a restored tab asked by itself");
+        await t.c.click(".files-offline .btn");
+        await login("the sign-in from Connect");
+        await t.c.key("Escape");
+        await t.c.waitFor(`!document.querySelector(".modal")`, { what: "the sign-in to close" });
+
+        // What Windows found on the network is listed, minus what's already saved.
+        await t.c.eval(`${S}.setSettings("networkFound", [{ name: "ATTIC", path: "\\\\\\\\ATTIC" }, { name: "dup", path: "\\\\\\\\testnas\\\\media" }])`);
+        await t.c.waitFor(`[...document.querySelectorAll(".sidebar .side-label")].some((e) => e.textContent === "ATTIC")`, { what: "the found computer" });
+        assert(!(await t.c.eval(`[...document.querySelectorAll(".sidebar .side-label")].some((e) => e.textContent === "dup")`)), "a saved place is listed twice");
+      } finally {
+        await restore();
+      }
+    },
+  },
+  {
+    name: "intro tour: a replay, trying the real thing from it, Skip, and only new steps later",
+    async run(t) {
+      const S = `${T}.state`;
+      const heading = () => t.c.eval(`document.querySelector(".ix-copy h2")?.textContent ?? ""`);
+      const seen = () => t.c.eval(`[...${S}.settings.introSeen]`);
+      const open = () => t.c.eval(`!!${S}.ui.intro`);
+      const headingIs = (text) => t.c.waitFor(`document.querySelector(".ix-copy h2")?.textContent === ${JSON.stringify(text)}`, { what: `the step “${text}”` });
+      const setSeen = (ids) => t.c.eval(`${S}.setSettings("introSeen", ${JSON.stringify(ids)})`);
+      const closed = () => t.c.waitFor(`!document.querySelector(".intro")`, { what: "the tour to close" });
+
+      // This window was started with a folder: the tour never covers what a window was opened for.
+      assert(!(await open()), "the tour opened over a window started with a folder");
+
+      // From the command palette, by the word someone who forgot it would type.
+      await t.c.key("p", ["Control", "Shift"]);
+      await t.c.waitFor(`document.activeElement?.matches(".palette-input input")`, { what: "the command palette" });
+      await t.c.type("tutorial");
+      await t.c.waitFor(`document.querySelectorAll(".palette-item.cmd").length === 1`, { what: "the tour's command" });
+      await t.c.key("Enter");
+      await headingIs("Search every drive");
+      assert(!(await t.c.eval(`!!document.querySelector(".ix-welcome")`)), "a replay shouldn't start on the welcome screen");
+      const all = await t.c.eval(`[...${S}.ui.intro.steps]`);
+      assert(all.length >= 7, `only ${all.length} steps`);
+      assert(/Close/.test(await t.c.eval(`document.querySelector(".ix-skip").textContent`)), "a replay should say Close, not Skip");
+
+      // The keyboard moves through it, and the list jumps.
+      await t.c.key("ArrowRight");
+      await headingIs("Look inside files");
+      await t.c.key("ArrowLeft");
+      await headingIs("Search every drive");
+      await t.c.key("End");
+      await headingIs("Make it yours");
+      await t.c.key("Home");
+      await t.c.click(".ix-rail .side-item", { text: "Dropzone" });
+      await headingIs("Dropzone");
+      assert(await t.c.eval(`!!document.querySelector(".ix-stage .shelf")`), "the Dropzone step has no demo");
+      await t.c.key("Home");
+      await headingIs("Search every drive");
+
+      // Its demo's parts can be picked, and it says what it's on.
+      await t.c.click(".ix-chapters button", { text: "Inside files" });
+      await t.c.waitFor(`document.querySelector(".ix-chapters button.on")?.textContent === "Inside files"`, { what: "the demo to jump" });
+
+      // "Try it" opens the real search over the tour; Tab stays in it, and Esc comes back.
+      await t.c.click(".ix-try");
+      await t.c.waitFor(`document.activeElement?.matches(".palette-input input")`, { what: "the real search" });
+      await t.c.key("Tab");
+      assert(await t.c.eval(`!!document.activeElement?.closest(".palette")`), "Tab left the search for the tour behind it");
+      await t.c.key("Escape");
+      await t.c.waitFor(`!document.querySelector(".palette") && document.activeElement?.classList.contains("intro")`, { what: "the keyboard back on the tour" });
+      await t.c.key("ArrowRight");
+      await headingIs("Look inside files");
+      // The key itself works too, from any step.
+      await t.c.key("k", ["Control"]);
+      await t.c.waitFor(`document.activeElement?.matches(".palette-input input")`, { what: "Ctrl+K from the tour" });
+      await t.c.key("Escape");
+      await t.c.waitFor(`document.activeElement?.classList.contains("intro")`, { what: "the keyboard back on the tour" });
+
+      // The last step's settings are the real ones. (Not the switch for replacing Explorer.)
+      await t.c.key("End");
+      await headingIs("Make it yours");
+      const accent = await t.c.eval(`${S}.settings.accent`);
+      await t.c.click(`.ix-fields .swatch[title="Cyan"]`);
+      assert((await t.c.eval(`${S}.settings.accent`)) === "#06b6d4", "the swatch didn't change the accent");
+      await t.c.eval(`${S}.setSettings("accent", ${JSON.stringify(accent)}), ${S}.applyAppearance()`);
+      await t.c.key("Escape");
+      await closed();
+      await t.c.waitFor(`document.activeElement && document.activeElement !== document.body`, { what: "the keyboard back in the window" });
+      for (const id of all) assert((await seen()).includes(id), `“${id}” isn't remembered as seen`);
+
+      // From Settings.
+      await t.c.key(",", ["Control"]);
+      await t.c.waitFor(`!!document.querySelector(".card.about")`, { what: "Settings" });
+      await t.c.click(".about-actions .btn", { text: "Intro tour" });
+      await headingIs("Search every drive");
+      assert(!(await t.c.eval(`${S}.ui.settingsOpen`)), "Settings stayed open under the tour");
+      await t.c.key("Escape");
+      await closed();
+
+      // The first time: the welcome screen. Skip counts, and says where it went.
+      await setSeen([]);
+      await t.c.eval(`${S}.showIntroIfDue()`);
+      await t.c.waitFor(`!!document.querySelector(".ix-welcome")`, { what: "the welcome screen" });
+      const count = await t.c.eval(`document.querySelectorAll(".ix-index .side-item").length`);
+      assert(count === all.length, `the welcome screen lists ${count} of ${all.length} steps`);
+      await t.c.click(".ix-welcome .ix-skip");
+      await closed();
+      await t.c.waitFor(`${S}.ui.toasts.some((x) => /tour again/.test(x.text))`, { what: "where to find it again" });
+      assert((await seen()).length === all.length, "Skip didn't count everything as seen");
+      await t.c.eval(`${S}.showIntroIfDue()`);
+      assert(!(await open()), "the tour came back with nothing new");
+
+      // Enter starts it from the welcome screen, and ends it on the last step.
+      await setSeen([]);
+      await t.c.eval(`${S}.showIntroIfDue()`);
+      await t.c.waitFor(`document.activeElement?.classList.contains("intro")`, { what: "the keyboard on the tour" });
+      await t.c.key("Enter");
+      await headingIs("Search every drive");
+      await t.c.key("End");
+      await headingIs("Make it yours");
+      await t.c.key("Enter");
+      await closed();
+
+      // After an update that adds one step: just that one, without the welcome screen or the list.
+      await setSeen(all.filter((id) => id !== "dropzone"));
+      await t.c.eval(`${S}.showIntroIfDue()`);
+      await headingIs("Dropzone");
+      assert(!(await t.c.eval(`!!document.querySelector(".ix-welcome, .ix-rail")`)), "one new step shouldn't bring the welcome screen or the list");
+      assert(/New in Ferret/.test(await t.c.eval(`document.querySelector(".ix-foot").textContent`)), "it doesn't say it's new");
+      await t.c.key("Enter");
+      await closed();
+      assert((await seen()).includes("dropzone"), "the new step isn't remembered as seen");
+
+      // Two new ones: only those two in the list.
+      await setSeen(all.filter((id) => id !== "dropzone" && id !== "search"));
+      await t.c.eval(`${S}.showIntroIfDue()`);
+      await headingIs("Search every drive");
+      assert((await t.c.eval(`document.querySelectorAll(".ix-rail .side-item").length`)) === 2, "the list should have just the two new steps");
+      assert(/New in Ferret/i.test(await t.c.eval(`document.querySelector(".ix-rail-title").textContent`)), "the list doesn't say they're new");
+      await t.c.key("Escape");
+      await closed();
+      await t.c.eval(`${S}.setSettings("introSeen", ${JSON.stringify(all)}), ${S}.persistSettings()`);
+    },
+  },
+  {
     name: "no errors in the UI during the run",
     async run(t) {
       const errs = t.c.errors.filter((e) => !/favicon/.test(e));

@@ -263,7 +263,7 @@ where
 }
 
 /// Runs `f` on a blocking worker thread with COM (STA) initialised.
-async fn blocking_com<T, F>(f: F) -> Result<T, String>
+pub(crate) async fn blocking_com<T, F>(f: F) -> Result<T, String>
 where
     T: Send + 'static,
     F: FnOnce() -> Result<T, String> + Send + 'static,

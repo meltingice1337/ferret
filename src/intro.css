@@ -1,0 +1,285 @@
+/* The intro tour (components/Intro.tsx) and its small demos (IntroDemos.tsx). */
+.modal.intro {
+  width: min(900px, calc(100vw - 32px)); height: min(590px, calc(100vh - 32px)); max-height: none;
+  flex-direction: row; overflow: hidden;
+}
+.modal.intro.one { width: min(660px, calc(100vw - 32px)); }
+
+/* ---------- the list of steps: drawn like Ferret's own sidebar ---------- */
+.ix-rail { flex: none; width: 220px; display: flex; flex-direction: column; gap: 2px; padding: 12px 8px 10px; border-right: 1px solid var(--line); background: var(--hover); }
+.ix-rail-title { padding: 4px 9px 8px; font-size: 11px; font-weight: 600; letter-spacing: 0.04em; text-transform: uppercase; color: var(--fg-3); }
+.ix-rail-foot { margin-top: auto; display: flex; align-items: center; gap: 8px; padding: 6px 9px 2px; font-size: 12px; color: var(--fg-3); font-variant-numeric: tabular-nums; }
+
+/* ---------- a step ---------- */
+.ix-main { flex: 1; min-width: 0; display: flex; flex-direction: column; }
+.ix-step { flex: 1; min-height: 0; display: flex; flex-direction: column; }
+.ix-stage {
+  flex: 1 1 0; min-height: 96px; position: relative; overflow: hidden; border-bottom: 1px solid var(--line);
+  background: radial-gradient(90% 130% at 50% 0%, color-mix(in oklab, var(--accent) 24%, transparent), transparent 72%), var(--bg-solid);
+  animation: fade 0.16s;
+}
+.ix-copy { flex: none; padding: 14px 22px 4px; animation: ix-from-right 0.18s var(--ease-out); }
+.ix-step.back .ix-copy { animation-name: ix-from-left; }
+@keyframes ix-from-right { from { opacity: 0; transform: translateX(14px); } }
+@keyframes ix-from-left { from { opacity: 0; transform: translateX(-14px); } }
+.ix-copy h2 { margin: 0; font-size: 17px; font-weight: 600; text-wrap: balance; }
+.ix-copy p { margin: 4px 0 0; max-width: 80ch; color: var(--fg-2); line-height: 1.5; text-wrap: pretty; }
+.ix-copy code { font-family: var(--mono); font-size: 11.5px; padding: 1px 5px; border-radius: 5px; background: var(--press); color: var(--fg); white-space: nowrap; }
+.ix-keys { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 16px; margin-top: 10px; min-height: 28px; }
+.ix-key { display: inline-flex; align-items: center; gap: 7px; font-size: 12px; color: var(--fg-2); }
+.ix-key kbd { min-width: 0; color: var(--fg); }
+.ix-try { margin-left: auto; }
+.ix-fields { margin-top: 8px; }
+.ix-fields .field { padding: 7px 0; }
+.ix-fields .field:first-child { border-top: none; }
+.ix-fields .field-label small { max-width: 44ch; }
+.ix-fields .card-note { margin: 0 0 4px; }
+.ix-foot { flex: none; display: flex; align-items: center; justify-content: flex-end; gap: 8px; padding: 10px 14px 12px 22px; }
+.ix-skip { background: none; color: var(--fg-2); margin-right: auto; }
+.ix-skip:hover { background: var(--hover); color: var(--fg); }
+/* The left edge of its label lines up with the text above. */
+.ix-foot .ix-skip { margin-left: -12px; }
+.ix-count { margin-right: 4px; font-size: 12px; color: var(--fg-3); font-variant-numeric: tabular-nums; }
+.ix-note { margin-right: auto; font-size: 12px; color: var(--fg-3); font-variant-numeric: tabular-nums; }
+
+/* ---------- the welcome screen ---------- */
+.ix-welcome {
+  flex: 1; min-width: 0; position: relative; isolation: isolate; overflow: hidden;
+  display: flex; flex-direction: column; align-items: center; justify-content: center; padding: 20px 40px; text-align: center;
+}
+/* The one atmospheric touch: the app's accent glow, coming on like a light on an instrument. */
+.ix-welcome::before {
+  content: ""; position: absolute; z-index: -1; left: 50%; top: -190px; width: 720px; height: 560px; transform: translateX(-50%);
+  background: radial-gradient(closest-side, color-mix(in oklab, var(--accent) 42%, transparent), transparent);
+  opacity: 0.3; transition: opacity 1.4s var(--ease-out);
+}
+.ix-welcome.lit::before { opacity: 1; }
+.ix-logo { flex: none; filter: drop-shadow(0 10px 22px rgba(0, 0, 0, 0.35)); }
+.ix-welcome h2 { margin: 12px 0 4px; font-size: 24px; font-weight: 650; letter-spacing: -0.01em; }
+.ix-welcome > p { margin: 0; max-width: 52ch; color: var(--fg-2); line-height: 1.5; text-wrap: balance; }
+.ix-index { display: grid; grid-auto-flow: column; grid-auto-columns: minmax(0, 212px); gap: 0 8px; margin-top: 16px; text-align: left; }
+.ix-welcome-actions { display: flex; align-items: center; gap: 8px; margin-top: 16px; }
+.ix-welcome-actions .btn { height: 32px; padding: 0 16px; }
+.ix-welcome-actions .ix-skip { margin: 0; }
+.ix-welcome > p.ix-later { margin-top: 10px; font-size: 12px; color: var(--fg-3); }
+
+/* ---------- the demos: small windows standing in the stage ---------- */
+.ix-win {
+  position: absolute; left: 50%; top: 50%; transform: translate(-50%, -50%);
+  width: min(580px, calc(100% - 40px)); height: 300px; max-height: calc(100% - 24px);
+  display: flex; flex-direction: column; overflow: hidden; font-size: 12px;
+  background: var(--panel-solid); border: 1px solid var(--line-2); border-radius: 10px; box-shadow: var(--shadow);
+}
+.ix-win.ix-split { flex-direction: row; }
+.ix-pop { animation: pop 0.14s var(--ease-out); }
+.ix-list { padding: 5px; min-width: 0; }
+.ix-grow { flex: 1; min-height: 0; overflow: hidden; }
+.ix-row { display: flex; align-items: center; gap: 8px; height: 26px; padding: 0 8px; border-radius: 6px; color: var(--fg); white-space: nowrap; transition: background 0.12s; }
+.ix-row.on { background: var(--accent); color: var(--on-accent); }
+.ix-row.on .ficon { color: var(--on-accent); opacity: 0.92; }
+.ix-row.soft { background: var(--accent-soft); }
+.ix-name { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.ix-size { flex: none; margin-left: auto; padding-left: 8px; font-size: 11.5px; color: var(--fg-3); font-variant-numeric: tabular-nums; }
+.ix-row.on .ix-size { color: inherit; opacity: 0.85; }
+.ix-dim { color: var(--fg-3); }
+.ix-faded { opacity: 0.5; }
+.ix-pane { flex: 1; min-width: 0; display: flex; flex-direction: column; }
+.ix-swap { animation: fade 0.16s; }
+.ix-arrives { animation: ix-arrive 0.3s var(--ease-out); }
+@keyframes ix-arrive { from { opacity: 0; transform: translateX(-18px); } }
+
+/* The mouse, when a demo needs one */
+.ix-pointer { position: absolute; z-index: 5; pointer-events: none; transition: left 0.6s cubic-bezier(0.3, 0.7, 0.2, 1), top 0.6s cubic-bezier(0.3, 0.7, 0.2, 1); }
+.ix-pointer svg { display: block; filter: drop-shadow(0 1px 2px rgba(0, 0, 0, 0.45)); }
+.ix-ghost {
+  position: absolute; left: 14px; top: 18px; display: flex; align-items: center; gap: 6px; padding: 4px 9px 4px 5px; border-radius: 8px; white-space: nowrap;
+  background: var(--raised); border: 1px solid var(--line-2); box-shadow: var(--shadow); color: var(--fg); font-size: 12px; animation: pop 0.12s var(--ease-out);
+}
+.ix-ghost b { min-width: 18px; padding: 0 5px; border-radius: 9px; text-align: center; font-size: 11px; background: var(--accent); color: var(--on-accent); }
+
+/* Search: the real palette's own rows, under the parts of the story */
+.ix-search { position: absolute; inset: 0; display: flex; flex-direction: column; align-items: center; gap: 10px; padding: 10px 14px 0; }
+.ix-chapters { flex: none; background: color-mix(in oklab, var(--panel-solid) 72%, transparent); }
+.ix-chapters button { padding: 0 11px; font-size: 12px; white-space: nowrap; }
+.ix-search .ix-win {
+  position: relative; left: auto; top: auto; transform: none; flex: 1; min-height: 0; width: 100%; max-width: 680px; height: auto; max-height: none;
+  border-bottom: 0; border-radius: 10px 10px 0 0; font-size: 13px;
+}
+.ix-palette { --name-w: 176px; }
+.ix-palette .palette-input { padding: 9px 12px 9px 14px; }
+.ix-palette .palette-input > svg { flex: none; }
+.ix-palette .palette-list { flex: 1; min-height: 0; overflow: hidden; }
+.ix-palette .palette-types { overflow: hidden; }
+.ix-palette .palette-types button { pointer-events: none; }
+.ix-palette .palette-scope { flex: none; }
+.ix-palette .palette-empty { padding: 14px 12px; }
+.ix-palette .palette-item.has-line { min-height: 44px; }
+.ix-typed { flex: 1; min-width: 0; display: flex; align-items: center; overflow: hidden; font-size: 15px; color: var(--fg); white-space: pre; }
+.ix-placeholder { color: var(--fg-3); }
+.ix-typed:has(.ix-placeholder) .ix-caret { order: -1; margin: 0 1px 0 0; }
+.ix-token { font-family: var(--mono); font-size: 13px; color: var(--accent-text); }
+.ix-caret { flex: none; width: 1px; height: 18px; margin-left: 1px; background: var(--fg); animation: ix-blink 1s steps(1) infinite; }
+@keyframes ix-blink { 50% { opacity: 0; } }
+.ix-keycaps { flex: 1; display: flex; align-items: center; justify-content: center; gap: 12px; padding-bottom: 28px; font-size: 20px; color: var(--fg-3); }
+.ix-keycaps kbd { min-width: 0; padding: 12px 20px; border-radius: 11px; font-size: 22px; color: var(--fg); box-shadow: var(--shadow); animation: ix-press 1.1s var(--ease-out); }
+@keyframes ix-press { 0%, 45% { transform: none; } 58% { transform: translateY(3px); background: var(--accent-soft); } 100% { transform: none; } }
+.ix-found .ix-name { flex: 0 0 170px; }
+.ix-found .ix-where { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; font-size: 11.5px; opacity: 0.8; }
+.ix-found .ix-size { width: 62px; text-align: right; }
+
+/* A list beside a preview */
+.ix-split > .ix-list:not(:last-child) { flex: 0 0 42%; border-right: 1px solid var(--line); }
+.ix-preview { min-width: 0; }
+.ix-preview-head { flex: none; padding: 8px 12px 6px; font-weight: 600; color: var(--fg); border-bottom: 1px solid var(--line); }
+.ix-preview-body { flex: 1; min-height: 0; overflow: hidden; padding: 10px 12px; }
+.ix-code { margin: 0; font-family: var(--mono); font-size: 11.5px; line-height: 1.6; color: var(--fg); white-space: pre; }
+.ix-code .kw { color: #b388ff; }
+.ix-code .st { color: #69f0ae; }
+:root[data-theme="light"] .ix-code .kw { color: #6d28d9; }
+:root[data-theme="light"] .ix-code .st { color: #047857; }
+.ix-pic { display: flex; flex-direction: column; align-items: center; gap: 6px; padding-top: 12px; color: var(--fg-3); font-size: 11.5px; font-variant-numeric: tabular-nums; }
+.ix-md { line-height: 1.5; color: var(--fg-2); }
+.ix-md h4 { margin: 0 0 3px; font-size: 14px; font-weight: 600; color: var(--fg); }
+.ix-md p { margin: 0 0 3px; }
+.ix-md ul { margin: 0; padding-left: 16px; }
+/* A Word page: white whatever the theme, like the real preview. */
+.ix-page {
+  margin: 0 auto; width: min(100%, 250px); min-height: 100%; padding: 14px 16px; border-radius: 2px; background: #fff; color: #222;
+  box-shadow: 0 2px 10px rgba(0, 0, 0, 0.3); font: 9.5px/1.45 Calibri, "Segoe UI", sans-serif;
+}
+.ix-page h5 { margin: 0 0 4px; font-size: 13px; font-weight: 600; color: #1f3864; }
+.ix-page p { margin: 0 0 6px; }
+.ix-page table { width: 100%; margin-bottom: 6px; border-collapse: collapse; font-variant-numeric: tabular-nums; }
+.ix-page th, .ix-page td { padding: 1px 5px; border: 1px solid #b7c3d6; text-align: right; }
+.ix-page th { background: #dbe5f4; font-weight: 600; }
+.ix-page th:first-child, .ix-page td:first-child { text-align: left; }
+
+/* A PDF: the real preview's pages */
+.ix-preview-body.flush { padding: 0; display: flex; }
+.ix-pdf { overflow: hidden; }
+.ix-pdf .pdf-page { padding: 12px 14px 18px; color: #222; font: 10px/1.45 Georgia, "Times New Roman", serif; }
+.ix-pdf h5 { margin: 0 0 5px; font-size: 13px; font-weight: 700; }
+.ix-pdf h6 { margin: 0 0 4px; font-size: 11px; font-weight: 700; }
+.ix-pdf p { margin: 0 0 5px; }
+
+/* A zip */
+.ix-row-of-panes { display: flex; }
+.ix-half { flex: 0 0 46%; border-right: 1px solid var(--line); }
+.ix-bar-row { margin: 2px 6px 2px; padding: 5px 6px 5px 10px; gap: 8px; }
+.ix-bar-row .btn { flex: none; height: 26px; padding: 0 9px; font-size: 12px; white-space: nowrap; }
+.ix-bar-row .btn.lit { box-shadow: inset 0 0 0 1px var(--accent-line); background: var(--accent-soft); }
+.ix-bar-row .bin-hint { font-size: 11.5px; }
+.ix-preview-empty { padding: 14px 12px; color: var(--fg-3); line-height: 1.45; }
+.ix-form > .ix-row { height: 24px; }
+
+/* A terminal, the same in every theme */
+.ix-term { position: absolute; z-index: 3; right: 12px; bottom: 12px; width: min(330px, calc(100% - 24px)); overflow: hidden; border-radius: 8px; border: 1px solid rgba(255, 255, 255, 0.14); background: #0c0c0c; color: #ccc; box-shadow: var(--shadow); }
+.ix-term-title { display: flex; align-items: center; gap: 7px; padding: 5px 10px; background: #1f1f1f; font-size: 11.5px; color: #ddd; }
+.ix-term pre { margin: 0; padding: 8px 10px 10px; font: 11.5px/1.5 var(--mono); white-space: pre-wrap; }
+.ix-term b { font-weight: 400; color: #7ee0a5; }
+.ix-term i { font-style: normal; color: #6cb6ff; }
+.ix-term .ix-caret { display: inline-block; width: 7px; height: 13px; margin: 0; vertical-align: -2px; background: #ccc; }
+.ix-badge { flex: none; margin-left: auto; }
+.ix-title-acts { display: inline-flex; align-items: center; gap: 7px; }
+.ix-title-acts svg.lit { color: var(--accent-text); }
+.ix-form-check { display: flex; align-items: center; gap: 8px; height: 28px; color: var(--fg-2); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.ix-box { flex: none; width: 14px; height: 14px; border-radius: 3px; border: 1px solid var(--line-2); background: var(--raised); }
+.ix-box.on { background: var(--accent); border-color: var(--accent); }
+.ix-menu {
+  position: absolute; z-index: 3; left: 30%; top: 96px; padding: 5px; border-radius: 10px; background: var(--raised); border: 1px solid var(--line-2);
+  box-shadow: var(--shadow); animation: menu-in 0.13s var(--ease-out); white-space: nowrap;
+}
+.ix-menu > div { height: 26px; display: flex; align-items: center; padding: 0 12px 0 10px; border-radius: 6px; color: var(--fg); }
+.ix-menu > div.on { background: var(--accent); color: var(--on-accent); }
+
+/* Tabs and two panes */
+.ix-tabs { flex: none; display: flex; align-items: center; gap: 2px; height: 32px; padding: 0 8px; border-bottom: 1px solid var(--line); color: var(--fg-2); font-size: 12px; }
+.ix-tab { display: flex; align-items: center; gap: 6px; height: 31px; padding: 0 12px; }
+.ix-tab.on { color: var(--fg); background: var(--accent-softer); box-shadow: inset 0 -2px 0 var(--accent); border-radius: 6px 6px 0 0; }
+.ix-tabs > svg { margin-left: 6px; }
+.ix-panes { flex: 1; min-height: 0; display: flex; }
+.ix-panes > .ix-pane { flex: 1 1 100%; min-width: 0; overflow: hidden; transition: flex-basis 0.28s var(--ease-out); }
+.ix-panes > .ix-pane + .ix-pane { flex: 0 0 0; padding-inline: 0; border-left: 0 solid var(--line); }
+.ix-panes.split > .ix-pane { flex: 1 1 50%; }
+.ix-panes.split > .ix-pane + .ix-pane { flex: 1 1 50%; padding-inline: 5px; border-left-width: 1px; }
+.ix-pane-head { flex: none; height: 24px; display: flex; align-items: center; padding: 0 8px; margin-bottom: 2px; font-size: 11.5px; color: var(--fg-3); border-radius: 4px; }
+.ix-pane-head.on { color: var(--fg); box-shadow: inset 0 -1px 0 var(--accent-line); }
+
+/* A job over the list */
+.ix-job { position: absolute; right: 10px; bottom: 10px; width: min(300px, calc(100% - 20px)); animation: none; backdrop-filter: none; }
+.ix-job .job-sub { font-size: 11.5px; color: var(--fg-3); font-variant-numeric: tabular-nums; }
+.ix-job svg.ix-dim { flex: none; }
+.ix-toast { position: absolute; right: 10px; bottom: 10px; display: flex; align-items: center; gap: 8px; max-width: calc(100% - 20px); white-space: nowrap; }
+
+/* A sidebar and a path */
+.ix-side { min-width: 0; padding: 6px; border-right: 1px solid var(--line); background: var(--hover); }
+.ix-places .ix-side { flex: 0 0 34%; }
+.ix-side-item { position: relative; display: flex; align-items: center; gap: 8px; height: 26px; padding: 0 8px; margin-bottom: 2px; border-radius: 6px; color: var(--fg-2); white-space: nowrap; overflow: hidden; transition: background 0.12s; }
+.ix-side-item svg { flex: none; }
+.ix-side-item.on { background: var(--accent-soft); color: var(--fg); }
+.ix-side-item.on::before { content: ""; position: absolute; left: 0; top: 7px; bottom: 7px; width: 3px; border-radius: 3px; background: var(--accent); }
+.ix-side-title { display: flex; align-items: center; justify-content: space-between; padding: 6px 8px 4px; font-size: 11px; font-weight: 600; letter-spacing: 0.04em; text-transform: uppercase; color: var(--fg-3); }
+.ix-side-title svg.lit { color: var(--accent-text); }
+.ix-side-empty { padding: 2px 8px 8px; font-size: 12px; line-height: 1.35; color: var(--fg-3); }
+.ix-crumbs { flex: none; display: flex; align-items: center; gap: 2px; height: 28px; margin: 6px 6px 2px; padding: 0 8px; border-radius: 8px; background: var(--hover); white-space: nowrap; overflow: hidden; color: var(--fg-2); }
+.ix-crumb.last { color: var(--fg); font-weight: 600; }
+.ix-crumb.marked { color: #7ee0a5; }
+:root[data-theme="light"] .ix-crumb.marked { color: #15803d; }
+.ix-sep { color: var(--fg-3); padding: 0 3px; }
+.ix-bar { margin: 12px 8px 0; }
+
+/* The Dropzone, with the real one's styles */
+.ix-dropzone .ix-side { flex: 0 0 38%; }
+.ix-dropzone .shelf { margin: 8px 0 0; }
+.ix-dropzone .shelf-head { white-space: nowrap; }
+.ix-dropzone .shelf-item { height: 24px; }
+
+/* The form for adding a server */
+.ix-form {
+  position: absolute; z-index: 3; inset: 0; margin: auto; width: min(340px, calc(100% - 24px)); height: fit-content; max-height: calc(100% - 16px); overflow: hidden;
+  padding: 10px 14px 12px; background: var(--panel-solid); border: 1px solid var(--line-2); border-radius: 12px;
+  box-shadow: 0 0 0 999px rgba(0, 0, 0, 0.28), var(--shadow);
+}
+.ix-form-title { margin-bottom: 6px; font-size: 13.5px; font-weight: 600; color: var(--fg); }
+.ix-form-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; height: 28px; color: var(--fg-2); }
+.ix-form-value { flex: none; width: 160px; height: 24px; display: flex; align-items: center; padding: 0 8px; border-radius: 6px; background: var(--raised); border: 1px solid var(--line-2); color: var(--fg); }
+.ix-form-actions { display: flex; align-items: center; justify-content: flex-end; gap: 6px; margin-top: 8px; }
+.ix-form-actions .btn { display: inline-flex; align-items: center; height: 26px; font-size: 12px; }
+.ix-connecting { display: inline-flex; align-items: center; gap: 6px; margin-right: auto; color: var(--fg-2); }
+
+/* A step without a demo */
+.ix-keys-stage { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; gap: 10px; }
+.ix-keys-stage kbd { min-width: 0; padding: 8px 14px; font-size: 16px; border-radius: 8px; box-shadow: var(--shadow); }
+
+/* ---------- small and short windows ---------- */
+@media (max-width: 880px) {
+  /* The palette's date column gives way first, as on a narrow real one. */
+  .ix-palette { --name-w: 150px; }
+  .ix-palette .palette-item.file { grid-template-columns: 20px var(--name-w) minmax(0, 1fr) 58px 26px; }
+  .ix-palette .palette-date { display: none; }
+  .ix-dropzone .shelf-head > svg { display: none; }
+}
+@media (max-width: 640px) {
+  .ix-rail { display: none; }
+  .ix-index { grid-auto-flow: row; grid-template-rows: none !important; grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}
+@media (max-height: 620px) {
+  .ix-welcome { padding-block: 12px; }
+  .ix-logo { width: 64px; height: 64px; }
+  .ix-welcome h2 { margin-top: 6px; font-size: 20px; }
+  .ix-index { margin-top: 8px; }
+  .ix-index .side-item { height: 26px; }
+  .ix-welcome-actions { margin-top: 8px; }
+  .ix-welcome > p.ix-later { margin-top: 6px; }
+  .ix-copy { padding-top: 10px; }
+  .ix-keys { margin-top: 6px; }
+  .ix-fields .field { padding: 4px 0; }
+  .ix-fields .field-label small { display: none; }
+  .ix-palette .palette-types, .ix-palette .palette-foot { display: none; }
+}
+
+/* ---------- motion ---------- */
+:root[data-motion="off"] :is(.intro, .intro *, .intro *::before) { animation: none !important; transition: none !important; }
+@media (prefers-reduced-motion: reduce) {
+  :is(.intro, .intro *, .intro *::before) { animation: none !important; transition: none !important; }
+}

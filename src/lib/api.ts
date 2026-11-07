@@ -4,7 +4,7 @@ import { createStore } from "solid-js/store";
 import { logCommandFailure } from "./log";
 import type {
   ArchiveInfo, AudioInfo, Bootstrap, ClipboardFiles, Conflict, Connection, DefaultManagerStatus, DirListing, Favorite, FolderSize, FolderView,
-  HostConfig, ImageInfo, ImageOpts, ImagePreview, ItemInfo, LaunchTarget, OpenWithApp, Places, Policy, Recent, RecycleInfo, Session,
+  HostConfig, ImageInfo, ImageOpts, ImagePreview, ItemInfo, LaunchTarget, NetworkPlace, OpenWithApp, Places, Policy, Recent, RecycleInfo, Session,
   ShellMenuItem, ShellOp, Settings, Stats, TextPreview, VideoInfo, VideoJob, VideoSample, ViewSettings,
 } from "./types";
 
@@ -22,6 +22,12 @@ export const api = {
   resolveInput: (input: string, current?: string) =>
     invoke<{ path: string; kind: "dir" | "file" | "missing" }>("resolve_input", { input, current }),
   openPath: (path: string) => invoke<void>("open_path", { path }),
+  /** Signs in to a network folder's server: true when the password was kept, as asked. */
+  networkConnect: (path: string, user: string | null, password: string | null, remember: boolean) =>
+    invoke<boolean>("network_connect", { path, user, password, remember }),
+  networkForget: (path: string) => invoke<void>("network_forget", { path }),
+  /** What Windows finds on the network: the first look takes a while. */
+  networkComputers: () => invoke<NetworkPlace[]>("network_computers"),
   watchDirs: (paths: string[]) => invoke<void>("watch_dirs", { paths }),
 
   saveSettings: (settings: Settings) => invoke<void>("save_settings", { settings }),

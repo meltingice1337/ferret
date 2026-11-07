@@ -13,6 +13,31 @@ export function remoteParts(p: string): { id: string; linux: string } | null {
   return id ? { id, linux: "/" + rest.filter(Boolean).join("/") } : null;
 }
 
+/** The server of a Windows network path (`\\nas\media` → `nas`): not WSL or a Ferret server. */
+export function networkServer(p: string): string | null {
+  if (!p.startsWith("\\\\") || isWsl(p) || isRemote(p) || /^\\\\wsl(\.localhost|\$)$/i.test(p) || /^\\\\[?.]/.test(p)) return null;
+  return p.slice(2).split("\\")[0] || null;
+}
+
+/** What someone types for a network folder, as a path: `\\nas\media`, `//nas/media`,
+ *  `smb://nas/media`, `nas\media`, or a server alone (`nas`, `192.168.0.10`). Null if it can't
+ *  be one: a drive, a Linux path, something with characters no server or share name has. */
+export function networkPath(input: string): string | null {
+  const text = input.trim().replace(/^"|"$/g, "").replace(/\//g, "\\").replace(/^smb:\\\\/i, "");
+  const parts = text.split("\\").filter(Boolean);
+  if (!parts.length || text.startsWith("\\\\?") || text.startsWith("\\\\.\\")) return null;
+  if (parts.some((p) => /[:*?"<>|]/.test(p)) || /\s/.test(parts[0])) return null;
+  if (/^wsl(\.localhost|\$)$/i.test(parts[0])) return null;
+  return `\\\\${parts.join("\\")}`;
+}
+
+/** The name a network folder gets unless told otherwise: `media on nas`, or a server's own. */
+export function networkLabel(p: string): string {
+  const parts = p.slice(2).split("\\").filter(Boolean);
+  if (parts.length < 2) return parts[0] ?? p;
+  return parts.length === 2 ? `${parts[1]} on ${parts[0]}` : parts[parts.length - 1];
+}
+
 /** A connection's name, by id (state.ts keeps it current). */
 let remoteName = (id: string) => id;
 export const setRemoteNames = (f: (id: string) => string) => (remoteName = f);

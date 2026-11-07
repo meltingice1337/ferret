@@ -157,6 +157,12 @@ export interface DirListing {
   resolved: ResolvedView;
 }
 
+/** A network folder (`\\nas\media`) or computer (`\\nas`) in the sidebar. */
+export interface NetworkPlace {
+  name: string;
+  path: string;
+}
+
 export interface Settings {
   theme: "dark" | "light" | "auto";
   accent: string;
@@ -168,7 +174,7 @@ export interface Settings {
   restoreSession: boolean;
   /** Sidebar places the user hid (ids like "videos", "recycle"). */
   hiddenPlaces: string[];
-  /** Sidebar sections the user hid ("linux", "drives", "recents", "dropzone"). */
+  /** Sidebar sections the user hid ("linux", "network", "drives", "recents", "dropzone"). */
   hiddenSections: string[];
   /** List view column widths in px; Name takes the rest. */
   columnWidths: Record<ListColumn, number>;
@@ -182,6 +188,12 @@ export interface Settings {
   searchHistory: string[];
   /** Searches pinned to the sidebar; each opens as a tab of its current matches. */
   savedSearches: SavedSearch[];
+  /** Intro tour steps already shown or skipped (lib/intro.ts): empty means it's the first time. */
+  introSeen: string[];
+  /** Network folders added to the sidebar. */
+  networkPlaces: NetworkPlace[];
+  /** The computers Windows last found on the network, so a new window has them at once. */
+  networkFound: NetworkPlace[];
   globalView: ViewSettings;
   profiles: Record<ProfileName, { enabled: boolean; view: Partial<ViewSettings> }>;
 }

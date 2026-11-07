@@ -1,10 +1,11 @@
 import { createEffect, For, on, onCleanup, onMount, Show } from "solid-js";
 import ContextMenu from "./components/ContextMenu";
 import { AskDialog, BatchRenameDialog, ConflictDialog, PropertiesDialog } from "./components/Dialogs";
-import { ConnectionDialog, RemotePromptDialog } from "./components/RemoteDialogs";
+import { ConnectionDialog, NetworkLoginDialog, NetworkPlaceDialog, RemotePromptDialog } from "./components/RemoteDialogs";
 import { answerPrompt } from "./lib/remote";
 import Panes from "./components/Panes";
 import { DragGhost, JobsPanel } from "./components/Jobs";
+import Intro from "./components/Intro";
 import MediaEditor, { closeMediaEditor, escLeavesFullscreen } from "./components/MediaEditor";
 import UpdateCard, { WhatsNewDialog } from "./components/UpdateCard";
 import { checkForUpdate, setUpdater, startUpdater, updater } from "./lib/updater";
@@ -23,7 +24,7 @@ import {
   copyPaths, copyToClipboard, deleteItems, emptyBin, newFile, newFolder, openInVscode, openTerminal, paste, redo, redoLabel,
   startRename, syncClipboard, targetsOf, toOtherPane, undo, undoLabel,
 } from "./lib/ops";
-import { fileList, otherPane, stripTab, switchPane, toggleSplit, adminWindow, applyAppearance, elevateWindow, searchTitle, settings, isFavorite, navigate, openNewWindow, persistSettings, places, resetView, setSettings } from "./lib/state";
+import { fileList, otherPane, stripTab, switchPane, toggleSplit, adminWindow, applyAppearance, closeIntro, elevateWindow, replayIntro, scanNetwork, searchTitle, settings, isFavorite, navigate, openNewWindow, persistSettings, places, resetView, setSettings } from "./lib/state";
 import { basename, isRecycle, isSearch, RECYCLE } from "./lib/path";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import {
@@ -89,6 +90,9 @@ function paletteCommands(): PaletteCommand[] {
     cmd("Theme: dark", () => { setSettings("theme", "dark"); persistSettings(); applyAppearance(); }),
     cmd("Theme: light", () => { setSettings("theme", "light"); persistSettings(); applyAppearance(); }),
     cmd("Settings", () => setUi("settingsOpen", true), "Ctrl+,"),
+    cmd("Tutorial: intro tour of what Ferret can do", () => replayIntro()),
+    cmd("Add a network folder or NAS", () => setUi("networkForm", true)),
+    cmd("Look for computers on the network", () => scanNetwork()),
   ];
 }
 
@@ -101,6 +105,8 @@ function toggleSidebar() {
 
 function closeTopModal() {
   if (ui.remotePrompt) answerPrompt(null);
+  else if (ui.networkLogin) { const r = ui.networkLogin; setUi("networkLogin", null); r.resolve(false); }
+  else if (ui.networkForm) setUi("networkForm", false);
   else if (ui.dialog) { const d = ui.dialog; setUi("dialog", null); d.resolve(null); }
   else if (ui.conflict) { const c = ui.conflict; setUi("conflict", null); c.resolve(null); }
   else if (ui.batchRename) setUi("batchRename", null);
@@ -109,10 +115,11 @@ function closeTopModal() {
   else if (ui.connectionForm) setUi("connectionForm", null);
   else if (updater.notesOpen) setUpdater("notesOpen", false);
   else if (ui.settingsOpen) setUi("settingsOpen", false);
+  else if (ui.intro) closeIntro(false);
 }
 
 const modalOpen = () => !!(ui.dialog || ui.conflict || ui.properties || ui.batchRename || ui.media || ui.settingsOpen || ui.quickLook || ui.palette
-  || updater.notesOpen || ui.remotePrompt || ui.connectionForm);
+  || updater.notesOpen || ui.remotePrompt || ui.connectionForm || ui.networkForm || ui.networkLogin || ui.intro);
 
 const keyboardMenu = () => openKeyboardMenu(activeTab());
 
@@ -365,9 +372,10 @@ export default function App() {
     // Tab and Shift+Tab cycle inside the top-most dialog instead of reaching the app behind it.
     const trapTab = (e: KeyboardEvent) => {
       if (e.key !== "Tab") return;
-      const dialogs = [...document.querySelectorAll<HTMLElement>(".modal, .ql")];
+      const dialogs = [...document.querySelectorAll<HTMLElement>(".modal, .ql, .palette")];
       const d = dialogs[dialogs.length - 1];
-      if (!d) return;
+      // The palette (it can be over the intro tour) has its own use for Tab.
+      if (!d || d.classList.contains("palette")) return;
       const stops = [...d.querySelectorAll<HTMLElement>(
         'button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), a[href], [tabindex]:not([tabindex="-1"])',
       )].filter((el) => el.offsetParent !== null);
@@ -433,6 +441,8 @@ export default function App() {
         </main>
         <Show when={ui.quickLook}><QuickLook /></Show>
       </Show>
+      {/* Before everything else that floats: its "Try it" opens the real thing over it. */}
+      <Intro />
       <Show when={ui.palette} keyed>
         {(mode) => <SearchPalette mode={mode} commands={paletteCommands()} />}
       </Show>
@@ -445,6 +455,8 @@ export default function App() {
       <BatchRenameDialog />
       <MediaEditor />
       <ConnectionDialog />
+      <NetworkPlaceDialog />
+      <NetworkLoginDialog />
       {/* Last: a connection's question goes over everything (it may come from any dialog's action). */}
       <RemotePromptDialog />
       <DragGhost />

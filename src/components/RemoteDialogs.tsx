@@ -6,8 +6,9 @@ import { createResource, createSignal, For, Show } from "solid-js";
 import { createStore, unwrap } from "solid-js/store";
 import { api } from "../lib/api";
 import { AlertTriangle, FolderOpen, KeyRound, Loader2, Server } from "../lib/icons";
+import { networkLabel, networkPath } from "../lib/path";
 import { answerPrompt, blankConnection, openConnection } from "../lib/remote";
-import { setConnections, setUi, ui } from "../lib/state";
+import { activeTab, addNetworkPlace, friendly, navigate, setConnections, setUi, toast, ui } from "../lib/state";
 import type { Connection, HostConfig } from "../lib/types";
 import { Modal } from "./Dialogs";
 import "../remote.css";
@@ -162,6 +163,123 @@ function ConnectionForm(props: { editing: Connection | null }) {
           </button>
           <button type="button" class="btn" onClick={close}>Cancel</button>
           <button type="submit" class="btn accent" disabled={!valid()}>{isNew ? "Add and connect" : "Save"}</button>
+        </div>
+      </form>
+    </Modal>
+  );
+}
+
+// ---------- network folders ----------
+
+export function NetworkPlaceDialog() {
+  return <Show when={ui.networkForm}><NetworkPlaceForm /></Show>;
+}
+
+/** Adds a NAS or a shared folder to the sidebar, and opens it (which asks for a sign-in if it needs one). */
+function NetworkPlaceForm() {
+  const [address, setAddress] = createSignal("");
+  const [name, setName] = createSignal("");
+  const [error, setError] = createSignal("");
+  const path = () => networkPath(address());
+  const close = () => setUi("networkForm", false);
+  const submit = (e: Event) => {
+    e.preventDefault();
+    const p = path();
+    if (!p) return setError("That doesn't look like a network address. Try \\\\nas\\media or 192.168.0.10");
+    addNetworkPlace(name().trim() || networkLabel(p), p);
+    close();
+    void navigate(activeTab(), p);
+  };
+  return (
+    <Modal title="Add a network folder" onClose={close} width={520} class="conn-form net-form">
+      <form class="modal-body" onSubmit={submit}>
+        <div class="field">
+          <div class="field-label"><span>Address</span><small>A folder, or just the name or IP address of the NAS to see everything it shares</small></div>
+          <div class="field-control">
+            <input class="text-input" value={address()} placeholder="\\nas\media or 192.168.0.10" spellcheck={false}
+              ref={(el) => queueMicrotask(() => el.focus())}
+              onInput={(e) => { setAddress(e.currentTarget.value); setError(""); }} />
+          </div>
+        </div>
+        <div class="field">
+          <div class="field-label"><span>Name</span><small>As the sidebar shows it</small></div>
+          <div class="field-control">
+            <input class="text-input" value={name()} placeholder={path() ? networkLabel(path()!) : "Media"} spellcheck={false}
+              onInput={(e) => setName(e.currentTarget.value)} />
+          </div>
+        </div>
+        <p class="net-note">
+          <Show when={path() && path() !== address().trim()} fallback="If it asks for a user name and password, Ferret asks you when it connects.">
+            Opens <code>{path()}</code>. If it asks for a user name and password, Ferret asks you when it connects.
+          </Show>
+        </p>
+        <Show when={error()}><div class="conn-test bad"><AlertTriangle size={14} />{error()}</div></Show>
+        <div class="modal-actions">
+          <button type="button" class="btn" onClick={close}>Cancel</button>
+          <button type="submit" class="btn accent" disabled={!address().trim()}>Add and connect</button>
+        </div>
+      </form>
+    </Modal>
+  );
+}
+
+export function NetworkLoginDialog() {
+  return <Show when={ui.networkLogin} keyed>{(req) => <NetworkLogin req={req} />}</Show>;
+}
+
+/** A network folder's server wants a user name and password. They go to Windows, and are kept
+ *  only if Remember is ticked (backend: network.rs). */
+function NetworkLogin(props: { req: NonNullable<typeof ui.networkLogin> }) {
+  const [user, setUser] = createSignal("");
+  const [password, setPassword] = createSignal("");
+  const [remember, setRemember] = createSignal(false);
+  const [busy, setBusy] = createSignal(false);
+  const [error, setError] = createSignal("");
+  let passwordBox!: HTMLInputElement;
+  const finish = (signedIn: boolean) => {
+    setUi("networkLogin", null);
+    props.req.resolve(signedIn);
+  };
+  const submit = async (e: Event) => {
+    e.preventDefault();
+    if (busy()) return;
+    setBusy(true);
+    setError("");
+    try {
+      const kept = await api.networkConnect(props.req.path, user().trim() || null, password(), remember());
+      if (remember() && !kept) toast("Connected, but Windows didn't keep the password");
+      finish(true);
+    } catch (err) {
+      setBusy(false);
+      setError(err === "wrong-login" ? "That user name or password wasn't accepted" : friendly(String(err)));
+      setPassword("");
+      passwordBox?.focus();
+    }
+  };
+  return (
+    <Modal title={`Sign in to ${props.req.server}`} onClose={() => finish(false)} width={440} class="remote-prompt">
+      <form class="modal-body ask" onSubmit={submit}>
+        <p class="ask-msg"><span>{props.req.reason || `“${props.req.server}” asks for a user name and password: usually an account on that device, not your Windows one.`}</span></p>
+        <label class="prompt-field">
+          <span>User name</span>
+          <input class="text-input" value={user()} spellcheck={false} autocomplete="off" ref={(el) => queueMicrotask(() => el.focus())}
+            onInput={(e) => setUser(e.currentTarget.value)} />
+        </label>
+        <label class="prompt-field">
+          <span>Password</span>
+          <input class="text-input" type="password" value={password()} spellcheck={false} autocomplete="off" ref={passwordBox}
+            onInput={(e) => setPassword(e.currentTarget.value)} />
+        </label>
+        <label class="prompt-remember">
+          <input type="checkbox" checked={remember()} onChange={(e) => setRemember(e.currentTarget.checked)} />
+          Remember (in Windows Credential Manager)
+        </label>
+        <Show when={error()}><div class="conn-test bad"><AlertTriangle size={14} />{error()}</div></Show>
+        <div class="modal-actions">
+          <button type="button" class="btn" onClick={() => finish(false)}>Cancel</button>
+          <button type="submit" class="btn accent" disabled={busy() || !user().trim()}>
+            <Show when={busy()} fallback="Connect"><Loader2 size={14} class="spin" />Connecting…</Show>
+          </button>
         </div>
       </form>
     </Modal>

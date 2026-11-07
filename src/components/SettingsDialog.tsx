@@ -3,7 +3,7 @@ import { createResource, createSignal, For, type JSX, Show } from "solid-js";
 import { api } from "../lib/api";
 import { formatDate } from "../lib/format";
 import {
-  applyAppearance, friendly, newTab, persistSettings, places, reresolveAll, setSettings, setUi, settings, toast, ui,
+  applyAppearance, friendly, newTab, persistSettings, places, replayIntro, reresolveAll, setSettings, setUi, settings, toast, ui,
 } from "../lib/state";
 import { SECTIONS, setPlaceShown, setSectionShown } from "./Sidebar";
 import type { GroupBy, ProfileName, Settings, SortBy, ViewSettings } from "../lib/types";
@@ -70,7 +70,7 @@ function Card(props: { title: string; desc?: string; children: JSX.Element }) {
   );
 }
 
-function Field(props: { label: string; hint?: string; children: JSX.Element }) {
+export function Field(props: { label: string; hint?: string; children: JSX.Element }) {
   return (
     <div class="field">
       <div class="field-label"><span>{props.label}</span><Show when={props.hint}><small>{props.hint}</small></Show></div>
@@ -79,7 +79,7 @@ function Field(props: { label: string; hint?: string; children: JSX.Element }) {
   );
 }
 
-function Seg<T extends string>(props: { value: T; options: { value: T; label: string }[]; onChange: (v: T) => void }) {
+export function Seg<T extends string>(props: { value: T; options: { value: T; label: string }[]; onChange: (v: T) => void }) {
   return (
     <div class="seg wide">
       <For each={props.options}>
@@ -89,31 +89,38 @@ function Seg<T extends string>(props: { value: T; options: { value: T; label: st
   );
 }
 
-function Toggle(props: { checked: boolean; onChange: (v: boolean) => void }) {
+export function Toggle(props: { checked: boolean; onChange: (v: boolean) => void }) {
   return (
     <button class="toggle" classList={{ on: props.checked }} role="switch" aria-checked={props.checked}
       onClick={() => props.onChange(!props.checked)}><span /></button>
   );
 }
 
+const appearance = <K extends keyof Settings>(k: K, v: Settings[K]) => { set(k, v); applyAppearance(); };
+
+export function AccentSwatches() {
+  return (
+    <div class="swatches">
+      <For each={ACCENTS}>
+        {(a) => (
+          <button class="swatch" classList={{ on: settings.accent.toLowerCase() === a.value }} title={a.name}
+            style={{ background: a.value }} onClick={() => appearance("accent", a.value)} />
+        )}
+      </For>
+      <label class="swatch custom" title="Custom color" classList={{ on: !ACCENTS.some((a) => a.value === settings.accent.toLowerCase()) }}
+        style={{ background: ACCENTS.some((a) => a.value === settings.accent.toLowerCase()) ? undefined : settings.accent }}>
+        <input type="color" value={settings.accent} onInput={(e) => appearance("accent", e.currentTarget.value)} />
+        <span>+</span>
+      </label>
+    </div>
+  );
+}
+
 function Appearance() {
-  const appearance = <K extends keyof Settings>(k: K, v: Settings[K]) => { set(k, v); applyAppearance(); };
   return (
     <Card title="Appearance">
       <Field label="Accent color" hint="Used for selection, highlights and the background tint">
-        <div class="swatches">
-          <For each={ACCENTS}>
-            {(a) => (
-              <button class="swatch" classList={{ on: settings.accent.toLowerCase() === a.value }} title={a.name}
-                style={{ background: a.value }} onClick={() => appearance("accent", a.value)} />
-            )}
-          </For>
-          <label class="swatch custom" title="Custom color" classList={{ on: !ACCENTS.some((a) => a.value === settings.accent.toLowerCase()) }}
-            style={{ background: ACCENTS.some((a) => a.value === settings.accent.toLowerCase()) ? undefined : settings.accent }}>
-            <input type="color" value={settings.accent} onInput={(e) => appearance("accent", e.currentTarget.value)} />
-            <span>+</span>
-          </label>
-        </div>
+        <AccentSwatches />
       </Field>
       <Field label="Theme">
         <Seg value={settings.theme} onChange={(v) => appearance("theme", v)}
@@ -262,10 +269,12 @@ function SidebarCard() {
   );
 }
 
-function Integration() {
-  const [status, { mutate }] = createResource(() => ui.settingsOpen, () => api.defaultManagerStatus());
+/** The switch that makes Ferret the default file manager, read whenever `when` says so. */
+export function useDefaultManager(when: () => boolean) {
+  const [status, { mutate }] = createResource(when, () => api.defaultManagerStatus());
   const [busy, setBusy] = createSignal(false);
   const change = async (enable: boolean) => {
+    if (busy()) return;
     setBusy(true);
     try {
       mutate(await api.setDefaultManager(enable));
@@ -276,11 +285,16 @@ function Integration() {
       setBusy(false);
     }
   };
+  return { status, change };
+}
+
+function Integration() {
+  const { status, change } = useDefaultManager(() => ui.settingsOpen);
   return (
     <Card title="Windows integration">
       <Field label="Use Ferret instead of File Explorer"
         hint="Win+E, folders opened from the desktop and other apps open in Ferret (in a new tab when it's already running). Turning it off puts Explorer back exactly as it was.">
-        <Toggle checked={!!status()?.enabled} onChange={(v) => !busy() && change(v)} />
+        <Toggle checked={!!status()?.enabled} onChange={change} />
       </Field>
       <Show when={status()?.devBuild && !status()?.enabled}>
         <p class="card-note">This copy is a development or test build, run from the project folder. Turn this on from the installed Ferret.</p>
@@ -338,6 +352,7 @@ function About() {
         <Show when={status()}><p class="card-desc">{status()}</p></Show>
       </div>
       <div class="about-actions">
+        <button class="btn" title="What Ferret can do, in about two minutes" onClick={() => { setUi("settingsOpen", false); replayIntro(); }}>Intro tour</button>
         <button class="btn" title="Ferret's log files, for tracking down problems"
           onClick={() => api.logFolder().then((dir) => { setUi("settingsOpen", false); newTab(dir); }).catch((e) => toast(String(e), "error"))}>Open logs</button>
         <Show when={updater.phase === "available"} fallback={

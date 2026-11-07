@@ -10,6 +10,7 @@ mod linux;
 mod listing;
 mod logging;
 mod media;
+mod network;
 mod office;
 mod paths;
 mod places;
@@ -218,6 +219,9 @@ pub fn run() {
             media::compress_images,
             media::media_release,
             // remote/ (SSH connections)
+            network::network_connect,
+            network::network_forget,
+            network::network_computers,
             remote::remote_connections,
             remote::remote_save_connection,
             remote::remote_delete_connection,

@@ -4,9 +4,10 @@ import { listen } from "@tauri-apps/api/event";
 import { api } from "./api";
 import { invalidateFolderSizes } from "./foldersizes";
 import { onColor } from "./format";
+import { allSeen, dueOnStart, replayPlan, type IntroPlan } from "./intro";
 import { log } from "./log";
 import {
-  basename, isArchiveName, isRecycle, isRemote, isSearch, isVirtual, isWsl, parent, pathKey, remoteParts, samePath, searchQuery, setRemoteNames,
+  basename, isArchiveName, isRecycle, isRemote, isSearch, isVirtual, isWsl, networkServer, parent, pathKey, remoteParts, samePath, searchQuery, setRemoteNames,
 } from "./path";
 import type {
   Connection, Entry, Favorite, LaunchTarget, Places, ProfileName, Recent, RemotePrompt, ResolvedView, Session, Settings, ViewSettings, ViewSource,
@@ -24,7 +25,7 @@ export const [settings, setSettings] = createStore<Settings>({
   doubleClickOpen: true, rememberPerFolder: true, inheritToSubfolders: false, restoreSession: true,
   hiddenPlaces: [], hiddenSections: [],
   columnWidths: { modified: 150, type: 140, size: 90 }, hiddenColumns: [], folderSizes: true, animations: true,
-  searchHistory: [], savedSearches: [],
+  searchHistory: [], savedSearches: [], introSeen: [], networkPlaces: [], networkFound: [],
   globalView: { ...DEFAULT_VIEW },
   profiles: {
     media: { enabled: true, view: {} },
@@ -168,6 +169,14 @@ export const [ui, setUi] = createStore({
   remotePrompt: null as null | RemotePrompt,
   /** The server connection form: a connection to edit, or `{}` for a new one. */
   connectionForm: null as null | { connection: Connection | null },
+  /** The intro tour, while it's open. */
+  intro: null as null | IntroPlan,
+  /** The form for adding a network folder to the sidebar. */
+  networkForm: false,
+  /** A network folder's server wants a user name and password. */
+  networkLogin: null as null | { path: string; server: string; reason: string; resolve: (signedIn: boolean) => void },
+  /** Looking for computers on the network. */
+  networkScanning: false,
 });
 
 export const SHELF = "::shelf::";
@@ -285,7 +294,7 @@ export function showToast(text: string, kind: "info" | "error" = "info", action?
 /** Turns raw OS error text into something readable. */
 export function friendly(text: string) {
   return text
-    .replace(/elevate:|nobin:/g, "")
+    .replace(/elevate:|nobin:|netlogin:/g, "")
     .replace(/denied:.*$/, "Access denied: Windows keeps this folder closed")
     .replace(/Error during `trash` operation: Os \{ code: -2147024894[^}]*\}/gi, "it no longer exists")
     .replace(/Error during (?:a )?`trash` operation: Unknown \{ description: "([^"]*)" \}/gi, "$1")
@@ -309,6 +318,8 @@ let tabSeq = 0;
 export class Tab {
   readonly id = ++tabSeq;
   token = 0;
+  /** Its folder changed while it was opening: list it again afterwards (see reload). */
+  relistAfter: null | { reresolve: boolean } = null;
   path = createSignal("");
   entries = createSignal<Entry[]>([]);
   loading = createSignal(false);
@@ -432,7 +443,8 @@ function applyResolved(tab: Tab, r: ResolvedView) {
 export async function navigate(
   tab: Tab,
   path: string,
-  opts: { history?: "push" | "none"; select?: string | null } = {},
+  /** `quiet`: nobody asked for this right now (a restored tab), so it doesn't ask for a sign-in. */
+  opts: { history?: "push" | "none"; select?: string | null; quiet?: boolean; signedIn?: boolean } = {},
 ): Promise<boolean> {
   const tok = ++tab.token;
   tab.loading[1](true);
@@ -461,7 +473,19 @@ export async function navigate(
       }
       return navigate(tab, path, opts);
     }
-    if (tok === tab.token) tab.loading[1](false);
+    if (tok === tab.token) {
+      tab.loading[1](false);
+      relistIfAsked(tab);
+    }
+    // A network folder that wants a user name and password. A tab nobody asked for right now
+    // waits with a Connect button, like a server's.
+    if (typeof e === "string" && e.startsWith(NET_LOGIN)) {
+      if (opts.quiet) { showOffline(tab, path); return true; }
+      const reason = e.slice(NET_LOGIN.length) || (opts.signedIn ? "That account can't open this folder. Try another one." : "");
+      if (await signInToNetwork(path, reason)) return navigate(tab, path, { ...opts, signedIn: true });
+      if (!tab.p) showOffline(tab, path);
+      return false;
+    }
     // Folders Windows keeps closed stay closed: Ferret never changes permissions.
     if (typeof e === "string" && e.startsWith("denied:")) {
       const denied = e.slice("denied:".length);
@@ -523,7 +547,66 @@ export async function navigate(
   noteVisit(tab, res.path);
   syncWatchers();
   persistSession();
+  relistIfAsked(tab);
   return true;
+}
+
+/** A network folder's server wants a user name and password: resolves to whether it got them.
+ *  Several tabs on one server share one question. */
+const NET_LOGIN = "netlogin:";
+const signingIn = new Map<string, Promise<boolean>>();
+export function signInToNetwork(path: string, reason = ""): Promise<boolean> {
+  const server = networkServer(path) ?? path;
+  const key = server.toLowerCase();
+  const asked = signingIn.get(key);
+  if (asked) return asked;
+  const answer = new Promise<boolean>((resolve) => setUi("networkLogin", { path, server, reason, resolve }));
+  signingIn.set(key, answer);
+  void answer.finally(() => signingIn.delete(key));
+  return answer;
+}
+
+export function addNetworkPlace(name: string, path: string) {
+  setSettings("networkPlaces", (list) => (list.some((p) => samePath(p.path, path))
+    ? list.map((p) => (samePath(p.path, path) ? { name, path: p.path } : p))
+    : [...list, { name, path }]));
+  persistSettings();
+}
+
+export function removeNetworkPlace(path: string) {
+  setSettings("networkPlaces", (list) => list.filter((p) => !samePath(p.path, path)));
+  persistSettings();
+}
+
+/** Signs out of a network folder's server, and forgets a password kept for it. */
+export async function signOutOfNetwork(path: string) {
+  const server = networkServer(path);
+  try {
+    await api.networkForget(path);
+    toast(`Signed out of ${server}`);
+  } catch (e) {
+    toast(friendly(String(e)), "error");
+  }
+}
+
+/** Windows waits for answers before it says what's on the network: about 30 s the first time. */
+const SCAN_GIVES_UP_MS = 90_000;
+/** Asks Windows what's on the network, in the background. The last answer stays until then. */
+export async function scanNetwork() {
+  if (ui.networkScanning) return;
+  setUi("networkScanning", true);
+  try {
+    const found = await Promise.race([
+      api.networkComputers(),
+      new Promise<never>((_, no) => setTimeout(() => no(new Error("no answer from Windows")), SCAN_GIVES_UP_MS)),
+    ]);
+    setSettings("networkFound", found);
+    persistSettings();
+  } catch (e) {
+    log.warn(`looking for computers on the network: ${e}`);
+  } finally {
+    setUi("networkScanning", false);
+  }
 }
 
 /** A tab on a server folder that isn't connected (restored at startup, or the connection
@@ -579,9 +662,22 @@ export function refresh(tab: Tab) {
   return reload(tab);
 }
 
+/** A change that arrived while the tab was opening a folder gets its look now. */
+function relistIfAsked(tab: Tab) {
+  const asked = tab.relistAfter;
+  tab.relistAfter = null;
+  if (asked && tab.p) void reload(tab, asked.reresolve);
+}
+
 export async function reload(tab: Tab, reresolve = false) {
   // Only a click connects a server.
   if (tab.error[0]() === OFFLINE) return;
+  // A navigation is under way. Taking its turn (the token) would drop it, so the folder wouldn't
+  // open and the tab would stay "loading", ignoring Delete, Copy and the rest. It goes first.
+  if (tab.loading[0]()) {
+    tab.relistAfter = { reresolve: reresolve || !!tab.relistAfter?.reresolve };
+    return;
+  }
   const tok = ++tab.token;
   let res;
   try {
@@ -974,6 +1070,22 @@ export async function promptSaveSearch(query: string): Promise<boolean> {
 /** What a search tab is called: its saved name, or the query. */
 export const searchTitle = (p: string) => savedSearch(searchQuery(p))?.name ?? `“${searchQuery(p)}”`;
 
+// ---------- intro tour ----------
+
+/** The whole tour, or on a plain start only what hasn't been shown yet (lib/intro.ts). */
+export const showIntroIfDue = () => { setUi("intro", dueOnStart(settings.introSeen)); };
+export const replayIntro = () => { if (!ui.intro) setUi("intro", replayPlan()); };
+
+/** Everything counts as seen however it was left. Skipping the first time says where it went. */
+export function closeIntro(finished: boolean) {
+  const plan = ui.intro;
+  if (!plan) return;
+  setUi("intro", null);
+  setSettings("introSeen", allSeen(settings.introSeen));
+  persistSettings();
+  if (plan.welcome && !finished) toast("You can see the tour again from Settings or the command palette (Ctrl+Shift+P)");
+}
+
 // ---------- appearance ----------
 
 const darkQuery = window.matchMedia("(prefers-color-scheme: dark)");
@@ -1056,7 +1168,7 @@ export async function boot() {
     const pane = tab.split[0]();
     // Servers only connect when the user asks: their tabs come back with a Connect button.
     const go = (t: Tab, path: string, select?: string | null) =>
-      isRemote(path) ? (showOffline(t, path), Promise.resolve(true)) : navigate(t, path, { select: select ?? null });
+      isRemote(path) ? (showOffline(t, path), Promise.resolve(true)) : navigate(t, path, { select: select ?? null, quiet: true });
     const [ok, paneOk] = await Promise.all([
       go(tab, wanted[i].path, wanted[i].select),
       !pane || go(pane, pane.p),
@@ -1079,6 +1191,9 @@ export async function boot() {
   const opened = restored.includes(shown) ? restored.filter((t) => !gone.has(t)) : [shown];
   setTabs(opened);
   setActiveId(shown.id);
+  // Not over what a window was opened for ("Show in folder", a folder double-clicked), and not
+  // in a second window or a restart as administrator: those are already in the middle of something.
+  if (info.firstWindow && !info.elevated && !launch.length) showIntroIfDue();
   stamp("ready");
   setReady(true);
   syncWatchers();
@@ -1101,6 +1216,11 @@ export async function boot() {
     }
     stamp("tabs");
   })();
+
+  // What's on the network, for the sidebar: in the background, a moment after starting, so it
+  // never competes with it. Other windows get the answer with the settings. The test copy only
+  // looks when a test asks it to.
+  if (info.firstWindow && import.meta.env.MODE !== "e2e" && !settings.hiddenSections.includes("network")) setTimeout(scanNetwork, 5000);
 
   // Other Ferret windows share settings, favorites and recents: pick up their changes.
   window.addEventListener("focus", async () => {

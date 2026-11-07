@@ -168,11 +168,8 @@ fn shares(server: &str) -> Result<Vec<String>, String> {
     let (mut buf, mut read, mut total) = (std::ptr::null_mut::<u8>(), 0u32, 0u32);
     let st = unsafe { NetShareEnum(windows::core::PCWSTR(name.as_ptr()), 1, &mut buf, MAX_PREFERRED_LENGTH, &mut read, &mut total, None) };
     if st != 0 {
-        return Err(match st {
-            5 => format!("Access denied: “{server}” doesn't list its shared folders to you"),
-            53 | 1222 | 2114 => format!("Can't reach “{server}”"),
-            _ => format!("Can't list the shared folders of “{server}” (error {st})"),
-        });
+        // network::explain says what the code means.
+        return Err(format!("Can't list the shared folders of “{server}” (os error {st})"));
     }
     let mut out = Vec::new();
     if !buf.is_null() {

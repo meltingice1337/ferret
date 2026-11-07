@@ -178,6 +178,11 @@ pub fn default_settings() -> Value {
         // Ctrl+K: queries used recently (newest first) and the ones saved to the sidebar.
         "searchHistory": [],
         "savedSearches": [],
+        // The intro tour's steps already shown or skipped (empty: it's the first time).
+        "introSeen": [],
+        // Network folders added to the sidebar, and the computers Windows last found.
+        "networkPlaces": [],
+        "networkFound": [],
         "globalView": default_view(),
         "profiles": {
             "media":     { "enabled": true, "view": { "mode": "grid", "sortBy": "modified", "sortDir": "desc", "groupBy": "date" } },

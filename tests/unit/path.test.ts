@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
-  basename, isRecycle, isSearch, isVirtual, isWithin, isWsl, parent, pathKey, RECYCLE, samePath, searchPath, searchQuery, segments,
+  basename, isRecycle, isSearch, isVirtual, isWithin, isWsl, networkLabel, networkPath, networkServer, parent, pathKey, RECYCLE, samePath, searchPath, searchQuery, segments,
 } from "../../src/lib/path";
 
 describe("segments (breadcrumbs)", () => {
@@ -103,5 +103,38 @@ describe("server paths", () => {
     expect(displayPath(p)).toBe("Home server:/home/Darius");
     expect(displayPath("C:\\Users")).toBe("C:\\Users");
     setRemoteNames((id) => id);
+  });
+});
+
+describe("network paths", () => {
+  it("reads what people type for a NAS", () => {
+    expect(networkPath(String.raw`\\nas\media`)).toBe(String.raw`\\nas\media`);
+    expect(networkPath("//nas/media/photos/")).toBe(String.raw`\\nas\media\photos`);
+    expect(networkPath("smb://nas/media")).toBe(String.raw`\\nas\media`);
+    expect(networkPath("SMB://192.168.0.10/My Files")).toBe(String.raw`\\192.168.0.10\My Files`);
+    expect(networkPath(String.raw`nas\media`)).toBe(String.raw`\\nas\media`);
+    expect(networkPath("  nas  ")).toBe(String.raw`\\nas`);
+    expect(networkPath("192.168.0.10")).toBe(String.raw`\\192.168.0.10`);
+    expect(networkPath(String.raw`"\\nas\media"`)).toBe(String.raw`\\nas\media`);
+  });
+
+  it("turns down what can't be one", () => {
+    const no = ["", "   ", String.raw`C:\Users`, String.raw`\\wsl.localhost\Ubuntu`, String.raw`\\wsl$\Ubuntu`, String.raw`\\ssh:\home\srv`, String.raw`\\?\C:\x`, "my nas", "nas|x"];
+    for (const text of no) expect(networkPath(text), text).toBeNull();
+  });
+
+  it("knows a network path's server", () => {
+    expect(networkServer(String.raw`\\nas\media\x`)).toBe("nas");
+    expect(networkServer(String.raw`\\nas`)).toBe("nas");
+    expect(networkServer(String.raw`C:\Users`)).toBeNull();
+    expect(networkServer(String.raw`\\wsl.localhost\Ubuntu\home`)).toBeNull();
+    expect(networkServer(String.raw`\\wsl.localhost`)).toBeNull();
+    expect(networkServer(String.raw`\\ssh:\home.local\srv`)).toBeNull();
+  });
+
+  it("names a network folder", () => {
+    expect(networkLabel(String.raw`\\nas`)).toBe("nas");
+    expect(networkLabel(String.raw`\\nas\media`)).toBe("media on nas");
+    expect(networkLabel(String.raw`\\nas\media\photos`)).toBe("photos");
   });
 });
