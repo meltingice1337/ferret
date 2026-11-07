@@ -8,6 +8,11 @@
 //! It only listens to window events (nothing is loaded into other processes), runs with
 //! the user's normal rights, leaves Control Panel and other non-folder windows alone, lets
 //! Ferret's own "Open in Explorer" through, and exits once Ferret stops being the default.
+//!
+//! Hiding and reading a window both wait on Explorer, seconds for a big folder, and people
+//! press "Show in folder" again meanwhile. So the event callback never waits: each new window
+//! gets a thread of its own, the callback only tells it what happened, and the same item asked
+//! for again brings up the window already opened for it instead of another one.
 
 use std::time::{Duration, Instant};
 
@@ -130,15 +135,22 @@ fn ferret_args(found: &Found) -> Vec<String> {
     }
 }
 
+/// The same thing asked for again this soon means "where is it?", not "open another one".
+const REPEAT_WITHIN: Duration = Duration::from_secs(10);
+
+/// Whether this request repeats the last one, whose window is still open.
+fn is_repeat(last: &[String], age: Duration, still_open: bool, args: &[String]) -> bool {
+    still_open && age < REPEAT_WITHIN && last == args
+}
+
 // ---------- the background process ----------
 
 /// Runs until Ferret stops being the default file manager.
 #[cfg(windows)]
 pub fn run() {
     use windows::core::PCWSTR;
-    use windows::Win32::Foundation::{GetLastError, ERROR_ALREADY_EXISTS, HWND};
-    use windows::Win32::System::Com::{CoInitializeEx, COINIT_APARTMENTTHREADED};
-    use windows::Win32::System::Threading::{CreateMutexW, GetCurrentThreadId};
+    use windows::Win32::Foundation::{GetLastError, ERROR_ALREADY_EXISTS};
+    use windows::Win32::System::Threading::CreateMutexW;
     use windows::Win32::UI::Accessibility::SetWinEventHook;
     use windows::Win32::UI::WindowsAndMessaging::*;
 
@@ -153,52 +165,93 @@ pub fn run() {
     }
     say("started");
     unsafe {
-        let _ = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
-        MAIN_THREAD.store(GetCurrentThreadId(), std::sync::atomic::Ordering::Relaxed);
         // Create (hide it before it's ever drawn), destroy (forget it), show (take it over).
         let hook = SetWinEventHook(EVENT_OBJECT_CREATE, EVENT_OBJECT_SHOW, None, Some(on_event), 0, 0, WINEVENT_OUTOFCONTEXT | WINEVENT_SKIPOWNPROCESS);
         if hook.is_invalid() {
             say("can't watch windows");
             return;
         }
+        note_existing_windows();
         // Checks now and then that Ferret is still the default.
         SetTimer(None, 0, 5_000, None);
         let mut msg = MSG::default();
         while GetMessageW(&mut msg, None, 0, 0).as_bool() {
-            match msg.message {
-                WM_TIMER if crate::integration::default_target().is_none() => break,
-                WM_EXPLORER_SHOWN => handle(HWND(msg.lParam.0 as *mut _)),
-                _ => {
-                    let _ = TranslateMessage(&msg);
-                    DispatchMessageW(&msg);
-                }
+            if msg.message == WM_TIMER && crate::integration::default_target().is_none() {
+                break;
             }
+            let _ = TranslateMessage(&msg);
+            DispatchMessageW(&msg);
         }
     }
+    // Windows Explorer keeps hidden for later must not stay invisible once nobody watches them:
+    // their threads put them back when they hear nothing more.
+    drop(WATCHED.with_borrow_mut(std::mem::take));
+    std::thread::sleep(Duration::from_millis(500));
     say("stopped: Ferret is no longer the default file manager");
 }
 
 #[cfg(not(windows))]
 pub fn run() {}
 
+/// What a window's thread hears from the event callback.
 #[cfg(windows)]
-static MAIN_THREAD: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
-#[cfg(windows)]
-const WM_EXPLORER_SHOWN: u32 = windows::Win32::UI::WindowsAndMessaging::WM_APP + 1;
+enum Heard {
+    Shown,
+    Gone,
+}
 
-// Explorer windows between "created" and "handled" (event callbacks and the main loop run
-// on the same thread).
+// Explorer windows on their way through (only the event callback touches these, on the thread
+// that set the hook).
 #[cfg(windows)]
 thread_local! {
-    /// Hidden at creation, waiting to be shown and read.
-    static VEILED: std::cell::RefCell<std::collections::HashMap<isize, Veil>> = Default::default();
-    /// Opened by Ferret's "Open in Explorer": stay Explorer.
+    /// Each with a thread of its own, until they're gone.
+    static WATCHED: std::cell::RefCell<std::collections::HashMap<isize, std::sync::mpsc::Sender<Heard>>> = Default::default();
+    /// Stay Explorer until they're gone: opened by Ferret's "Open in Explorer", or already open
+    /// when this run started.
     static PASSED: std::cell::RefCell<std::collections::HashSet<isize>> = Default::default();
 }
 
-/// Window events for Explorer folder windows. A new one is made invisible right when it's
-/// created, before Windows draws or animates it; once shown it's read on the main loop
-/// (that takes COM calls, which shouldn't run inside the event callback).
+#[cfg(windows)]
+fn is_explorer_window(hwnd: windows::Win32::Foundation::HWND) -> bool {
+    let mut class = [0u16; 32];
+    let n = unsafe { windows::Win32::UI::WindowsAndMessaging::GetClassNameW(hwnd, &mut class) } as usize;
+    String::from_utf16_lossy(&class[..n]) == "CabinetWClass"
+}
+
+/// Explorer windows from before this run. Open ones the user can see are theirs and stay. A
+/// hidden one is Explorer's, kept for later, and is treated like a new one when it's shown. An
+/// open one that's fully transparent is of no use to anyone: a version of this helper that
+/// lost track of it left it behind.
+#[cfg(windows)]
+fn note_existing_windows() {
+    use windows::core::BOOL;
+    use windows::Win32::Foundation::{HWND, LPARAM, TRUE, WPARAM};
+    use windows::Win32::UI::WindowsAndMessaging::*;
+    unsafe extern "system" fn look(hwnd: HWND, _: LPARAM) -> BOOL {
+        if !is_explorer_window(hwnd) {
+            return TRUE;
+        }
+        let key = hwnd.0 as isize;
+        if !unsafe { IsWindowVisible(hwnd) }.as_bool() {
+            watch(key);
+        } else if let Some(veil) = Veil::left_behind(hwnd) {
+            say("closing an invisible Explorer window left behind earlier");
+            veil.keep();
+            let _ = unsafe { PostMessageW(Some(hwnd), WM_CLOSE, WPARAM(0), LPARAM(0)) };
+        } else {
+            PASSED.with_borrow_mut(|p| p.insert(key));
+        }
+        TRUE
+    }
+    let _ = unsafe { EnumWindows(Some(look), LPARAM(0)) };
+}
+
+/// Window events for Explorer folder windows. Windows doesn't keep them in order: with a few
+/// windows opening at once, "shown" has arrived 0.8 s before "created". So whichever comes first
+/// starts the window's thread, which hides it right away, before it's drawn if it can.
+///
+/// Nothing here may wait on another program. While a call does (hiding a window sends it
+/// messages), Windows can call this again with the next event or hold it back.
 #[cfg(windows)]
 unsafe extern "system" fn on_event(
     _hook: windows::Win32::UI::Accessibility::HWINEVENTHOOK,
@@ -209,7 +262,6 @@ unsafe extern "system" fn on_event(
     _thread: u32,
     _time: u32,
 ) {
-    use windows::Win32::Foundation::{LPARAM, WPARAM};
     use windows::Win32::UI::WindowsAndMessaging::*;
     if id_object != OBJID_WINDOW.0 || id_child != CHILDID_SELF as i32 || hwnd.is_invalid() {
         return;
@@ -217,41 +269,65 @@ unsafe extern "system" fn on_event(
     let key = hwnd.0 as isize;
     if event == EVENT_OBJECT_DESTROY {
         // Too late to check its class; drop whatever we kept for it.
-        VEILED.with_borrow_mut(|v| v.remove(&key).map(Veil::keep));
+        if let Some(thread) = WATCHED.with_borrow_mut(|w| w.remove(&key)) {
+            let _ = thread.send(Heard::Gone);
+        }
         PASSED.with_borrow_mut(|p| p.remove(&key));
         return;
     }
-    let mut class = [0u16; 32];
-    let n = unsafe { GetClassNameW(hwnd, &mut class) } as usize;
-    if String::from_utf16_lossy(&class[..n]) != "CabinetWClass" {
+    if !is_explorer_window(hwnd) || PASSED.with_borrow(|p| p.contains(&key)) {
         return;
     }
-    if event == EVENT_OBJECT_CREATE {
+    if !WATCHED.with_borrow(|w| w.contains_key(&key)) {
         if crate::integration::default_target().is_none() {
             return;
         }
         if take_pass() {
             PASSED.with_borrow_mut(|p| p.insert(key));
-        } else {
-            VEILED.with_borrow_mut(|v| v.insert(key, Veil::put(hwnd)));
+            say("Explorer window opened by Ferret: left alone");
+            return;
         }
-        return;
+        watch(key);
     }
     if event == EVENT_OBJECT_SHOW {
-        let tid = MAIN_THREAD.load(std::sync::atomic::Ordering::Relaxed);
-        let _ = unsafe { PostThreadMessageW(tid, WM_EXPLORER_SHOWN, WPARAM(0), LPARAM(key)) };
+        // Shown again later (an Explorer window can be hidden and shown): its thread has moved on
+        // and this changes nothing.
+        WATCHED.with_borrow(|w| w.get(&key).map(|thread| thread.send(Heard::Shown)));
     }
 }
 
+/// Starts a window's thread: it hides the window, and takes it over once it's been shown.
 #[cfg(windows)]
-fn handle(hwnd: windows::Win32::Foundation::HWND) {
-    let key = hwnd.0 as isize;
-    if PASSED.with_borrow_mut(|p| p.remove(&key)) {
-        say("Explorer window opened by Ferret: left alone");
-        return;
-    }
-    // Shown again later (an Explorer window can be hidden and shown): nothing to do.
-    let Some(veil) = VEILED.with_borrow_mut(|v| v.remove(&key)) else { return };
+fn watch(key: isize) {
+    let seen = Instant::now();
+    let (tell, heard) = std::sync::mpsc::channel();
+    WATCHED.with_borrow_mut(|w| w.insert(key, tell));
+    std::thread::spawn(move || {
+        let hwnd = windows::Win32::Foundation::HWND(key as *mut _);
+        // One an earlier run hid is hidden already, and is put back to what it was before that.
+        let veil = Veil::left_behind(hwnd).unwrap_or_else(|| Veil::put(hwnd));
+        match heard.recv() {
+            Ok(Heard::Shown) => take_over(veil, seen),
+            Ok(Heard::Gone) => veil.keep(),
+            // This helper is stopping: dropping the veil puts the window back.
+            Err(_) => {}
+        }
+    });
+}
+
+/// Reads a hidden Explorer window, opens Ferret there and closes it.
+#[cfg(windows)]
+fn take_over(veil: Veil, seen: Instant) {
+    use windows::Win32::System::Com::{CoInitializeEx, CoUninitialize, COINIT_APARTMENTTHREADED};
+    let _ = unsafe { CoInitializeEx(None, COINIT_APARTMENTTHREADED) };
+    read_and_open(veil, seen);
+    unsafe { CoUninitialize() };
+}
+
+#[cfg(windows)]
+fn read_and_open(veil: Veil, seen: Instant) {
+    let start = Instant::now();
+    let hwnd = veil.hwnd;
     let Some(ferret) = crate::integration::default_target() else { return };
     let Some(browser) = find_browser(hwnd, Duration::from_secs(3)) else {
         say("new Explorer window, but no folder in it: left alone");
@@ -265,15 +341,95 @@ fn handle(hwnd: windows::Win32::Foundation::HWND) {
             return;
         }
     }
-    let found = found.unwrap();
-    let args = ferret_args(&found);
-    match std::process::Command::new(&ferret).args(&args).spawn() {
-        Ok(_) => {
-            say(&format!("opened in Ferret: {args:?}"));
-            veil.keep();
-            let _ = unsafe { browser.Quit() };
+    let args = ferret_args(&found.unwrap());
+    // Where the time went, for when "Show in folder" feels slow: Explorer shows a window once
+    // it has loaded the folder.
+    let took = format!("{} ms after Explorer made the window, {} ms after it showed it", seen.elapsed().as_millis(), start.elapsed().as_millis());
+    match open_or_raise(&ferret, &args) {
+        Ok(true) => say(&format!("opened in Ferret {took}: {args:?}")),
+        Ok(false) => say(&format!("asked again, brought up the window already open {took}: {args:?}")),
+        Err(e) => {
+            say(&format!("can't start Ferret ({ferret}): {e}"));
+            return;
         }
-        Err(e) => say(&format!("can't start Ferret ({ferret}): {e}")),
+    }
+    veil.keep();
+    if let Err(e) = unsafe { browser.Quit() } {
+        use windows::Win32::Foundation::{LPARAM, WPARAM};
+        use windows::Win32::UI::WindowsAndMessaging::{PostMessageW, WM_CLOSE};
+        say(&format!("Explorer didn't close when asked ({e}), closing its window"));
+        let _ = unsafe { PostMessageW(Some(hwnd), WM_CLOSE, WPARAM(0), LPARAM(0)) };
+    }
+}
+
+/// The last window opened, so pressing "Show in folder" again doesn't stack up windows.
+#[cfg(windows)]
+struct Opened {
+    args: Vec<String>,
+    window: std::process::Child,
+    at: Instant,
+}
+
+#[cfg(windows)]
+static LAST_OPENED: std::sync::Mutex<Option<Opened>> = std::sync::Mutex::new(None);
+
+/// Opens a Ferret window (true), or brings up the one just opened for the same thing (false).
+#[cfg(windows)]
+fn open_or_raise(ferret: &str, args: &[String]) -> std::io::Result<bool> {
+    let mut last = LAST_OPENED.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some(o) = last.as_mut() {
+        let still_open = matches!(o.window.try_wait(), Ok(None));
+        if is_repeat(&o.args, o.at.elapsed(), still_open, args) {
+            raise_window(o.window.id());
+            return Ok(false);
+        }
+    }
+    let window = std::process::Command::new(ferret).args(args).spawn()?;
+    *last = Some(Opened { args: args.to_vec(), window, at: Instant::now() });
+    Ok(true)
+}
+
+/// Brings a process's window to the front: clicking the app that asked again may have covered
+/// it. With no window yet there's nothing to do, it takes the front itself when it appears.
+#[cfg(windows)]
+fn raise_window(pid: u32) {
+    use windows::core::BOOL;
+    use windows::Win32::Foundation::{FALSE, HWND, LPARAM, TRUE};
+    use windows::Win32::UI::Input::KeyboardAndMouse::*;
+    use windows::Win32::UI::WindowsAndMessaging::*;
+    struct Search {
+        pid: u32,
+        found: Option<HWND>,
+    }
+    unsafe extern "system" fn look(hwnd: HWND, search: LPARAM) -> BOOL {
+        let search = unsafe { &mut *(search.0 as *mut Search) };
+        let mut pid = 0;
+        unsafe { GetWindowThreadProcessId(hwnd, Some(&mut pid)) };
+        if pid != search.pid || !unsafe { IsWindowVisible(hwnd) }.as_bool() || unsafe { GetWindowTextLengthW(hwnd) } == 0 {
+            return TRUE;
+        }
+        search.found = Some(hwnd);
+        FALSE
+    }
+    let mut search = Search { pid, found: None };
+    // Err only says the search stopped early, which is finding it.
+    let _ = unsafe { EnumWindows(Some(look), LPARAM(&mut search as *mut Search as isize)) };
+    let Some(hwnd) = search.found else { return };
+    unsafe {
+        if IsIconic(hwnd).as_bool() {
+            let _ = ShowWindow(hwnd, SW_RESTORE);
+        }
+        if SetForegroundWindow(hwnd).as_bool() {
+            return;
+        }
+        // Windows only lets the app used last hand out the front, and a key press makes this
+        // one that app. Alt does nothing on its own (the window library does the same).
+        let key = |flags| INPUT {
+            r#type: INPUT_KEYBOARD,
+            Anonymous: INPUT_0 { ki: KEYBDINPUT { wVk: VK_LMENU, wScan: 0, dwFlags: flags, time: 0, dwExtraInfo: 0 } },
+        };
+        SendInput(&[key(KEYBD_EVENT_FLAGS(0)), key(KEYEVENTF_KEYUP)], std::mem::size_of::<INPUT>() as i32);
+        let _ = SetForegroundWindow(hwnd);
     }
 }
 
@@ -296,6 +452,19 @@ impl Veil {
             let _ = SetLayeredWindowAttributes(hwnd, Default::default(), 0, LWA_ALPHA);
         }
         Veil { hwnd, ex_style, keep: false }
+    }
+
+    /// A window that's fully transparent, which only this helper does to Explorer windows: an
+    /// earlier run hid it (an update replaces the run) and nobody else would ever show it again.
+    fn left_behind(hwnd: windows::Win32::Foundation::HWND) -> Option<Veil> {
+        use windows::Win32::UI::WindowsAndMessaging::*;
+        let ex_style = unsafe { GetWindowLongPtrW(hwnd, GWL_EXSTYLE) };
+        if ex_style & WS_EX_LAYERED.0 as isize == 0 {
+            return None;
+        }
+        let (mut alpha, mut flags) = (255u8, LAYERED_WINDOW_ATTRIBUTES_FLAGS(0));
+        unsafe { GetLayeredWindowAttributes(hwnd, None, Some(&mut alpha), Some(&mut flags)) }.ok()?;
+        (flags.contains(LWA_ALPHA) && alpha == 0).then(|| Veil { hwnd, ex_style: ex_style & !((WS_EX_LAYERED.0 | WS_EX_TOOLWINDOW.0) as isize), keep: false })
     }
 
     fn keep(mut self) {
@@ -333,9 +502,10 @@ fn find_browser(hwnd: windows::Win32::Foundation::HWND, timeout: Duration) -> Op
     use windows::Win32::System::Com::{CoCreateInstance, CLSCTX_ALL};
     use windows::Win32::System::Variant::VARIANT;
     use windows::Win32::UI::Shell::{IShellWindows, IWebBrowserApp, ShellWindows};
+    use windows::Win32::UI::WindowsAndMessaging::IsWindow;
     let windows: IShellWindows = unsafe { CoCreateInstance(&ShellWindows, None, CLSCTX_ALL) }.ok()?;
     let start = Instant::now();
-    while start.elapsed() < timeout {
+    while start.elapsed() < timeout && unsafe { IsWindow(Some(hwnd)) }.as_bool() {
         let count = unsafe { windows.Count() }.unwrap_or(0);
         for i in 0..count {
             let Ok(disp) = (unsafe { windows.Item(&VARIANT::from(i)) }) else { continue };
@@ -448,5 +618,48 @@ mod tests {
         assert_eq!(classify("::{031E4825-7B94-4DC3-B131-E946B44C8DD5}\\Documents.library-ms", None), Found::Keep);
         assert_eq!(ferret_args(&open(r"C:\x", Some(r"C:\x\a b.txt"))), vec![r"/select,C:\x\a b.txt".to_string()]);
         assert_eq!(ferret_args(&open(r"C:\x", None)), vec![r"C:\x".to_string()]);
+    }
+
+    #[test]
+    fn asking_again_is_a_repeat_only_for_the_same_thing_soon_while_its_window_is_open() {
+        let a = vec![r"/select,D:\Downloads\a.mp4".to_string()];
+        let b = vec![r"/select,D:\Downloads\b.mp4".to_string()];
+        let soon = Duration::from_secs(2);
+        assert!(is_repeat(&a, soon, true, &a));
+        assert!(is_repeat(&a, REPEAT_WITHIN - Duration::from_millis(1), true, &a));
+        // Another file, a while later, or its window closed: a new window.
+        assert!(!is_repeat(&a, soon, true, &b));
+        assert!(!is_repeat(&a, REPEAT_WITHIN, true, &a));
+        assert!(!is_repeat(&a, soon, false, &a));
+    }
+
+    /// Only windows made fully transparent count as hidden by an earlier run.
+    #[cfg(windows)]
+    #[test]
+    fn left_behind_finds_only_fully_transparent_windows() {
+        use windows::core::w;
+        use windows::Win32::UI::WindowsAndMessaging::*;
+        // Never shown, so nothing appears on screen.
+        let make = |ex_style| unsafe { CreateWindowExW(ex_style, w!("STATIC"), w!("ferret test"), WS_POPUP, 0, 0, 10, 10, None, None, None, None) }.unwrap();
+        let plain = make(WINDOW_EX_STYLE(0));
+        assert!(Veil::left_behind(plain).is_none());
+
+        let opaque = make(WS_EX_LAYERED);
+        unsafe { SetLayeredWindowAttributes(opaque, Default::default(), 255, LWA_ALPHA) }.unwrap();
+        assert!(Veil::left_behind(opaque).is_none());
+
+        let hidden = make(WINDOW_EX_STYLE(0));
+        let style = unsafe { GetWindowLongPtrW(hidden, GWL_EXSTYLE) };
+        let veil = Veil::put(hidden);
+        veil.keep();
+        let found = Veil::left_behind(hidden).expect("it was made transparent");
+        assert_eq!(found.ex_style, style, "putting it back removes what hiding it added");
+        drop(found);
+        assert!(Veil::left_behind(hidden).is_none(), "it's been put back");
+        assert_eq!(unsafe { GetWindowLongPtrW(hidden, GWL_EXSTYLE) }, style);
+
+        for w in [plain, opaque, hidden] {
+            unsafe { DestroyWindow(w) }.unwrap();
+        }
     }
 }
