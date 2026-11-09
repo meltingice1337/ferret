@@ -1,36 +1,15 @@
-mod archive;
-mod commands;
-mod db;
-mod details;
-mod fileops;
-mod foldersize;
-mod integration;
-mod jobs;
-mod linux;
-mod listing;
-mod logging;
-mod media;
-mod network;
-mod office;
-mod paths;
-mod places;
+//! The Tauri shell around ferret-core: the window, the commands the page calls (cmd/), the
+//! fs:// and thumb:// schemes (protocol.rs), logging, and the link the core reaches the app
+//! through (link.rs).
+
+mod cmd;
+mod link;
+mod log_setup;
 mod protocol;
-mod recycle;
-mod redirect;
-mod remote;
-mod remove;
-pub mod search;
-mod shell;
-mod shellmenu;
-mod shellops;
-mod vfs;
-mod watch;
-mod wsl;
+mod window;
 
-use std::sync::Mutex;
+use ferret_core::{app, db, integration, logging, redirect, rt, shellmenu};
 use tauri::Manager;
-
-use commands::AppState;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
@@ -73,9 +52,12 @@ pub fn run() {
             unsafe { std::env::set_var("WEBVIEW2_USER_DATA_FOLDER", dir.join(&id).join("EBWebView-admin")) };
         }
     }
+    // One async runtime for the core and Tauri, started here: after the `set_var` calls above
+    // (its threads would read the environment) and before Tauri would start its own.
+    tauri::async_runtime::set(rt::handle());
     tauri::Builder::default()
         // First, so everything after it (other plugins' setup included) is recorded.
-        .plugin(logging::plugin())
+        .plugin(log_setup::plugin())
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_drag::init())
         .plugin(tauri_plugin_dialog::init())
@@ -92,20 +74,16 @@ pub fn run() {
             });
         })
         .setup(move |app| {
-            logging::log_startup(app.handle(), admin);
-            logging::watch_main_thread(app.handle().clone());
-            remote::init(app.handle());
+            log_setup::log_startup(app.handle(), admin);
+            log_setup::watch_main_thread(app.handle().clone());
             let dir = app.path().app_data_dir()?;
             std::fs::create_dir_all(&dir)?;
             let conn = db::open(&dir.join("ferret.db"))?;
-            app.manage(AppState {
-                db: Mutex::new(conn),
-                watcher: Mutex::new(watch::DirWatcher::new(app.handle().clone())),
-            });
+            app::init(Box::new(link::TauriLink(app.handle().clone())), conn);
             // The window starts hidden so a restarted window appears right where the old one
             // was, and so it first appears with the app drawn (integration::reveal).
             if let Some(window) = app.get_webview_window("main") {
-                shell::set_big_icon(&window);
+                window::set_big_icon(&window);
                 // Development builds say so in the taskbar, so they can't be mistaken for the installed app.
                 let title = match (admin, cfg!(debug_assertions)) {
                     (true, true) => Some("Ferret (Dev, Administrator)"),
@@ -116,141 +94,140 @@ pub fn run() {
                 if let Some(title) = title {
                     let _ = window.set_title(title);
                 }
-                integration::apply_placement(&window);
+                window::apply_placement(&window);
                 if integration::e2e() {
                     let _ = window.set_skip_taskbar(true);
                     let _ = window.set_position(tauri::PhysicalPosition::new(-32000, -32000));
                 }
                 std::thread::spawn(move || {
                     std::thread::sleep(integration::SHOW_AFTER);
-                    if !integration::reveal(&window) {
+                    if !window::reveal(&window) {
                         log::warn!("the page didn't show the window within {:?}", integration::SHOW_AFTER);
                     }
                 });
             }
             // Off the main thread: until the window is up, it serves the page its files and calls.
-            let handle = app.handle().clone();
             std::thread::spawn(move || {
                 if !admin {
-                    integration::refresh_registration(&handle.state::<AppState>());
+                    integration::refresh_registration();
                 }
                 shellmenu::warm_up();
             });
             Ok(())
         })
-        .invoke_handler(logging::timed(tauri::generate_handler![
-            commands::bootstrap,
-            commands::get_places,
-            commands::shared_state,
-            commands::list_dir,
-            commands::resolve_input,
-            commands::open_path,
-            commands::watch_dirs,
-            commands::save_settings,
-            commands::save_session,
-            commands::set_folder_view,
-            commands::clear_folder_view,
-            commands::list_folder_views,
-            commands::clear_all_folder_views,
-            commands::add_favorite,
-            commands::remove_favorite,
-            commands::update_favorite,
-            commands::reorder_favorites,
-            commands::push_recent,
-            commands::remove_recent,
-            commands::clear_recents,
-            commands::set_backdrop,
-            commands::drag_icon,
-            logging::log_folder,
-            jobs::cancel_job,
-            jobs::answer_job,
-            fileops::create_folder,
-            fileops::remove_empty_folder,
-            fileops::create_file,
-            fileops::rename_item,
-            fileops::check_conflicts,
-            fileops::transfer,
-            fileops::undo_moves,
-            fileops::delete_items,
-            fileops::restore_from_trash,
-            fileops::find_in_trash,
-            fileops::item_info,
-            fileops::folder_stats,
-            foldersize::folder_sizes,
-            foldersize::folder_sizes_invalidate,
-            fileops::set_attributes,
-            fileops::read_text,
-            fileops::read_bytes,
-            details::file_details,
-            shellops::shell_op,
-            // shellmenu.rs (Explorer's third-party entries in Ferret's menu)
-            shellmenu::shell_menu_items,
-            shellmenu::shell_menu_invoke,
-            // shell.rs commands (registered by the shell agent)
-            shell::show_native_menu,
-            shell::show_native_background_menu,
-            shell::show_properties,
-            shell::open_with_dialog,
-            shell::list_open_with,
-            shell::open_with,
-            shell::clipboard_write_files,
-            shell::clipboard_after_cut,
-            shell::clipboard_read_files,
-            shell::clipboard_sequence,
-            shell::open_terminal,
-            shell::open_in_vscode,
-            shell::reveal_in_explorer,
-            // archive.rs commands (registered by the archive agent)
-            archive::archive_materialize,
-            archive::archive_extract,
-            archive::archive_extract_smart,
-            archive::compress_zip,
-            archive::archive_info,
-            archive::archive_unlock,
-            // media.rs (video / picture compression)
-            media::video_info,
-            media::audio_info,
-            media::compress_videos,
-            media::video_sample,
-            media::image_info,
-            media::image_preview,
-            office::sheet_preview,
-            office::slides_preview,
-            media::compress_images,
-            media::media_release,
-            // remote/ (SSH connections)
-            network::network_connect,
-            network::network_forget,
-            network::network_computers,
-            remote::remote_connections,
-            remote::remote_save_connection,
-            remote::remote_delete_connection,
-            remote::remote_config_hosts,
-            remote::remote_connect,
-            remote::remote_disconnect,
-            remote::remote_test,
-            remote::remote_status,
-            remote::remote_materialize,
-            remote::prompt::remote_answer,
-            remote::edit::remote_open,
+        .invoke_handler(log_setup::timed(tauri::generate_handler![
+            cmd::browse::bootstrap,
+            cmd::browse::get_places,
+            cmd::browse::shared_state,
+            cmd::browse::list_dir,
+            cmd::browse::resolve_input,
+            cmd::browse::open_path,
+            cmd::browse::watch_dirs,
+            cmd::browse::save_settings,
+            cmd::browse::save_session,
+            cmd::browse::set_folder_view,
+            cmd::browse::clear_folder_view,
+            cmd::browse::list_folder_views,
+            cmd::browse::clear_all_folder_views,
+            cmd::browse::add_favorite,
+            cmd::browse::remove_favorite,
+            cmd::browse::update_favorite,
+            cmd::browse::reorder_favorites,
+            cmd::browse::push_recent,
+            cmd::browse::remove_recent,
+            cmd::browse::clear_recents,
+            cmd::browse::set_backdrop,
+            cmd::browse::drag_icon,
+            log_setup::log_folder,
+            cmd::fileops::cancel_job,
+            cmd::fileops::answer_job,
+            cmd::fileops::create_folder,
+            cmd::fileops::remove_empty_folder,
+            cmd::fileops::create_file,
+            cmd::fileops::rename_item,
+            cmd::fileops::check_conflicts,
+            cmd::fileops::transfer,
+            cmd::fileops::undo_moves,
+            cmd::fileops::delete_items,
+            cmd::fileops::restore_from_trash,
+            cmd::fileops::find_in_trash,
+            cmd::fileops::item_info,
+            cmd::fileops::folder_stats,
+            cmd::fileops::folder_sizes,
+            cmd::fileops::folder_sizes_invalidate,
+            cmd::fileops::set_attributes,
+            cmd::fileops::read_text,
+            cmd::fileops::read_bytes,
+            cmd::fileops::file_details,
+            cmd::fileops::shell_op,
+            // Explorer's third-party entries in Ferret's menu
+            cmd::shell::shell_menu_items,
+            cmd::shell::shell_menu_invoke,
+            // Windows shell
+            cmd::shell::show_native_menu,
+            cmd::shell::show_native_background_menu,
+            cmd::shell::show_properties,
+            cmd::shell::open_with_dialog,
+            cmd::shell::list_open_with,
+            cmd::shell::open_with,
+            cmd::shell::clipboard_write_files,
+            cmd::shell::clipboard_after_cut,
+            cmd::shell::clipboard_read_files,
+            cmd::shell::clipboard_sequence,
+            cmd::shell::open_terminal,
+            cmd::shell::open_in_vscode,
+            cmd::shell::reveal_in_explorer,
+            // archives
+            cmd::archive::archive_materialize,
+            cmd::archive::archive_extract,
+            cmd::archive::archive_extract_smart,
+            cmd::archive::compress_zip,
+            cmd::archive::archive_info,
+            cmd::archive::archive_unlock,
+            // video / picture compression, office previews
+            cmd::archive::video_info,
+            cmd::archive::audio_info,
+            cmd::archive::compress_videos,
+            cmd::archive::video_sample,
+            cmd::archive::image_info,
+            cmd::archive::image_preview,
+            cmd::archive::sheet_preview,
+            cmd::archive::slides_preview,
+            cmd::archive::compress_images,
+            cmd::archive::media_release,
+            // network folders, SSH connections
+            cmd::remote::network_connect,
+            cmd::remote::network_forget,
+            cmd::remote::network_computers,
+            cmd::remote::remote_connections,
+            cmd::remote::remote_save_connection,
+            cmd::remote::remote_delete_connection,
+            cmd::remote::remote_config_hosts,
+            cmd::remote::remote_connect,
+            cmd::remote::remote_disconnect,
+            cmd::remote::remote_test,
+            cmd::remote::remote_status,
+            cmd::remote::remote_materialize,
+            cmd::remote::remote_answer,
+            cmd::remote::remote_open,
             // search (whole-disk index)
-            search::search_query,
-            search::search_status,
-            search::search_cancel,
-            search::search_install_service,
-            search::search_service_outdated,
+            cmd::system::search_query,
+            cmd::system::search_status,
+            cmd::system::search_cancel,
+            cmd::system::search_install_service,
+            cmd::system::search_service_outdated,
             // Recycle Bin and Windows integration
-            recycle::recycle_info,
-            recycle::no_recycle_bin,
-            recycle::empty_recycle_bin,
-            integration::launch_targets,
-            integration::default_manager_status,
-            integration::set_default_manager,
-            integration::open_in_explorer,
-            integration::window_info,
-            integration::show_window,
-            integration::new_window,
-            integration::restart_elevated,
+            cmd::system::recycle_info,
+            cmd::system::no_recycle_bin,
+            cmd::system::empty_recycle_bin,
+            cmd::system::launch_targets,
+            cmd::system::default_manager_status,
+            cmd::system::set_default_manager,
+            cmd::system::open_in_explorer,
+            cmd::system::window_info,
+            cmd::system::show_window,
+            cmd::system::new_window,
+            cmd::system::restart_elevated,
         ]))
         .run(context)
         .expect("error while running Ferret");

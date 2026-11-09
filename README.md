@@ -123,10 +123,11 @@ yarn test             # unit tests (yarn test:e2e for the end-to-end run)
 | Path | What's there |
 | --- | --- |
 | `src/` | UI (SolidJS + TypeScript) |
-| `src-tauri/src/` | Backend: file operations, shell integration, archives, previews |
-| `src-tauri/src/search/` | Search engine, MFT/USN indexer, named-pipe protocol |
+| `src-tauri/ferret-core/` | Backend without a UI (no Tauri): file operations, shell integration, archives, previews, SSH |
+| `src-tauri/ferret-core/src/search/` | Search engine, MFT/USN indexer, named-pipe protocol |
+| `src-tauri/ferret-core/src/redirect.rs` | Background helper that opens Explorer's folder windows in Ferret |
+| `src-tauri/ferret-core/src/media.rs` | Video (Media Foundation transcoder) and picture (WIC) compression |
+| `src-tauri/src/` | Tauri shell: the window, the commands the UI calls (`cmd/`), the `fs://` and `thumb://` schemes |
 | `src-tauri/src/bin/ferret-indexer.rs` | Entry point of the indexer service |
-| `src-tauri/src/redirect.rs` | Background helper that opens Explorer's folder windows in Ferret |
-| `src-tauri/src/media.rs` | Video (Media Foundation transcoder) and picture (WIC) compression |
 | `src-tauri/wsl-size` | Linux program that counts folder sizes inside WSL (static, built into the app) |
 | `src-tauri/vendor/drag` | Patched copy of the `drag` crate (dragging files out of Ferret) |

@@ -11,7 +11,7 @@ use std::path::PathBuf;
 use std::time::UNIX_EPOCH;
 use tauri::http::{header, Request, Response, StatusCode};
 
-use crate::paths;
+use ferret_core::paths;
 
 const MAX_CHUNK: u64 = 4 * 1024 * 1024;
 const MAX_WHOLE: u64 = 64 * 1024 * 1024;
@@ -53,7 +53,7 @@ fn parse_range(h: &str, len: u64) -> Option<(u64, u64)> {
 
 /// A server file's bytes, a range at a time (videos seek without downloading it all).
 fn serve_remote(req: &Request<Vec<u8>>, path: &str) -> Response<Vec<u8>> {
-    let Some(len) = crate::remote::fs::size_of(path) else {
+    let Some(len) = ferret_core::remote::fs::size_of(path) else {
         return status(StatusCode::NOT_FOUND, "not found");
     };
     let mime = mime_guess::from_path(path).first_or_octet_stream().essence_str().to_string();
@@ -66,7 +66,7 @@ fn serve_remote(req: &Request<Vec<u8>>, path: &str) -> Response<Vec<u8>> {
     let buf = if len == 0 {
         Vec::new()
     } else {
-        match crate::remote::fs::read_range(path, start, end + 1 - start) {
+        match ferret_core::remote::fs::read_range(path, start, end + 1 - start) {
             Ok((b, _)) => b,
             Err(_) => return status(StatusCode::INTERNAL_SERVER_ERROR, "read failed"),
         }
@@ -161,7 +161,7 @@ pub fn serve_thumb(req: Request<Vec<u8>>) -> Response<Vec<u8>> {
     if paths::is_remote(&path) {
         let picture = mime_guess::from_path(&path).first().is_some_and(|m| m.type_() == "image");
         let copy = (picture && !icon_only)
-            .then(|| crate::remote::block(crate::remote::fs::materialize(&path, REMOTE_THUMB_MAX)).ok())
+            .then(|| ferret_core::remote::block(ferret_core::remote::fs::materialize(&path, REMOTE_THUMB_MAX)).ok())
             .flatten();
         match copy {
             Some(local) => path = local,
@@ -202,7 +202,7 @@ pub fn serve_thumb(req: Request<Vec<u8>>) -> Response<Vec<u8>> {
             return png(bytes);
         }
     }
-    match crate::shell::thumbnail_png(&path, size, icon_only) {
+    match ferret_core::shell::thumbnail_png(&path, size, icon_only) {
         Ok(bytes) => {
             if let Some(c) = &cache {
                 let _ = fs::write(c, &bytes);

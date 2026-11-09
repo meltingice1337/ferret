@@ -1,0 +1,132 @@
+[package]
+name = "ferret-core"
+description = "Ferret's file manager core, without a UI: listing, file operations, previews, search, the Windows shell, SSH connections"
+version.workspace = true
+authors.workspace = true
+edition.workspace = true
+publish = false
+
+# Never depends on tauri (or any UI): the app reaches the core through plain functions and
+# reaches back only through app::AppLink. `cargo test` here links no window runtime.
+
+[lib]
+name = "ferret_core"
+
+[build-dependencies]
+# build.rs: the WSL helper's fingerprint
+sha2 = "0.10"
+# build.rs: the release key, from the app's tauri.conf.json
+serde_json = "1"
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+rusqlite = { version = "0.40", features = ["bundled"] }
+notify = "8"
+sysinfo = { version = "0.39", default-features = false, features = ["disk"] }
+dirs = "6"
+trash = "5"
+mime_guess = "2"
+percent-encoding = "2"
+encoding_rs = "0.8"
+# shell.rs: opening files in their apps (as tauri-plugin-opener does)
+open = { version = "5", features = ["shellexecute-on-windows"] }
+# --- archive.rs (archive engine) ---
+zip = "9"
+sevenz-rust2 = "0.23"
+unrar = "0.5"
+tar = "0.4"
+flate2 = "1"
+liblzma = { version = "0.4", features = ["static"] }
+zstd = "0.14"
+bzip2 = "0.6"
+chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
+# --- end archive.rs ---
+# --- search (whole-disk index) ---
+rayon = "1.10"
+memchr = "2.7"
+nucleo-matcher = "0.3"
+parking_lot = "0.12"
+# content: searches (search/content.rs); both were already in the build through other crates
+regex = "1"
+walkdir = "2"
+# the service installs only a release-signed indexer over itself (search/signed.rs); both come
+# with the updater already
+minisign-verify = "0.2"
+base64 = "0.22"
+# --- end search ---
+# --- office.rs (spreadsheet and slide previews) ---
+calamine = { version = "0.37", features = ["dates"] }
+roxmltree = "0.21"
+log = "0.4"
+# --- remote/ (SSH connections) ---
+# ring, as rustls already uses: the default aws-lc backend needs CMake and NASM to build.
+russh = { version = "0.65", default-features = false, features = ["ring", "rsa", "flate2"] }
+russh-sftp = "3"
+# rt.rs: the one async runtime (the app hands it to its UI framework)
+tokio = { version = "1", features = ["fs", "io-util", "macros", "net", "rt", "rt-multi-thread", "sync", "time"] }
+# hashed known_hosts names (both were already in the build through russh)
+hmac = "0.13"
+sha1 = "0.11"
+
+[target.'cfg(windows)'.dependencies]
+winreg = "0.56"
+# --- search service (ferret-indexer) ---
+windows-service = "0.8"
+# --- shell.rs (Windows shell integration) ---
+windows = { version = "0.62", features = [
+    "Win32_Foundation",
+    "Win32_Graphics_Gdi",
+    # redirect.rs (window events)
+    "Win32_UI_Accessibility",
+    "Win32_System_Com",
+    "Win32_System_DataExchange",
+    "Win32_System_LibraryLoader",
+    "Win32_System_Memory",
+    "Win32_System_Ole",
+    "Win32_System_Registry",
+    "Win32_System_SystemServices",
+    "Win32_UI_HiDpi",
+    "Win32_UI_Input_KeyboardAndMouse",
+    "Win32_UI_Shell",
+    "Win32_UI_Shell_Common",
+    "Win32_UI_WindowsAndMessaging",
+    # search (MFT/USN, named pipe, directory watchers)
+    "Win32_Security",
+    # remote/secrets.rs (remembered SSH passwords)
+    "Win32_Security_Credentials",
+    "Win32_NetworkManagement_WNet",
+    "Win32_Security_Authorization",
+    "Win32_Storage_FileSystem",
+    "Win32_System_IO",
+    "Win32_System_Ioctl",
+    "Win32_System_Pipes",
+    "Win32_System_Threading",
+    # shellops.rs (IFileOperation, Recycle Bin displaced properties)
+    "Win32_Storage_EnhancedStorage",
+    "Win32_System_Com_StructuredStorage",
+    "Win32_System_Variant",
+    "Win32_UI_Shell_PropertiesSystem",
+    # shellmenu.rs (packaged apps' Windows 11 context menu entries)
+    "ApplicationModel",
+    "Management_Deployment",
+    # media.rs (video transcoder, WIC pictures)
+    "Foundation",
+    "Media_MediaProperties",
+    "Media_Transcoding",
+    "Storage",
+    "Storage_FileProperties",
+    "Storage_Search",
+    "Storage_Streams",
+    "Win32_Graphics_Imaging",
+] }
+# media.rs: the transcoder's async progress
+windows-future = "0.3"
+# shellops.rs: the #[implement] macro expands to `::windows_core::…` paths.
+windows-core = "0.62"
+# shellmenu.rs: reads packaged apps' AppxManifest.xml
+quick-xml = "0.42"
+png = "0.18"
+# media.rs: 256-colour PNGs (NeuQuant)
+color_quant = "1.1"
+# --- end shell.rs ---

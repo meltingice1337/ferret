@@ -1,4 +1,4 @@
-// Diagnostics: forwards webview messages into Ferret's log file (see src-tauri/src/logging.rs),
+// Diagnostics: forwards webview messages into Ferret's log file (see src-tauri/src/log_setup.rs),
 // next to the backend's own lines. Logging must never break the app, so every call swallows
 // its own failures.
 import * as plugin from "@tauri-apps/plugin-log";

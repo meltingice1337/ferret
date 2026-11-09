@@ -134,7 +134,7 @@ else
   # A debug build: it compiles in seconds from the dev builds' cache (a --release one took
   # ~40 s after a change, rebuilding everything optimized just to test it) and checks more
   # (overflow checks, debug assertions).
-  (cd src-tauri && cargo test --quiet) || fail "tests failed (fix them, or use --skip-checks)"
+  (cd src-tauri && cargo test --workspace --quiet) || fail "tests failed (fix them, or use --skip-checks)"
   if [[ $skip_e2e -eq 1 ]]; then
     echo "${dim}Skipping the end-to-end tests (--skip-e2e).${reset}"
   else

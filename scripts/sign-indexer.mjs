@@ -2,7 +2,7 @@
 // (TAURI_SIGNING_PRIVATE_KEY and its password, which release.sh sets). `tauri build` runs it
 // before bundling (tauri.conf.json build.beforeBundleCommand), and the installer carries the
 // signature next to the exe (bundle.resources). The installed search service updates itself only
-// to a copy signed so (src-tauri/src/search/signed.rs).
+// to a copy signed so (src-tauri/ferret-core/src/search/signed.rs).
 //
 // Without a key (a local build) the signature stays empty: that build's indexer can be installed,
 // but a service can't update itself to it.

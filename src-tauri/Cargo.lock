@@ -1606,6 +1606,30 @@ dependencies = [
 name = "ferret"
 version = "0.9.7"
 dependencies = [
+ "chrono",
+ "dirs 6.0.0",
+ "ferret-core",
+ "log",
+ "mime_guess",
+ "percent-encoding",
+ "serde",
+ "serde_json",
+ "tauri",
+ "tauri-build",
+ "tauri-plugin-dialog",
+ "tauri-plugin-drag",
+ "tauri-plugin-log",
+ "tauri-plugin-opener",
+ "tauri-plugin-process",
+ "tauri-plugin-updater",
+ "window-vibrancy",
+ "windows 0.62.2",
+]
+
+[[package]]
+name = "ferret-core"
+version = "0.9.7"
+dependencies = [
  "base64 0.22.1",
  "bzip2",
  "calamine",
@@ -1622,6 +1646,7 @@ dependencies = [
  "minisign-verify",
  "notify",
  "nucleo-matcher",
+ "open",
  "parking_lot",
  "percent-encoding",
  "png 0.18.1",
@@ -1639,19 +1664,10 @@ dependencies = [
  "sha2 0.10.9",
  "sysinfo",
  "tar",
- "tauri",
- "tauri-build",
- "tauri-plugin-dialog",
- "tauri-plugin-drag",
- "tauri-plugin-log",
- "tauri-plugin-opener",
- "tauri-plugin-process",
- "tauri-plugin-updater",
  "tokio",
  "trash",
  "unrar",
  "walkdir",
- "window-vibrancy",
  "windows 0.62.2",
  "windows-core 0.62.2",
  "windows-future",
