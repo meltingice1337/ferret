@@ -2,7 +2,7 @@
 name = "ferret-gpui"
 # Ferret's version: scripts/release.sh bumps it (with src-tauri's, which ferret-core and the
 # search service compare), the updater compares it with the feed's, and the exe carries it.
-version = "0.10.0"
+version = "0.10.1"
 description = "Ferret file manager: its UI in GPUI (Zed's Rust UI framework) on ferret-core, with no web view and no IPC"
 edition = "2024"
 publish = false
