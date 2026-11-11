@@ -10,9 +10,11 @@ use std::sync::{Arc, OnceLock};
 
 use gpui::{
     AnyElement, Context, FontStyle, FontWeight, HighlightStyle, Hsla, Image, ImageFormat, ListHorizontalSizingBehavior, ObjectFit,
-    SharedString, StrikethroughStyle, StyledText, UnderlineStyle, UniformListScrollHandle, div, img, prelude::*, px, relative,
+    SharedString, StrikethroughStyle, StyledText, UnderlineStyle, UniformListScrollHandle, div, prelude::*, px, relative,
     uniform_list,
 };
+
+use crate::imgmem::img;
 
 use crate::selectable::{Builder, Shared, hbar};
 
@@ -608,6 +610,24 @@ pub fn markdown(text: &str) -> Vec<Md> {
     }
     flush(&mut spans, &mut out, None, &list, quote);
     out
+}
+
+/// Adds a previewed font file to GPUI's text system, once a session per file. GPUI can't take a
+/// font out again, and each add copied the file into DirectWrite's in-memory loader and rebuilt
+/// its font set with every font added so far: previewing the same font again (after it left the
+/// preview cache) grew the app each time.
+pub fn add_font_once(bytes: Vec<u8>, cx: &mut gpui::App) {
+    static ADDED: std::sync::Mutex<Option<HashSet<u64>>> = std::sync::Mutex::new(None);
+    let id = {
+        use std::hash::{Hash, Hasher};
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        bytes.hash(&mut h);
+        h.finish()
+    };
+    let new = ADDED.lock().map(|mut a| a.get_or_insert_with(HashSet::new).insert(id)).unwrap_or(true);
+    if new {
+        let _ = cx.text_system().add_fonts(vec![std::borrow::Cow::Owned(bytes)]);
+    }
 }
 
 /// A font file's family name (its `name` table), once it's added to GPUI.

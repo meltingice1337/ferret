@@ -12,8 +12,11 @@ use std::time::{Duration, Instant};
 
 use gpui::{
     Bounds, ClickEvent, Context, EventEmitter, MouseButton, MouseDownEvent, MouseMoveEvent, Pixels, Point,
-    RenderImage, Window, canvas, div, img, prelude::*, px, relative,
+    RenderImage, Window, canvas, div, prelude::*, px, relative,
 };
+
+// Posters are let go once not drawn for a while (imgmem.rs); frames pass through as they are.
+use crate::imgmem::img;
 
 use crate::bench;
 use crate::theme as t;
@@ -131,9 +134,11 @@ impl VideoView {
             return;
         }
         self.polling = true;
-        let this = cx.entity();
+        // Weak: a strong handle here kept a video the preview had let go of alive (and playing,
+        // its frames never reaching the atlas again, so it kept asking), one per video passed.
+        let this = cx.entity().downgrade();
         window.on_next_frame(move |window, cx| {
-            this.update(cx, |v, cx| {
+            let _ = this.update(cx, |v, cx| {
                 v.polling = false;
                 match v.update_frame(window) {
                     Show::Redraw => cx.notify(),
@@ -144,7 +149,7 @@ impl VideoView {
                     Show::Nothing => {}
                 }
                 v.schedule_poll(window, cx);
-            })
+            });
         });
     }
 
@@ -179,26 +184,32 @@ impl VideoView {
         true
     }
 
+    /// Sizes the picture to the space it has (less the controls), keeping its shape (`shape`: the
+    /// video's own once it's open, else its thumbnail's): a tall phone recording mustn't run over
+    /// what's above and below it. Only once that space is known: guessed (180 px tall), the
+    /// thumbnail showed cropped to the guess, then the picture jumped to its real size, a
+    /// zoom-in-and-out flash on every switch between videos (user report, 2026-11-11).
+    fn fit(&mut self, shape: Option<(u32, u32)>) {
+        let shape = shape.or_else(|| self.poster.as_ref().and_then(|i| crate::files::png_size(i.bytes())));
+        let area = self.area.get().size;
+        if let Some((w, h)) = shape.filter(|_| area.width.as_f32() > 0.) {
+            let (aw, ah) = ((area.width.as_f32() - 28.).max(40.), (area.height.as_f32() - 50.).max(60.));
+            let fit = (aw / w as f32).min(ah / h as f32);
+            self.size = ((w as f32 * fit).round(), (h as f32 * fit).round());
+        }
+    }
+
     /// Brings the shown frame up to date (on the GPU), and says what that needs shown.
     fn update_frame(&mut self, window: &mut Window) -> Show {
         if self.reopen_if_device_changed(window) {
             return Show::Redraw;
         }
-        let Ok(p) = self.player.as_mut() else { return Show::Nothing };
+        let Ok(p) = self.player.as_ref() else { return Show::Nothing };
         let sized = self.size.0 > 0.;
         // The picture's shape: the video's own once it's open, its thumbnail's until then.
-        let shape = p.native_size().or_else(|| self.poster.as_ref().and_then(|i| crate::files::png_size(i.bytes())));
-        let area = self.area.get().size;
-        if let Some((w, h)) = shape.filter(|_| area.width.as_f32() > 0.) {
-            // Fit inside the space it has (less the controls), keeping the shape: a tall phone
-            // recording mustn't run over what's above and below it. Only once that space is
-            // known: guessed (180 px tall), the thumbnail showed cropped to the guess, then the
-            // picture jumped to its real size, a zoom-in-and-out flash on every switch between
-            // videos (user report, 2026-11-11).
-            let (aw, ah) = ((area.width.as_f32() - 28.).max(40.), (area.height.as_f32() - 50.).max(60.));
-            let fit = (aw / w as f32).min(ah / h as f32);
-            self.size = ((w as f32 * fit).round(), (h as f32 * fit).round());
-        }
+        let shape = p.native_size();
+        self.fit(shape);
+        let Ok(p) = self.player.as_mut() else { return Show::Nothing };
         let scale = window.scale_factor();
         let (dw, dh) = ((self.size.0 * scale).round() as u32, (self.size.1 * scale).round() as u32);
         let before = p.frames;
@@ -382,20 +393,23 @@ impl Render for VideoView {
         self.shown = Controls::at(position, duration, self.bar.get(), window.scale_factor());
         self.drawn_at = Instant::now();
         let screen = match p.image() {
-            Some(image) => img(image).w(px(w)).h(px(h)).rounded(px(8.)).into_any_element(),
+            Some(image) if p.frames > 0 || self.poster.is_none() => img(image).w(px(w)).h(px(h)).rounded(px(8.)).into_any_element(),
+            // The frame's picture exists before a frame is in it (it has to be drawn once to get
+            // its place on the GPU, which the frames are then copied into): the poster covers it
+            // until the first one is there, or it showed empty for a frame or two (2026-11-11).
+            Some(image) => div()
+                .relative()
+                .w(px(w))
+                .h(px(h))
+                .child(img(image).absolute().top_0().left_0().w(px(w)).h(px(h)).rounded(px(8.)))
+                .child(img(self.poster.clone().unwrap()).absolute().top_0().left_0().w(px(w)).h(px(h)).rounded(px(8.)).object_fit(gpui::ObjectFit::Contain))
+                .into_any_element(),
             // Until the first frame: the video's thumbnail (the app's poster), not an empty
             // stage with a play button floating on it.
             None if self.poster.is_some() => img(self.poster.clone().unwrap()).w(px(w)).h(px(h)).rounded(px(8.)).object_fit(gpui::ObjectFit::Contain).into_any_element(),
-            None => div()
-                .w(px(w))
-                .h(px(h))
-                .rounded(px(8.))
-                .bg(t::rgba(0, 0.6))
-                .flex()
-                .items_center()
-                .justify_center()
-                .child(icon("loader-circle", 22., t::fg3()))
-                .into_any_element(),
+            // Nothing to show yet: the picture's place, breathing, with a turning spinner (the
+            // loader icon stood still).
+            None => crate::ui::skeleton("video-loading", crate::ui::Skeleton::Picture { w, h }),
         };
         // The play button follows the picture: a quarter of its height, 36 to 50 px.
         let play = (h * 0.26).clamp(36., 50.);

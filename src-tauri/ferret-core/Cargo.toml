@@ -97,6 +97,8 @@ windows = { version = "0.62", features = [
     "Win32_Security_Credentials",
     "Win32_NetworkManagement_WNet",
     "Win32_Security_Authorization",
+    # search/service.rs: letting signed-in users start the search service (its DACL)
+    "Win32_System_Services",
     "Win32_Storage_FileSystem",
     "Win32_System_IO",
     "Win32_System_Ioctl",

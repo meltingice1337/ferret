@@ -18,6 +18,7 @@ mod editor;
 mod files;
 mod filter;
 mod imgedit;
+mod imgmem;
 mod input;
 mod intro;
 mod introdemos;
@@ -34,6 +35,7 @@ mod preview;
 mod quality;
 mod remote;
 mod script;
+mod searchable;
 mod render;
 mod selectable;
 mod settings;
@@ -49,6 +51,7 @@ mod util;
 mod video;
 mod videoview;
 mod view;
+mod watchdog;
 
 use gpui::{
     App, AppContext, Bounds, TitlebarOptions, WindowBackgroundAppearance, WindowBounds, WindowOptions, point, px,
@@ -141,5 +144,7 @@ fn main() {
         if !background {
             cx.activate(true);
         }
+        // The window not answering is noticed and logged with what led to it (watchdog.rs).
+        watchdog::start(cx);
     });
 }

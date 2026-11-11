@@ -10,9 +10,11 @@ use std::time::Duration;
 use ferret_core::paths;
 use gpui::AnimationExt;
 use gpui::{
-    AnyElement, Context, FontWeight, Hsla, Image, MouseButton, Pixels, Point, SharedString, Window, div, img, point,
+    AnyElement, Context, FontWeight, Hsla, Image, MouseButton, Pixels, Point, SharedString, Window, div, point,
     prelude::*, px,
 };
+
+use crate::imgmem::img;
 
 use crate::kinds::Kind;
 use crate::settings::Column;
@@ -822,6 +824,13 @@ impl Ferret {
                 item(if pictures > 1 { format!("Compress {pictures} pictures…") } else { "Compress picture…".into() }, action(move |f, window, cx| f.open_image_editor(pics.clone(), window, cx)))
                     .icon("image-down"),
             );
+        }
+        // A scanned PDF whose text was recognised this session (and isn't being read now): a copy
+        // with that text in it (searchable.rs).
+        let reading = self.ocr.as_ref().is_some_and(|o| o.running() && o.path.eq_ignore_ascii_case(&path));
+        if n == 1 && !inside && !remote && ext.eq_ignore_ascii_case("pdf") && !reading && !crate::ocr::recognised(&path).is_empty() {
+            let p = path.clone();
+            out.push(item("Save as searchable PDF", action(move |f, _, cx| f.save_searchable_pdf(p.clone(), cx))).icon("text-search"));
         }
         out.push(sep());
         // Paths and places

@@ -133,12 +133,38 @@ impl PdfText {
 }
 
 /// The page box shown (CropBox, else MediaBox: llx lly urx ury) and its turn (/Rotate, degrees).
-struct Frame {
-    bx: [f64; 4],
-    rotate: i64,
+pub(crate) struct Frame {
+    pub(crate) bx: [f64; 4],
+    pub(crate) rotate: i64,
 }
 
 impl Frame {
+    /// A page's frame as Windows shows it (searchable.rs writes text back into it).
+    pub(crate) fn of_page(doc: &pdf_extract::Document, page: &pdf_extract::Dictionary) -> Option<Frame> {
+        let bx = inherited(doc, page, b"CropBox").and_then(|o| rect(doc, o)).or_else(|| inherited(doc, page, b"MediaBox").and_then(|o| rect(doc, o)))?;
+        let rotate = inherited(doc, page, b"Rotate").and_then(number).unwrap_or(0.) as i64;
+        Some(Frame { bx, rotate })
+    }
+
+    /// The page's width and height as shown (user space units: turned a quarter, they swap).
+    pub(crate) fn shown_size(&self) -> (f64, f64) {
+        let [llx, lly, urx, ury] = self.bx;
+        let (w, h) = ((urx - llx).abs(), (ury - lly).abs());
+        if self.rotate.rem_euclid(180) == 90 { (h, w) } else { (w, h) }
+    }
+
+    /// `place`'s inverse: a fraction of the page as shown (from its top left) in user space.
+    pub(crate) fn unplace(&self, u: f64, v: f64) -> (f64, f64) {
+        let [llx, lly, urx, ury] = self.bx;
+        let (fx, fy) = match self.rotate.rem_euclid(360) {
+            90 => (v, 1. - u),
+            180 => (1. - u, 1. - v),
+            270 => (1. - v, u),
+            _ => (u, v),
+        };
+        (llx + fx * (urx - llx).abs(), ury - fy * (ury - lly).abs())
+    }
+
     /// The page's height as shown over its width.
     fn aspect(&self) -> f32 {
         let [llx, lly, urx, ury] = self.bx;
@@ -147,7 +173,7 @@ impl Frame {
     }
 
     /// A point in the page's user space as a fraction of the page as shown, from its top left.
-    fn place(&self, x: f64, y: f64) -> (f32, f32) {
+    pub(crate) fn place(&self, x: f64, y: f64) -> (f32, f32) {
         let [llx, lly, urx, ury] = self.bx;
         let fx = (x - llx) / (urx - llx).abs().max(1e-6);
         let fy = (ury - y) / (ury - lly).abs().max(1e-6);
@@ -281,12 +307,81 @@ fn clean(s: &str) -> String {
     out
 }
 
+/// How far apart two directions are (radians, either way round).
+fn apart(a: f32, b: f32) -> f32 {
+    ((a - b + std::f32::consts::PI).rem_euclid(std::f32::consts::TAU) - std::f32::consts::PI).abs()
+}
+
+/// The direction most of a page's text runs in, when that isn't left to right (a page scanned or
+/// printed sideways, a tilted scan's text layer): the frame of a line turned that way.
+fn main_turn(lines: &[PdfLine]) -> Option<Turn> {
+    let total: usize = lines.iter().map(|l| l.text.chars().count()).sum();
+    let near = 5f32.to_radians();
+    let mut best: Option<(Turn, usize)> = None;
+    for t in lines.iter().filter_map(|l| l.turn) {
+        if best.is_some_and(|(b, _)| apart(b.angle, t.angle) < near) {
+            continue;
+        }
+        let n: usize = lines.iter().filter(|m| m.turn.is_some_and(|u| apart(u.angle, t.angle) < near)).map(|m| m.text.chars().count()).sum();
+        if best.is_none_or(|(_, m)| n > m) {
+            best = Some((t, n));
+        }
+    }
+    best.filter(|(_, n)| n * 2 > total).map(|(t, _)| t)
+}
+
 /// A page's lines in reading order. The order a page draws its text in is often not the order
 /// it's read in (a statement may draw its table column by column), so: top to bottom, and left
 /// to right along a row (a row's cells copy with tabs between them). A page set in two columns
 /// (long lines either side of a gap running down most of the page) reads one column after the
-/// other, between the lines that span both (a title).
+/// other, between the lines that span both (a title). A page whose text mostly runs another way
+/// (sideways, tilted) is read as if it were turned upright.
 fn reading_order(lines: Vec<PdfLine>) -> Vec<PdfLine> {
+    if lines.len() < 2 {
+        return lines;
+    }
+    let Some(t) = main_turn(&lines) else { return upright_order(lines) };
+    // Each line's box in that frame (along the text from 0 to 1 across the page, and across it),
+    // ordered as an upright page's; each stand-in's text is its line's place.
+    let along: Vec<f32> = [(0., 0.), (1., 0.), (0., 1.), (1., 1.)].iter().map(|&(x, y)| t.from_page(x, y).0).collect();
+    let (a_min, a_max) = (along.iter().copied().fold(f32::MAX, f32::min), along.iter().copied().fold(f32::MIN, f32::max));
+    let scale = 1. / (a_max - a_min).max(1e-6);
+    let stand_ins: Vec<PdfLine> = lines
+        .iter()
+        .enumerate()
+        .map(|(i, l)| {
+            let (a0, a1, c0, c1) = match l.turn {
+                // its middle in the frame, its own length and height
+                Some(u) if apart(u.angle, t.angle) < 5f32.to_radians() => {
+                    let (x, y) = u.to_page((u.start + u.end) / 2., (u.top + u.bottom) / 2.);
+                    let (a, c) = t.from_page(x, y);
+                    let (hl, hh) = ((u.end - u.start) / 2., (u.bottom - u.top) / 2.);
+                    (a - hl, a + hl, c - hh, c + hh)
+                }
+                // the box around it
+                _ => {
+                    let pts = [(l.left, l.top), (l.right, l.top), (l.left, l.bottom), (l.right, l.bottom)].map(|(x, y)| t.from_page(x, y));
+                    let a = pts.map(|p| p.0);
+                    let c = pts.map(|p| p.1);
+                    (a.iter().copied().fold(f32::MAX, f32::min), a.iter().copied().fold(f32::MIN, f32::max), c.iter().copied().fold(f32::MAX, f32::min), c.iter().copied().fold(f32::MIN, f32::max))
+                }
+            };
+            PdfLine { text: i.to_string(), chars: Vec::new(), left: (a0 - a_min) * scale, right: (a1 - a_min) * scale, top: c0, bottom: c1, row_goes_on: false, turn: None }
+        })
+        .collect();
+    let mut lines: Vec<Option<PdfLine>> = lines.into_iter().map(Some).collect();
+    upright_order(stand_ins)
+        .into_iter()
+        .filter_map(|s| {
+            let mut l = lines.get_mut(s.text.parse::<usize>().ok()?)?.take()?;
+            l.row_goes_on = s.row_goes_on;
+            Some(l)
+        })
+        .collect()
+}
+
+/// `reading_order` on the page as it is: by the lines' boxes (only those are looked at).
+fn upright_order(lines: Vec<PdfLine>) -> Vec<PdfLine> {
     if lines.len() < 2 {
         return lines;
     }
@@ -384,8 +479,6 @@ fn lines_of(glyphs: Vec<Glyph>) -> Vec<PdfLine> {
         }
         out.push(l);
     };
-    // How far apart two directions are (radians, either way round).
-    let apart = |a: f32, b: f32| ((a - b + std::f32::consts::PI).rem_euclid(std::f32::consts::TAU) - std::f32::consts::PI).abs();
     for g in glyphs {
         let h = (g.c1 - g.c0).max(1e-4);
         let blank = g.s.trim().is_empty();
@@ -437,7 +530,7 @@ fn lines_of(glyphs: Vec<Glyph>) -> Vec<PdfLine> {
 }
 
 /// A value from a page's dictionary, or one of its parents' (pages inherit their boxes and turn).
-fn inherited<'a>(doc: &'a pdf_extract::Document, mut dict: &'a pdf_extract::Dictionary, key: &[u8]) -> Option<&'a pdf_extract::Object> {
+pub(crate) fn inherited<'a>(doc: &'a pdf_extract::Document, mut dict: &'a pdf_extract::Dictionary, key: &[u8]) -> Option<&'a pdf_extract::Object> {
     for _ in 0..32 {
         if let Ok(v) = dict.get(key) {
             return Some(v);
@@ -476,41 +569,51 @@ pub fn extract(path: &str, max_pages: u32) -> Option<PdfText> {
     let password = password_for(path);
     // pdf-extract panics on some malformed files: a preview without its text then, not a crash.
     std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        let mut doc = match &password {
+        let doc = match &password {
             Some(p) => pdf_extract::Document::load_with_password(path, p).ok()?,
             None => pdf_extract::Document::load(path).ok()?,
         };
-        if doc.is_encrypted() {
-            doc.decrypt(password.as_deref().unwrap_or("")).ok()?;
-        }
-        let pages = doc.get_pages();
-        let mut frames = HashMap::new();
-        for (&n, &id) in pages.iter().take(max_pages as usize) {
-            let Ok(dict) = doc.get_dictionary(id) else { continue };
-            let bx = inherited(&doc, dict, b"CropBox").and_then(|o| rect(&doc, o)).or_else(|| inherited(&doc, dict, b"MediaBox").and_then(|o| rect(&doc, o)));
-            let rotate = inherited(&doc, dict, b"Rotate").and_then(number).unwrap_or(0.) as i64;
-            if let Some(bx) = bx {
-                frames.insert(n, Frame { bx, rotate });
-            }
-        }
-        let mut out = Collect { frames, page: 0, glyphs: Vec::new(), pages: Vec::new() };
-        for &n in pages.keys().take(max_pages as usize) {
-            let before = out.pages.len();
-            // Page by page: one it can't read (or panics on) leaves the others' text.
-            let ok = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| pdf_extract::output_doc_page(&doc, &mut out, n).is_ok())).unwrap_or(false);
-            if !ok {
-                out.glyphs.clear();
-            }
-            // A page that failed still has its place (pages line up with the pictures).
-            out.pages.truncate(before + 1);
-            if out.pages.len() == before {
-                out.pages.push(Vec::new());
-            }
-        }
-        (!out.pages.is_empty()).then(|| PdfText { pages: out.pages })
+        read_doc(doc, password.as_deref(), max_pages)
     }))
     .ok()
     .flatten()
+}
+
+/// `extract` from a file's bytes (tests of the searchable copies, searchable.rs).
+#[cfg(test)]
+pub(crate) fn extract_mem(bytes: &[u8], password: Option<&str>, max_pages: u32) -> Option<PdfText> {
+    let opts = pdf_extract::LoadOptions { password: password.map(str::to_string), ..Default::default() };
+    let doc = pdf_extract::Document::load_mem_with_options(bytes, opts).ok()?;
+    read_doc(doc, password, max_pages)
+}
+
+fn read_doc(mut doc: pdf_extract::Document, password: Option<&str>, max_pages: u32) -> Option<PdfText> {
+    if doc.is_encrypted() {
+        doc.decrypt(password.unwrap_or("")).ok()?;
+    }
+    let pages = doc.get_pages();
+    let mut frames = HashMap::new();
+    for (&n, &id) in pages.iter().take(max_pages as usize) {
+        let Ok(dict) = doc.get_dictionary(id) else { continue };
+        if let Some(frame) = Frame::of_page(&doc, dict) {
+            frames.insert(n, frame);
+        }
+    }
+    let mut out = Collect { frames, page: 0, glyphs: Vec::new(), pages: Vec::new() };
+    for &n in pages.keys().take(max_pages as usize) {
+        let before = out.pages.len();
+        // Page by page: one it can't read (or panics on) leaves the others' text.
+        let ok = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| pdf_extract::output_doc_page(&doc, &mut out, n).is_ok())).unwrap_or(false);
+        if !ok {
+            out.glyphs.clear();
+        }
+        // A page that failed still has its place (pages line up with the pictures).
+        out.pages.truncate(before + 1);
+        if out.pages.len() == before {
+            out.pages.push(Vec::new());
+        }
+    }
+    (!out.pages.is_empty()).then(|| PdfText { pages: out.pages })
 }
 
 #[cfg(test)]
@@ -589,6 +692,31 @@ mod tests {
         let texts: Vec<&str> = out.iter().map(|l| l.text.as_str()).collect();
         assert_eq!(texts, ["10/01", "Opening balance", "1,250.00", "10/03", "Coffee shop", "-4.50"]);
         assert!(out[0].row_goes_on && out[1].row_goes_on && !out[2].row_goes_on);
+    }
+
+    #[test]
+    fn a_sideways_page_reads_as_if_turned_upright() {
+        // Text running up the page (turned -90°): a line's top faces left, the next line is to its
+        // right, and along a line further up is further on (along = -y × aspect).
+        let tl = |text: &str, start: f32, end: f32, top: f32| {
+            let turn = Turn { angle: -std::f32::consts::FRAC_PI_2, aspect: 1.4, start, end, top, bottom: top + 0.02 };
+            let (left, right, t, b) = turn.page_box();
+            PdfLine { text: text.into(), chars: Vec::new(), left, right, top: t, bottom: b, row_goes_on: false, turn: Some(turn) }
+        };
+        let lines = vec![tl("Total", -1.3, -1.1, 0.30), tl("424.44", -0.5, -0.3, 0.30), tl("INVOICE", -1.3, -0.9, 0.10), tl("Item", -1.3, -1.2, 0.20), tl("Qty", -0.6, -0.5, 0.20)];
+        let boxes: Vec<(String, f32, f32)> = lines.iter().map(|l| (l.text.clone(), l.left, l.top)).collect();
+        let out = reading_order(lines);
+        let texts: Vec<&str> = out.iter().map(|l| l.text.as_str()).collect();
+        assert_eq!(texts, ["INVOICE", "Item", "Qty", "Total", "424.44"]);
+        assert!(out[1].row_goes_on && !out[2].row_goes_on && out[3].row_goes_on);
+        // each keeps its own place on the page
+        for l in &out {
+            let b = boxes.iter().find(|b| b.0 == l.text).unwrap();
+            assert_eq!((l.left, l.top), (b.1, b.2));
+            assert!(l.turn.is_some());
+        }
+        // a page mostly upright stays as it was ordered
+        assert!(main_turn(&[line("A long upright line of text", 0.1, 0.9, 0.1), tl("x", -1., -0.9, 0.5)]).is_none());
     }
 
     #[test]

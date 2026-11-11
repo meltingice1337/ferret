@@ -7,7 +7,9 @@ use std::time::Duration;
 
 use ferret_core::fileops::{Conflict, ItemInfo, Policy, Stats};
 use gpui::AnimationExt;
-use gpui::{AnyElement, Context, Entity, FontWeight, MouseButton, SharedString, Subscription, Window, div, img, prelude::*, px};
+use gpui::{AnyElement, Context, Entity, FontWeight, MouseButton, SharedString, Subscription, Window, div, prelude::*, px};
+
+use crate::imgmem::img;
 
 use crate::files::plural;
 use crate::input::TextInput;

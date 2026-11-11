@@ -70,29 +70,37 @@ pub fn folder_sizes(conn: &Connection, keys: &[String]) -> rusqlite::Result<Vec<
 /// milliseconds) and not out of date: looked up a level at a time, going further down only
 /// below folders whose own size is out of date or older.
 pub fn recent_folder_sizes_inside(conn: &Connection, key: &str, since: i64) -> rusqlite::Result<Vec<(String, SavedSize)>> {
-    // Keys inside `base` sort between "base\" and "base]" ("]" follows "\" in ASCII); those
-    // right inside have no "\" after that.
+    // One scan of everything saved inside (keys inside `base` sort between "base\" and "base]":
+    // "]" follows "\" in ASCII), then the walk in memory: each folder right inside that's recent
+    // is taken, one that isn't is looked into. (It was a query per folder looked into, each
+    // scanning the whole range again, all under the database's lock: with a big history, seconds
+    // in which anything else wanting the database, the window included, waited.)
+    let base = key.trim_end_matches('\\').to_string();
     let mut st = conn.prepare_cached(
         "SELECT path_key, path, bytes, files, partial, counted_at, stale FROM folder_sizes
-         WHERE path_key > ?1 AND path_key < ?2 AND instr(substr(path_key, ?3), '\\') = 0",
+         WHERE path_key > ?1 AND path_key < ?2",
     )?;
+    let rows = st.query_map(params![format!("{base}\\"), format!("{base}]")], |r| {
+        Ok((r.get::<_, String>(0)?, SavedSize {
+            path: r.get(1)?,
+            bytes: r.get::<_, i64>(2)? as u64,
+            files: r.get::<_, Option<i64>>(3)?.map(|f| f as u64),
+            partial: r.get::<_, i64>(4)? != 0,
+            counted_at: r.get(5)?,
+            stale: r.get::<_, i64>(6)? != 0,
+        }))
+    })?;
+    // Folders by the folder they're right inside.
+    let mut inside: std::collections::HashMap<String, Vec<(String, SavedSize)>> = std::collections::HashMap::new();
+    for row in rows {
+        let (k, s) = row?;
+        let parent = k.rfind('\\').map(|i| k[..i].to_string()).unwrap_or_default();
+        inside.entry(parent).or_default().push((k, s));
+    }
     let mut out = Vec::new();
-    let mut open = vec![key.trim_end_matches('\\').to_string()];
-    while let Some(base) = open.pop() {
-        let from = format!("{base}\\");
-        let rest = from.chars().count() as i64 + 1;
-        let rows = st.query_map(params![from, format!("{base}]"), rest], |r| {
-            Ok((r.get::<_, String>(0)?, SavedSize {
-                path: r.get(1)?,
-                bytes: r.get::<_, i64>(2)? as u64,
-                files: r.get::<_, Option<i64>>(3)?.map(|f| f as u64),
-                partial: r.get::<_, i64>(4)? != 0,
-                counted_at: r.get(5)?,
-                stale: r.get::<_, i64>(6)? != 0,
-            }))
-        })?;
-        for row in rows {
-            let (k, s) = row?;
+    let mut open = vec![base];
+    while let Some(dir) = open.pop() {
+        for (k, s) in inside.remove(&dir).unwrap_or_default() {
             if !s.stale && s.counted_at >= since {
                 out.push((k, s));
             } else {

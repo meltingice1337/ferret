@@ -1035,6 +1035,13 @@ pub fn known(path: &str, reader: Reader) -> HashMap<u32, Arc<Vec<PdfLine>>> {
     READ.lock().ok().and_then(|m| m.get(&key_of(path)).filter(|(r, _)| *r == reader).map(|(_, p)| p.clone())).unwrap_or_default()
 }
 
+/// The pages of this file read this session (by whichever reader read it last) that had text in
+/// them: what a searchable copy is written from (searchable.rs). Only pages with (almost) no text
+/// of their own are ever read, so these are the scanned ones.
+pub fn recognised(path: &str) -> std::collections::BTreeMap<u32, Arc<Vec<PdfLine>>> {
+    READ.lock().ok().and_then(|m| m.get(&key_of(path)).map(|(_, p)| p.iter().filter(|(_, l)| !l.is_empty()).map(|(&k, l)| (k, l.clone())).collect())).unwrap_or_default()
+}
+
 /// The preview's view of reading a PDF's scanned pages.
 pub struct OcrView {
     pub path: String,

@@ -20,6 +20,9 @@ It has its own cargo workspace, so it never builds as part of `src-tauri`.
 - `installer/ferret.nsi` is the installer (NSIS): the Tauri installer's folder, registry entries and
   updater arguments, so an installed Tauri copy updates into this app with its settings. `/DQA`
   builds a "Ferret QA" variant for trying it next to an installed Ferret.
+  - It's a 64-bit program, as is its uninstaller. NSIS ships 32-bit stubs only: the 64-bit ones are
+    built from NSIS's source into `installer/nsis-amd64` (see its README).
+  - `scripts/make-installer.sh VERSION SRC SETUP [--qa]` makes it (release.sh runs it).
 - `src/update.rs` and `src/updateview.rs` are the updater: the same `latest.json` feed and release
   key as the Tauri app's, checked shortly after start and every few hours by an installed copy;
   "What's new", then the installer runs in passive mode and Ferret starts again.

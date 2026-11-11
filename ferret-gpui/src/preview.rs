@@ -9,9 +9,11 @@ use std::time::{Duration, Instant};
 
 use gpui::AnimationExt;
 use gpui::{
-    AnyElement, Context, Div, Entity, FontWeight, MouseButton, ObjectFit, SharedString, StyledText, Window, div, img, prelude::*, px,
+    AnyElement, Context, Div, Entity, FontWeight, MouseButton, ObjectFit, SharedString, StyledText, Window, div, prelude::*, px,
     relative,
 };
+
+use crate::imgmem::img;
 
 use crate::docx;
 use crate::input::TextInput;
@@ -129,6 +131,9 @@ impl Ferret {
             if !still {
                 return;
             }
+            crate::watchdog::act(format!("preview {path} ({kind:?}, {size} bytes)"));
+            let read_at = Instant::now();
+            let what = path.clone();
             let content = cx
                 .background_executor()
                 .spawn(async move {
@@ -142,15 +147,23 @@ impl Ferret {
                     } else {
                         path.clone()
                     };
+                    // Tests of what shows while a preview loads: FERRET_GPUI_SLOW_PREVIEW=<ms>.
+                    if let Some(ms) = std::env::var("FERRET_GPUI_SLOW_PREVIEW").ok().and_then(|v| v.parse::<u64>().ok()) {
+                        std::thread::sleep(Duration::from_millis(ms));
+                    }
                     render::load(&real, &ext, kind, size, page_px)
                 })
                 .await;
+            let took = read_at.elapsed().as_millis();
+            if took >= 500 {
+                log::info!(target: "ferret::perf", "preview of {what} read in {took} ms");
+            }
             this.update(cx, |f, cx| {
                 if f.preview_want.as_ref().is_some_and(|(k, _)| *k == key) {
                     f.preview_want = None;
                     if let Content::Font { bytes, .. } = &content {
                         if let Some(b) = bytes.clone() {
-                            let _ = cx.text_system().add_fonts(vec![std::borrow::Cow::Owned(b)]);
+                            render::add_font_once(b, cx);
                         }
                     }
                     let path = key.split('|').next().unwrap_or("").to_string();
@@ -321,6 +334,10 @@ impl Ferret {
                         let pending: &[&'static str] = match kind {
                             Kind::Image => &["Dimensions"],
                             Kind::Pdf => &["Pages"],
+                            // A video's rows (render::facts): without them the details were
+                            // shorter for a moment and the video grew into the space, then
+                            // shrank back (a "zoom" on every switch, 2026-11-11).
+                            Kind::Video => &["Dimensions", "Duration", "Frame rate", "Codec", "Bitrate", "Audio"],
                             _ => &[],
                         };
                         for label in pending {
@@ -550,7 +567,7 @@ impl Ferret {
             }
         }
         let Some(loaded) = self.preview_data.as_ref().filter(|l| l.key.starts_with(&format!("{path}|"))) else {
-            return frame(div().flex_1().flex().items_center().justify_center().child(ui::spinner(18., t::fg3())).into_any_element());
+            return frame(loading_view(kind, ext, width, big));
         };
         let fresh = loaded.lift && loaded.at.elapsed() < Duration::from_millis(180) && t::animate();
         let wrap = self.preview_view.wrap;
@@ -563,7 +580,7 @@ impl Ferret {
         let mut want_text: Option<(String, usize)> = None;
         let me = cx.entity_id();
         let el: AnyElement = match &loaded.content {
-            Content::Loading => ui::spinner(18., t::fg3()).into_any_element(),
+            Content::Loading => loading_view(kind, ext, width, big),
             Content::Picture { image, w, h } => self.picture_view(image.clone(), (*w, *h), big, cx),
             Content::Video(_) => message("Open it in your player"),
             Content::Audio(_, cover) => self.audio_view(path, cover.clone(), cx),
@@ -1781,6 +1798,22 @@ fn message(text: &str) -> AnyElement {
     div().flex_1().flex().items_center().justify_center().text_color(t::fg3()).child(text.to_string()).into_any_element()
 }
 
+/// What's shown while a preview loads: the shape of what's coming (lines of text, a page, a
+/// picture, a list), breathing, instead of a lone spinner (user's wish, 2026-11-11).
+fn loading_view(kind: Kind, ext: &str, width: f32, big: bool) -> AnyElement {
+    let w = (width - 12.).max(80.);
+    let shape = match kind {
+        Kind::Pdf => ui::Skeleton::Page { width: w.min(620.), aspect: 1.414 },
+        Kind::Doc if matches!(ext, "pptx" | "pptm" | "ppt" | "potx" | "odp") => ui::Skeleton::Page { width: w.min(900.), aspect: 0.5625 },
+        Kind::Doc => ui::Skeleton::Page { width: w.min(620.), aspect: 1.294 },
+        Kind::Image | Kind::Video => ui::Skeleton::Picture { w, h: (w * 0.5625).max(60.) },
+        Kind::Audio => ui::Skeleton::Picture { w: w.min(180.), h: w.min(180.) },
+        Kind::Archive | Kind::Sheet => ui::Skeleton::Rows,
+        _ => ui::Skeleton::Lines,
+    };
+    div().w_full().flex().flex_col().items_center().child(ui::skeleton(("pv-loading", big as usize), shape)).into_any_element()
+}
+
 /// A view that fills (`size_full`) whatever space is left under a toolbar row: the box is that
 /// space, so the view's own scrolling reaches its end.
 fn fill(view: AnyElement) -> AnyElement {
@@ -2344,8 +2377,9 @@ impl Ferret {
         .detach();
     }
 
-    /// The note over a scanned PDF's pages: reading it, or that its text was recognised (and by
-    /// Windows: the offer of the better reader, the add-on).
+    /// The note over a scanned PDF's pages: reading it, or that its text was recognised (and, in
+    /// Quick Look, "Save as searchable PDF" and, read by Windows, the offer of the better reader,
+    /// the add-on).
     fn ocr_note(&self, real: &str, big: bool, cx: &mut Context<Self>) -> Option<AnyElement> {
         let o = self.ocr.as_ref().filter(|o| o.path == real && o.total > 0)?;
         let running = o.running();
@@ -2363,43 +2397,51 @@ impl Ferret {
         };
         let problem = o.problem.clone().filter(|_| !running);
         let id = big as usize;
-        // Small buttons: the note sits in a narrow pane.
-        let small = |b: gpui::Stateful<gpui::Div>| b.h(px(26.)).px(px(10.)).text_size(px(12.)).rounded(px(6.));
-        // The better reader: offered where Windows read it, until it's taken or put off.
         let line = |icon_name: &'static str, color: gpui::Hsla, text: String| {
             div().flex().items_start().gap(px(6.)).child(div().pt(px(1.)).flex_none().child(icon(icon_name, 13., color))).child(div().flex_1().min_w_0().text_color(t::fg2()).child(text))
         };
-        let addon: Option<AnyElement> = if !windows {
+        let problem = problem.map(|p| line("circle-x", t::fg3(), format!("A page couldn't be read: {p}")));
+        let note = || div().flex().flex_col().gap(px(8.)).mb(px(8.)).px(px(10.)).py(px(7.)).rounded(px(7.)).bg(t::rgba(0x808080, 0.08)).text_size(px(12.));
+        // The pane: the one line saying how reading went.
+        if !big {
+            let status = div().flex().items_center().gap(px(6.)).text_color(t::fg3()).child(div().flex_none().child(icon_el)).child(div().flex_1().min_w_0().child(said));
+            return Some(note().child(status).children(problem).into_any_element());
+        }
+        // Quick Look: one line of pieces, each its text and then its buttons (a dot between). Too
+        // narrow, the pieces go onto lines of their own, and then a piece's text wraps beside its
+        // buttons, which stay together.
+        let small = |b: gpui::Stateful<gpui::Div>| b.flex_none().h(px(22.)).px(px(8.)).text_size(px(11.5)).rounded(px(5.));
+        let dot = || div().flex_none().text_color(t::fg3()).child("·");
+        let piece = |icon_el: AnyElement, text: String, color: gpui::Hsla| {
+            div().flex().items_center().gap_x(px(6.)).min_w_0().child(div().flex_none().child(icon_el)).child(div().min_w_0().text_color(color).child(text))
+        };
+        // A copy with the text in it, for other apps (searchable.rs): once it's all read, of a
+        // file shown as itself (not an archive entry's or a server file's local copy).
+        let own_file = self.preview_data.as_ref().and_then(|l| l.key.split('|').next()).is_some_and(|p| p.eq_ignore_ascii_case(real));
+        let mut status = piece(icon_el, said, t::fg3());
+        if o.found_any && !running && own_file {
+            let path = real.to_string();
+            let label = if crate::searchable::saving(real) { "Saving…" } else { "Save as searchable PDF" };
+            status = status.child(dot()).child(small(ui::button(("ocr-save", id), label, false)).on_click(cx.listener(move |f, _, _, cx| f.save_searchable_pdf(path.clone(), cx))));
+        }
+        // The better reader: offered where Windows read it, until it's taken or put off.
+        let addon = if !windows {
             None
         } else if let Some(why) = crate::ocr::addon_problem() {
-            Some(line("circle-x", t::fg3(), format!("Better text recognition couldn't start: {why}")).into_any_element())
+            Some(piece(icon("circle-x", 13., t::fg3()).into_any_element(), format!("Better text recognition couldn't start: {why}"), t::fg2()))
         } else {
             match crate::addons::ocr_pack() {
-                // One line where there's room (Quick Look); the buttons under it in the pane.
                 crate::addons::OcrPack::Missing if !self.settings.bool("ocrOfferDismissed", false) => Some(
-                    div()
-                        .flex()
-                        .flex_wrap()
-                        .items_center()
-                        .gap_x(px(12.))
-                        .gap_y(px(6.))
-                        .child(line("sparkles", t::accent(), "Better recognition for tables, faxes and poor scans".to_string()))
-                        .child(
-                            div()
-                                .flex()
-                                .flex_wrap()
-                                .gap(px(6.))
-                                .pl(px(19.))
-                                .child(small(ui::button(("ocr-get", id), format!("Get it · {} MB", crate::addons::OCR_PACK_MB), true)).on_click(cx.listener(|_, _, _, cx| {
-                                    crate::addons::start_ocr_download(cx);
-                                    cx.notify();
-                                })))
-                                .child(small(ui::button(("ocr-later", id), "Not now", false)).on_click(cx.listener(|f, _, _, cx| {
-                                    f.settings.set("ocrOfferDismissed", serde_json::Value::Bool(true));
-                                    cx.notify();
-                                }))),
-                        )
-                        .into_any_element(),
+                    piece(icon("sparkles", 13., t::accent()).into_any_element(), "Better recognition for tables, faxes and poor scans".to_string(), t::fg2())
+                        .child(dot())
+                        .child(small(ui::button(("ocr-get", id), format!("Get it · {} MB", crate::addons::OCR_PACK_MB), true)).on_click(cx.listener(|_, _, _, cx| {
+                            crate::addons::start_ocr_download(cx);
+                            cx.notify();
+                        })))
+                        .child(small(ui::button(("ocr-later", id), "Not now", false)).on_click(cx.listener(|f, _, _, cx| {
+                            f.settings.set("ocrOfferDismissed", serde_json::Value::Bool(true));
+                            cx.notify();
+                        }))),
                 ),
                 crate::addons::OcrPack::Downloading { got, total } => {
                     let frac = if total > 0 { got as f32 / total as f32 } else { 0. };
@@ -2411,55 +2453,21 @@ impl Ferret {
                     } else {
                         "Getting better text recognition…".to_string()
                     };
-                    Some(
-                        div()
-                            .flex()
-                            .flex_col()
-                            .gap(px(6.))
-                            .child(line("download", t::accent(), said))
-                            .child(div().pl(px(19.)).child(ui::bar(frac, t::accent())))
-                            .into_any_element(),
-                    )
+                    Some(piece(icon("download", 13., t::accent()).into_any_element(), said, t::fg2()).child(div().flex_none().w(px(90.)).child(ui::bar(frac, t::accent()))))
                 }
                 crate::addons::OcrPack::Failed(why) => Some(
-                    div()
-                        .flex()
-                        .flex_col()
-                        .gap(px(6.))
-                        .child(line("circle-x", t::fg3(), format!("Couldn't get better text recognition: {why}")))
-                        .child(div().pl(px(19.)).child(small(ui::button(("ocr-retry", id), "Try again", false)).on_click(cx.listener(|_, _, _, cx| {
+                    piece(icon("circle-x", 13., t::fg3()).into_any_element(), format!("Couldn't get better text recognition: {why}"), t::fg2()).child(dot()).child(
+                        small(ui::button(("ocr-retry", id), "Try again", false)).on_click(cx.listener(|_, _, _, cx| {
                             crate::addons::start_ocr_download(cx);
                             cx.notify();
-                        }))))
-                        .into_any_element(),
+                        })),
+                    ),
                 ),
                 _ => None,
             }
         };
-        Some(
-            div()
-                .flex()
-                .flex_col()
-                .gap(px(8.))
-                .mb(px(8.))
-                .px(px(10.))
-                .py(px(7.))
-                .rounded(px(7.))
-                .bg(t::rgba(0x808080, 0.08))
-                .text_size(px(12.))
-                .child(
-                    div()
-                        .flex()
-                        .items_center()
-                        .gap(px(6.))
-                        .text_color(t::fg3())
-                        .child(div().flex_none().child(icon_el))
-                        .child(div().flex_1().min_w_0().child(said)),
-                )
-                .children(problem.map(|p| line("circle-x", t::fg3(), format!("A page couldn't be read: {p}"))))
-                .children(addon)
-                .into_any_element(),
-        )
+        let row = div().flex().flex_wrap().items_center().gap_x(px(18.)).gap_y(px(6.)).child(status).children(addon);
+        Some(note().child(row).children(problem).into_any_element())
     }
 }
 

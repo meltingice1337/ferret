@@ -64,6 +64,12 @@ windows = { version = "0.62", features = [
     # render.rs: text of .doc, .rtf, .ppt… through Windows' own text extractors (IFilter)
     "Win32_Storage",
     "Win32_Storage_IndexServer",
+    # watchdog.rs: where the UI thread is when the window stops answering (its stack, sampled)
+    "Win32_System_Diagnostics_Debug",
+    "Win32_System_Threading",
+    "Win32_System_Kernel",
+    "Win32_System_LibraryLoader",
+    "Win32_System_ProcessStatus",
     # ocr.rs: text in scanned PDFs, read with Windows' own text recognition
     "Media_Ocr",
     "Globalization",

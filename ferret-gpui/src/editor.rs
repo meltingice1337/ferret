@@ -21,8 +21,10 @@ use ferret_core::media::{self, VideoInfo, VideoJob, VideoSample};
 use gpui::{
     AnyElement, Bounds, ClickEvent, Context, Entity, EventEmitter, FocusHandle, Focusable, FontWeight, Image, ImageFormat,
     KeyDownEvent, MouseButton, MouseDownEvent, MouseMoveEvent, ObjectFit, Pixels, Point, RenderImage, SharedString,
-    Subscription, Window, canvas, div, img, prelude::*, px, relative,
+    Subscription, Window, canvas, div, prelude::*, px, relative,
 };
+
+use crate::imgmem::img;
 
 use crate::bench;
 use crate::input::{Changed, TextInput};
@@ -1082,15 +1084,16 @@ impl Editor {
             return;
         }
         self.polling = true;
-        let this = cx.entity();
+        // Weak, as the preview's video (videoview.rs): a closed editor isn't kept alive by it.
+        let this = cx.entity().downgrade();
         window.on_next_frame(move |window, cx| {
-            this.update(cx, |e, cx| {
+            let _ = this.update(cx, |e, cx| {
                 e.polling = false;
                 if e.update_players(window) {
                     cx.notify();
                 }
                 e.schedule_poll(window, cx);
-            })
+            });
         });
     }
 

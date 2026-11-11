@@ -7,6 +7,7 @@
 //!   drag x0 y0 x1 y1 | scroll x y dy | zoom x y dy (Ctrl+wheel) | wait ms | shot name | state | quit
 //!   down x y | hold x y | up x y (the left button in steps; mdown/mhold/mup: the middle one)
 //!   settings [sidebar|addons|about] | addon download|cancel|remove|keep|verify|loaded
+//!   searchable [path] (a searchable copy of the PDF read with OCR)
 //!
 //! `shot` writes `shot <name>` to FERRET_GPUI_SCRIPT_OUT and waits for the harness to capture
 //! the window (PrintWindow). `state` writes what the window shows as JSON, to check without
@@ -21,6 +22,18 @@ use gpui::{
 };
 
 use crate::view::Ferret;
+
+/// Busy on the UI thread for `d` (the `stall` step), in a function of its own so the watchdog's
+/// log can be checked for its name.
+#[inline(never)]
+fn script_stall_for_the_watchdog(d: std::time::Duration) {
+    let t = std::time::Instant::now();
+    let mut x = 0u64;
+    while t.elapsed() < d {
+        x = std::hint::black_box(x.wrapping_mul(31).wrapping_add(7));
+    }
+    std::hint::black_box(x);
+}
 
 fn out(line: &str) {
     if let Ok(path) = std::env::var("FERRET_GPUI_SCRIPT_OUT") {
@@ -202,8 +215,21 @@ async fn run(step: &str, this: &WeakEntity<Ferret>, cx: &mut AsyncWindowContext)
                 ferret_core::jobs::answer_job(id, rest.to_string());
             }
         }
+        // "Save as searchable PDF" (searchable.rs), as the scanned PDF note's button does: of the
+        // PDF given, else the one whose text the preview read.
+        "searchable" => {
+            let _ = this.update(cx, |f, cx| {
+                let path = if rest.is_empty() { f.ocr.as_ref().map(|o| o.path.clone()) } else { Some(rest.to_string()) };
+                match path {
+                    Some(p) => f.save_searchable_pdf(p, cx),
+                    None => out("searchable: no PDF"),
+                }
+            });
+        }
         // The GPU device lost, as after a driver reset: GPUI's recovery runs for real.
         "devicelost" => gpui_windows::ferret::simulate_device_lost(),
+        // Holds the UI thread busy for <ms> (the watchdog's test: it should log where).
+        "stall" => script_stall_for_the_watchdog(std::time::Duration::from_millis(nums.first().copied().unwrap_or(1500.) as u64)),
         // The window moved or resized (`resize x y w h`, physical pixels, like a user's drag).
         "resize" => {
             let _ = cx.update(|window, _| {

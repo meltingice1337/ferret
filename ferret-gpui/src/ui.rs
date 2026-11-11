@@ -13,7 +13,7 @@ use crate::theme as t;
 pub fn logo(size: f32) -> gpui::Img {
     static LOGO: std::sync::LazyLock<std::sync::Arc<gpui::Image>> =
         std::sync::LazyLock::new(|| std::sync::Arc::new(gpui::Image::from_bytes(gpui::ImageFormat::Png, include_bytes!("../../public/ferret-256.png").to_vec())));
-    gpui::img(LOGO.clone()).size(px(size)).flex_none()
+    crate::imgmem::img(LOGO.clone()).size(px(size)).flex_none()
 }
 
 /// Plain text a screen reader can reach: GPUI only puts elements that have a role into the
@@ -316,6 +316,61 @@ pub fn kbd(text: impl Into<SharedString>) -> Div {
 }
 
 /// A spinning loader icon.
+/// The shape of what's loading, for `skeleton`.
+pub enum Skeleton {
+    /// Lines of text (documents, code, data).
+    Lines,
+    /// A page `width` wide, `aspect` (height / width) tall.
+    Page { width: f32, aspect: f32 },
+    /// A picture or a video's frame, `w` × `h`.
+    Picture { w: f32, h: f32 },
+    /// A list of items (an archive's files).
+    Rows,
+}
+
+/// What a preview is going to look like, while it loads: soft shapes that breathe. They appear
+/// only after a moment (a quick load never shows them, so nothing blinks) and fade in.
+pub fn skeleton(id: impl Into<ElementId>, shape: Skeleton) -> gpui::AnyElement {
+    use gpui::{Animation, AnimationExt, relative};
+    let fill = t::rgba(0x808080, 0.17);
+    let bar = move |w: f32, h: f32| div().h(px(h)).w(relative(w)).rounded(px(h / 2.)).bg(fill);
+    let body = match shape {
+        Skeleton::Lines => div().w_full().pt(px(6.)).flex().flex_col().gap(px(11.)).children([0.92, 0.78, 0.86, 0.64, 0.9, 0.7, 0.82, 0.55, 0.88, 0.74, 0.6].map(|w| bar(w, 9.))),
+        Skeleton::Rows => div().w_full().pt(px(4.)).flex().flex_col().gap(px(13.)).children([0.6, 0.45, 0.7, 0.5, 0.66, 0.4, 0.56].map(|w| {
+            div().flex().items_center().gap(px(9.)).child(div().flex_none().size(px(15.)).rounded(px(4.)).bg(fill)).child(bar(w, 9.))
+        })),
+        Skeleton::Page { width, aspect } => div()
+            .w(px(width))
+            .h(px(width * aspect))
+            .rounded(px(3.))
+            .bg(t::rgba(0xffffff, 0.08))
+            .border_1()
+            .border_color(t::rgba(0x808080, 0.12))
+            .p(px((width * 0.09).max(10.)))
+            .flex()
+            .flex_col()
+            .gap(px((width * 0.025).max(6.)))
+            .children([0.55, 0.92, 0.86, 0.9, 0.7, 0.88, 0.8, 0.5].map(|w| bar(w, (width * 0.018).clamp(5., 8.)))),
+        Skeleton::Picture { w, h } => div().w(px(w)).h(px(h)).rounded(px(8.)).bg(fill).flex().items_center().justify_center().child(spinner(20., t::fg3())),
+    };
+    let id: ElementId = id.into();
+    // Full width (lines are a share of it), what has a size of its own centred in it.
+    div()
+        .w_full()
+        .flex()
+        .flex_col()
+        .items_center()
+        .child(body.with_animation(
+            ElementId::NamedChild(std::sync::Arc::new(id.clone()), "breathe".into()),
+            Animation::new(std::time::Duration::from_millis(1600)).repeat(),
+            // between 55 and 100%, smoothly
+            |d, k| d.opacity(0.55 + 0.45 * (0.5 + 0.5 * (k * std::f32::consts::TAU).cos())),
+        ))
+        // nothing for the first 150 ms, then a 300 ms fade in
+        .with_animation(ElementId::NamedChild(std::sync::Arc::new(id), "appear".into()), Animation::new(std::time::Duration::from_millis(450)), |d, k| d.opacity(((k - 0.33) / 0.67).clamp(0., 1.)))
+        .into_any_element()
+}
+
 pub fn spinner(size: f32, color: Hsla) -> impl IntoElement {
     use gpui::{Animation, AnimationExt, Transformation, percentage};
     icon("loader-circle", size, color).with_animation(

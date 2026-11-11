@@ -16,6 +16,14 @@
 pub const SERVICE_NAME: &str = "FerretIndexer";
 pub const DISPLAY_NAME: &str = "Ferret Indexer";
 
+/// When the service ends without being stopped (a crash: "terminated unexpectedly", event 7034),
+/// Windows starts it again after this many seconds: the first time, the second time, and every
+/// time after that. Without them a crashed service stays stopped (users may not start it) and
+/// Ferret falls back to walking the disk. Set at install and by the service at every start.
+pub const RESTART_AFTER_SECS: [u64; 3] = [5, 30, 120];
+/// After a day without a crash, the next one counts as the first again.
+pub const RESTART_RESET_SECS: u64 = 24 * 60 * 60;
+
 const HELP: &str = "\
 ferret-indexer - whole-disk file index service for Ferret
 
@@ -57,7 +65,22 @@ pub fn main_entry() -> i32 {
 }
 
 #[cfg(windows)]
-pub use win::{main_entry, update_from};
+pub use win::{ensure_restart_on_failure, ensure_users_may_start, main_entry, restart_on_failure, start_if_stopped, update_from};
+
+/// What `start_if_stopped` found or did.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Started {
+    NotInstalled,
+    Running,
+    Started,
+    /// Windows said no (an older service that only administrators may start), and why.
+    Refused(String),
+}
+
+#[cfg(not(windows))]
+pub fn start_if_stopped() -> Started {
+    Started::NotInstalled
+}
 
 #[cfg(windows)]
 mod win {
@@ -73,8 +96,9 @@ mod win {
     use std::sync::Arc;
     use std::time::{Duration, Instant};
     use windows_service::service::{
-        ServiceAccess, ServiceControl, ServiceControlAccept, ServiceErrorControl, ServiceExitCode, ServiceInfo,
-        ServiceStartType, ServiceState, ServiceStatus, ServiceType,
+        Service, ServiceAccess, ServiceAction, ServiceActionType, ServiceControl, ServiceControlAccept, ServiceErrorControl,
+        ServiceExitCode, ServiceFailureActions, ServiceFailureResetPeriod, ServiceInfo, ServiceStartType, ServiceState,
+        ServiceStatus, ServiceType,
     };
     use windows_service::service_control_handler::{self, ServiceControlHandlerResult};
     use windows_service::service_manager::{ServiceManager, ServiceManagerAccess};
@@ -323,6 +347,19 @@ mod win {
         };
         set(ServiceState::Running, 0);
         log("service started".into());
+        // Restarted by Windows after a crash: set at install too, and here so that a service
+        // installed before that gets it now.
+        match ensure_restart_on_failure(SERVICE_NAME) {
+            Ok(true) => log(format!("after a crash Windows restarts the service now ({})", restart_summary())),
+            Ok(false) => {}
+            Err(e) => log(format!("the service won't be restarted after a crash: {e}")),
+        }
+        // Ferret (the signed-in user) may start it again when it isn't running.
+        match ensure_users_may_start(SERVICE_NAME) {
+            Ok(true) => log("signed-in users may start the service now (Ferret starts it when it's stopped)".into()),
+            Ok(false) => {}
+            Err(e) => log(format!("users can't start the service: {e}")),
+        }
         let r = run_indexer(stop, log.clone());
         if let Err(e) = &r {
             log(format!("indexer stopped: {e}"));
@@ -542,7 +579,8 @@ mod win {
             account_name: None, // LocalSystem
             account_password: None,
         };
-        let svc = match manager.create_service(&info, ServiceAccess::CHANGE_CONFIG | ServiceAccess::START | ServiceAccess::QUERY_STATUS) {
+        let access = ServiceAccess::CHANGE_CONFIG | ServiceAccess::START | ServiceAccess::QUERY_STATUS | ServiceAccess::QUERY_CONFIG;
+        let svc = match manager.create_service(&info, access) {
             Ok(s) => s,
             Err(e) => {
                 eprintln!("error: creating the service failed: {e}");
@@ -553,12 +591,185 @@ mod win {
             "Indexes file names on NTFS volumes (MFT + USN journal) for instant search in Ferret. \
              Results are filtered to folders the requesting user can list.",
         );
+        if let Err(e) = restart_on_failure(&svc) {
+            eprintln!("warning: the service won't be restarted after a crash ({})", winapi_error(&e));
+        }
+        if let Err(e) = ensure_users_may_start(SERVICE_NAME) {
+            eprintln!("warning: Ferret won't be able to start the service when it's stopped ({e})");
+        }
         if let Err(e) = svc.start(&[] as &[&std::ffi::OsStr]) {
             eprintln!("error: service installed but failed to start: {e}");
             return 1;
         }
         println!("{SERVICE_NAME} installed ({}) and started.", exe.display());
         0
+    }
+
+    // ------------------------------------------------------------ crash recovery
+
+    /// `RESTART_AFTER_SECS` and `RESTART_RESET_SECS`, as the service control manager takes them.
+    pub(super) fn restart_actions() -> ServiceFailureActions {
+        ServiceFailureActions {
+            reset_period: ServiceFailureResetPeriod::After(Duration::from_secs(RESTART_RESET_SECS)),
+            // Left as they are (no reboot message or command: neither action is used).
+            reboot_msg: None,
+            command: None,
+            actions: Some(
+                RESTART_AFTER_SECS
+                    .iter()
+                    .map(|&s| ServiceAction { action_type: ServiceActionType::Restart, delay: Duration::from_secs(s) })
+                    .collect(),
+            ),
+        }
+    }
+
+    /// Does a service's recovery already restart it as `restart_actions` does?
+    pub(super) fn restarts_already(current: &ServiceFailureActions) -> bool {
+        let want = restart_actions();
+        current.reset_period == want.reset_period && current.actions == want.actions
+    }
+
+    /// "5 s, 30 s, then every 2 min; counted afresh after a day"
+    pub(super) fn restart_summary() -> String {
+        let say = |s: u64| if s.is_multiple_of(60) { format!("{} min", s / 60) } else { format!("{s} s") };
+        let (last, first) = RESTART_AFTER_SECS.split_last().expect("restart delays");
+        let first: Vec<String> = first.iter().map(|&s| say(s)).collect();
+        format!("after {}, then every {}; counted afresh after a day", first.join(", "), say(*last))
+    }
+
+    /// The Windows error behind a windows-service error (its own message leaves the code out).
+    fn winapi_error(e: &windows_service::Error) -> String {
+        match e {
+            windows_service::Error::Winapi(io) => io.to_string(),
+            other => other.to_string(),
+        }
+    }
+
+    /// Makes Windows restart this service when it ends without being stopped (`RESTART_AFTER_SECS`),
+    /// unless it does already; true when it was set. The handle needs QUERY_CONFIG, CHANGE_CONFIG
+    /// and START (Windows asks for START to accept a restart action).
+    pub fn restart_on_failure(svc: &Service) -> windows_service::Result<bool> {
+        if svc.get_failure_actions().is_ok_and(|a| restarts_already(&a)) {
+            return Ok(false);
+        }
+        svc.update_failure_actions(restart_actions())?;
+        Ok(true)
+    }
+
+    /// `restart_on_failure` for the service called `name`. The search service calls it at every
+    /// start, for itself: one installed before it was set at install gets it then. It runs as
+    /// SYSTEM, which may change a service's configuration (as a member of Administrators).
+    pub fn ensure_restart_on_failure(name: &str) -> Result<bool, String> {
+        let manager = ServiceManager::local_computer(None::<&str>, ServiceManagerAccess::CONNECT)
+            .map_err(|e| format!("the service manager: {}", winapi_error(&e)))?;
+        let svc = manager
+            .open_service(name, ServiceAccess::QUERY_CONFIG | ServiceAccess::CHANGE_CONFIG | ServiceAccess::START)
+            .map_err(|e| format!("opening {name}: {}", winapi_error(&e)))?;
+        restart_on_failure(&svc).map_err(|e| format!("{name}'s recovery: {}", winapi_error(&e)))
+    }
+
+    /// Starts the service if it's installed and not running, as the signed-in user (no elevation:
+    /// a service from this release on lets users start it, `ensure_users_may_start`).
+    pub fn start_if_stopped() -> super::Started {
+        use windows_service::service::ServiceState;
+        let Ok(manager) = ServiceManager::local_computer(None::<&str>, ServiceManagerAccess::CONNECT) else {
+            return super::Started::Refused("the service manager can't be reached".into());
+        };
+        let Ok(svc) = manager.open_service(SERVICE_NAME, ServiceAccess::QUERY_STATUS) else { return super::Started::NotInstalled };
+        if svc.query_status().is_ok_and(|s| matches!(s.current_state, ServiceState::Running | ServiceState::StartPending)) {
+            return super::Started::Running;
+        }
+        match manager.open_service(SERVICE_NAME, ServiceAccess::START).and_then(|s| s.start(&[] as &[&std::ffi::OsStr])) {
+            Ok(()) => super::Started::Started,
+            Err(e) => super::Started::Refused(winapi_error(&e)),
+        }
+    }
+
+    /// Lets signed-in users start the service, and nothing more (not stop it, change it or
+    /// remove it), so Ferret can start it again when it isn't running: stopped in Services, or
+    /// out of restarts after crashes. Windows' default lets only administrators start a service.
+    /// Adds `(A;;RP;;;IU)` (RP: start) to its DACL unless interactive users may start it already;
+    /// true when it was added. Run as SYSTEM (at every start) and by the elevated installer.
+    pub fn ensure_users_may_start(name: &str) -> Result<bool, String> {
+        use windows::Win32::Foundation::{HLOCAL, LocalFree};
+        use windows::Win32::Security::Authorization::{
+            ConvertSecurityDescriptorToStringSecurityDescriptorW, ConvertStringSecurityDescriptorToSecurityDescriptorW, SDDL_REVISION_1,
+        };
+        use windows::Win32::Security::{DACL_SECURITY_INFORMATION, PSECURITY_DESCRIPTOR};
+        use windows::Win32::System::Services::{
+            CloseServiceHandle, OpenSCManagerW, OpenServiceW, QueryServiceObjectSecurity, SC_MANAGER_CONNECT, SetServiceObjectSecurity,
+        };
+        use windows::core::{HSTRING, PWSTR};
+        const READ_CONTROL: u32 = 0x0002_0000;
+        const WRITE_DAC: u32 = 0x0004_0000;
+        let err = |what: &str, e: windows::core::Error| format!("{what}: {}", e.message());
+        unsafe {
+            let scm = OpenSCManagerW(None, None, SC_MANAGER_CONNECT).map_err(|e| err("the service manager", e))?;
+            let svc = match OpenServiceW(scm, &HSTRING::from(name), READ_CONTROL | WRITE_DAC) {
+                Ok(s) => s,
+                Err(e) => {
+                    let _ = CloseServiceHandle(scm);
+                    return Err(err(&format!("opening {name}"), e));
+                }
+            };
+            let result = (|| -> Result<bool, String> {
+                // Its DACL as text.
+                let mut needed = 0u32;
+                let _ = QueryServiceObjectSecurity(svc, DACL_SECURITY_INFORMATION.0, None, 0, &mut needed);
+                let mut buf = vec![0u8; needed.max(64) as usize];
+                QueryServiceObjectSecurity(svc, DACL_SECURITY_INFORMATION.0, Some(PSECURITY_DESCRIPTOR(buf.as_mut_ptr() as _)), buf.len() as u32, &mut needed)
+                    .map_err(|e| err("reading its permissions", e))?;
+                let mut text = PWSTR::null();
+                ConvertSecurityDescriptorToStringSecurityDescriptorW(PSECURITY_DESCRIPTOR(buf.as_mut_ptr() as _), SDDL_REVISION_1, DACL_SECURITY_INFORMATION, &mut text, None)
+                    .map_err(|e| err("reading its permissions", e))?;
+                let sddl = text.to_string().unwrap_or_default();
+                let _ = LocalFree(Some(HLOCAL(text.0 as _)));
+                let Some(with) = with_users_start(&sddl) else { return Ok(false) };
+                let mut sd = PSECURITY_DESCRIPTOR::default();
+                ConvertStringSecurityDescriptorToSecurityDescriptorW(&HSTRING::from(with.as_str()), SDDL_REVISION_1, &mut sd, None)
+                    .map_err(|e| err("building its permissions", e))?;
+                let set = SetServiceObjectSecurity(svc, DACL_SECURITY_INFORMATION, sd);
+                let _ = LocalFree(Some(HLOCAL(sd.0 as _)));
+                set.map_err(|e| err("setting its permissions", e))?;
+                Ok(true)
+            })();
+            let _ = CloseServiceHandle(svc);
+            let _ = CloseServiceHandle(scm);
+            result
+        }
+    }
+
+    /// The DACL (SDDL) with interactive users allowed to start the service, or None when they may
+    /// already (an ACE for IU, or for everyone signed in, whose rights include RP).
+    pub(super) fn with_users_start(sddl: &str) -> Option<String> {
+        let dacl_at = sddl.find("D:")?;
+        let aces = &sddl[dacl_at..];
+        let allows_start = aces.split('(').skip(1).any(|ace| {
+            let parts: Vec<&str> = ace.trim_end_matches(')').split(';').collect();
+            parts.len() >= 6 && parts[0] == "A" && matches!(parts[5], "IU" | "AU" | "WD" | "BU") && parts[2].as_bytes().chunks(2).any(|r| r == b"RP")
+        });
+        if allows_start {
+            return None;
+        }
+        // After "D:" and its flags (P, AI, AR…), before the first ACE.
+        let first_ace = dacl_at + aces.find('(').unwrap_or(aces.len());
+        Some(format!("{}(A;;RP;;;IU){}", &sddl[..first_ace], &sddl[first_ace..]))
+    }
+
+    /// What Windows does after the service crashes, for `--status` (any user may read it).
+    fn recovery_status() -> String {
+        let read = || -> windows_service::Result<ServiceFailureActions> {
+            let manager = ServiceManager::local_computer(None::<&str>, ServiceManagerAccess::CONNECT)?;
+            manager.open_service(SERVICE_NAME, ServiceAccess::QUERY_CONFIG)?.get_failure_actions()
+        };
+        match read() {
+            Ok(a) if restarts_already(&a) => format!("restarted {}", restart_summary()),
+            Ok(a) if a.actions.as_ref().is_some_and(|v| v.iter().any(|x| x.action_type == ServiceActionType::Restart)) => {
+                format!("restarted, though not as Ferret sets it ({a:?})")
+            }
+            Ok(_) => "stays stopped (no recovery actions: a service from this release on sets them at install and start)".into(),
+            Err(e) => format!("unknown ({})", winapi_error(&e)),
+        }
     }
 
     fn wait_state(svc: &windows_service::service::Service, want: ServiceState, timeout: Duration) {
@@ -664,6 +875,9 @@ mod win {
     fn status_cli() -> i32 {
         let (installed, running) = service_state();
         println!("service {SERVICE_NAME}: {}", if !installed { "not installed" } else if running { "running" } else { "stopped" });
+        if installed {
+            println!("  after a crash: {}", recovery_status());
+        }
         match PipeClient::connect(Duration::from_millis(300)) {
             Ok(mut c) => match c.request(&Request::Status, Duration::from_secs(3)) {
                 Ok(Response::Status(s)) => {
@@ -1131,5 +1345,83 @@ mod tests {
     fn only_the_installed_service_updates_itself() {
         let refused = super::update_from(r"C:\nowhere\ferret-indexer.exe").unwrap_err();
         assert!(refused.contains("only the installed service"), "{refused}");
+    }
+
+    use super::win::{restart_actions, restart_summary, restarts_already};
+    use std::time::Duration;
+    use windows_service::service::{ServiceAction, ServiceActionType, ServiceFailureActions, ServiceFailureResetPeriod};
+
+    fn restart(secs: u64) -> ServiceAction {
+        ServiceAction { action_type: ServiceActionType::Restart, delay: Duration::from_secs(secs) }
+    }
+
+    /// Restarted after 5 s, 30 s, then 2 minutes (every later crash), counted afresh after a day.
+    #[test]
+    fn a_crashed_service_is_restarted_after_5_s_30_s_then_2_min() {
+        let a = restart_actions();
+        assert_eq!(a.actions, Some(vec![restart(5), restart(30), restart(120)]));
+        assert_eq!(a.reset_period, ServiceFailureResetPeriod::After(Duration::from_secs(86_400)));
+        // Nothing else changed: no reboot message, no command.
+        assert_eq!((a.reboot_msg, a.command), (None, None));
+        // Every delay fits Windows' milliseconds (u32): converting them must not panic.
+        for x in a.actions.unwrap() {
+            assert_eq!(x.to_raw().Delay as u128, x.delay.as_millis());
+        }
+        assert_eq!(restart_summary(), "after 5 s, 30 s, then every 2 min; counted afresh after a day");
+    }
+
+    /// Set only when the service doesn't restart that way already (the service checks at every
+    /// start, and shouldn't rewrite its configuration each time).
+    #[test]
+    fn recovery_is_set_only_when_it_differs() {
+        assert!(restarts_already(&restart_actions()));
+        // As Windows reports one that has them (with an empty reboot message and command).
+        let mut reported = restart_actions();
+        reported.reboot_msg = Some("".into());
+        reported.command = Some("".into());
+        assert!(restarts_already(&reported));
+        // None at all: a service installed before this (sc qfailure shows no actions).
+        let none = ServiceFailureActions {
+            reset_period: ServiceFailureResetPeriod::After(Duration::ZERO),
+            reboot_msg: None,
+            command: None,
+            actions: None,
+        };
+        assert!(!restarts_already(&none));
+        assert!(!restarts_already(&ServiceFailureActions { actions: Some(vec![]), ..none.clone() }));
+        // Other delays, another reset period, or another action.
+        let mut other = restart_actions();
+        other.actions = Some(vec![restart(60), restart(60), restart(60)]);
+        assert!(!restarts_already(&other));
+        let mut other = restart_actions();
+        other.reset_period = ServiceFailureResetPeriod::Never;
+        assert!(!restarts_already(&other));
+        let mut other = restart_actions();
+        other.actions = Some(vec![restart(5), restart(30), ServiceAction { action_type: ServiceActionType::None, delay: Duration::ZERO }]);
+        assert!(!restarts_already(&other));
+    }
+
+    /// A service that isn't there: an error to log, not a panic (the service goes on running).
+    #[test]
+    fn recovery_for_a_missing_service_is_an_error() {
+        let e = super::ensure_restart_on_failure("FerretNoSuchServiceForTests").unwrap_err();
+        assert!(e.contains("FerretNoSuchServiceForTests"), "{e}");
+    }
+
+    /// Signed-in users get the right to start it (RP), once, and nothing else changes.
+    #[test]
+    fn users_are_let_start_the_service_once() {
+        use super::win::with_users_start;
+        // The service's DACL as Windows made it (read on the user's PC, 2026-11-11).
+        let made = "D:(A;;CCLCSWRPWPDTLOCRRC;;;SY)(A;;CCDCLCSWRPWPDTLOCRSDRCWDWO;;;BA)(A;;CCLCSWLOCRRC;;;IU)(A;;CCLCSWLOCRRC;;;SU)";
+        let with = with_users_start(made).expect("users can't start it yet");
+        assert_eq!(with, format!("D:(A;;RP;;;IU){}", &made[2..]));
+        // Done already: left alone.
+        assert_eq!(with_users_start(&with), None);
+        assert_eq!(with_users_start("D:(A;;CCLCSWRPLOCRRC;;;IU)"), None);
+        // A protected DACL keeps its flags first.
+        assert_eq!(with_users_start("D:P(A;;GA;;;SY)").as_deref(), Some("D:P(A;;RP;;;IU)(A;;GA;;;SY)"));
+        // RP as part of another right's letters isn't RP ("CRP…" is CR then P…).
+        assert!(with_users_start("D:(A;;CRPC;;;IU)").is_some());
     }
 }

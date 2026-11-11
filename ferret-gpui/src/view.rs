@@ -16,8 +16,10 @@ use ferret_core::{browse, db, paths};
 use gpui::AnimationExt;
 use gpui::{
     AnyElement, App, Context, Entity, FocusHandle, Image, ImageFormat, KeyDownEvent, ObjectFit, SharedString, StyleRefinement,
-    Subscription, WeakEntity, Window, div, img, prelude::*, px,
+    Subscription, WeakEntity, Window, div, prelude::*, px,
 };
+
+use crate::imgmem::img;
 use serde_json::json;
 
 use crate::bench::{self, Bench};
@@ -35,6 +37,32 @@ use crate::videoview::{VideoEvent, VideoView};
 
 /// What a command, a menu item or a toast button does.
 pub type Action = Rc<dyn Fn(&mut Ferret, &mut Window, &mut Context<Ferret>)>;
+
+/// The session (tabs, panes) written off the UI thread, the latest one only. It's saved at every
+/// folder opened, and the database is shared with folder-size counting, whose work can hold it
+/// for a while: the window doesn't wait for that.
+fn save_session_soon(session: serde_json::Value) {
+    static PENDING: std::sync::Mutex<Option<serde_json::Value>> = std::sync::Mutex::new(None);
+    let start = {
+        let mut p = PENDING.lock().unwrap_or_else(|e| e.into_inner());
+        let idle = p.is_none();
+        *p = Some(session);
+        idle
+    };
+    if start {
+        std::thread::spawn(|| {
+            loop {
+                let next = PENDING.lock().unwrap_or_else(|e| e.into_inner()).take();
+                let Some(s) = next else { break };
+                let t = Instant::now();
+                let _ = browse::save_session(s);
+                if t.elapsed() >= Duration::from_millis(250) {
+                    log::info!(target: "ferret::perf", "saving the session waited {} ms for the database", t.elapsed().as_millis());
+                }
+            }
+        });
+    }
+}
 
 pub fn action(f: impl Fn(&mut Ferret, &mut Window, &mut Context<Ferret>) + 'static) -> Action {
     Rc::new(f)
@@ -212,6 +240,8 @@ pub struct Ferret {
     pub update: crate::updateview::UpdateState,
     /// The selected video's player (its own view).
     pub video: Option<(Entity<VideoView>, Subscription)>,
+    /// The video waited for (its poster being made) while the last one stays, and since when.
+    pub video_wait: Option<(String, Instant)>,
     /// The selected Word document: its path, and the document once read (off the UI thread).
     pub word: Option<(String, Option<Result<Arc<docx::Doc>, String>>)>,
     pub palette: Option<(Entity<Palette>, Subscription)>,
@@ -235,7 +265,7 @@ pub struct Ferret {
     pub redo: Vec<crate::ops::Step>,
     /// Counted folder sizes, by `paths::key`.
     pub sizes: HashMap<String, ferret_core::foldersize::FolderSize>,
-    pub thumbs: HashMap<String, Thumb>,
+    pub thumbs: crate::imgmem::Thumbs,
     pub thumbs_running: usize,
     pub thumb_queue: Vec<(String, String, u32)>,
     pub quicklook: bool,
@@ -476,6 +506,7 @@ impl Ferret {
             meta_copied: None,
             update: Default::default(),
             video: None,
+            video_wait: None,
             word: None,
             palette: None,
             palette_actions: Vec::new(),
@@ -494,7 +525,7 @@ impl Ferret {
             undo: Vec::new(),
             redo: Vec::new(),
             sizes: HashMap::new(),
-            thumbs: HashMap::new(),
+            thumbs: Default::default(),
             thumbs_running: 0,
             thumb_queue: Vec::new(),
             quicklook: false,
@@ -986,6 +1017,9 @@ impl Ferret {
         let filter = p.filter.clone();
         let came_from = (nav == Nav::Out).then(|| p.path.clone());
         let started = Instant::now();
+        if moving {
+            crate::watchdog::act(format!("opened folder {path} ({nav:?}, tab pane {id})"));
+        }
         let task = cx.background_executor().spawn({
             let path = path.clone();
             async move {
@@ -1139,6 +1173,11 @@ impl Ferret {
             self.ask_password(archive, None, cx);
         }
         if let Some((path, items, list_ms, prep_ms, rename_now, moving)) = listed_ok {
+            // A slow listing is worth a line (a network folder, a huge one).
+            let total = started.elapsed().as_millis();
+            if total >= 300 {
+                log::info!(target: "ferret::perf", "listed {path}: {items} items in {total} ms (reading {list_ms:.0} ms, sorting {prep_ms:.0} ms)");
+            }
             if let Some(b) = self.bench.as_mut() {
                 b.write("step_list_ms", format!("{list_ms:.0}"));
                 b.write("step_prepare_ms", format!("{prep_ms:.0}"));
@@ -1336,6 +1375,7 @@ impl Ferret {
     }
 
     pub fn open_file(&mut self, path: String, in_archive: bool, cx: &mut Context<Self>) {
+        crate::watchdog::act(format!("opened file {path}"));
         let dir = util::parent(&path).unwrap_or_default();
         cx.spawn(async move |this, cx| {
             let res = cx
@@ -1665,6 +1705,7 @@ impl Ferret {
         if self.palette.is_some() {
             return;
         }
+        crate::watchdog::act(format!("Ctrl+K opened{}", query.as_deref().map(|q| format!(" with “{q}”")).unwrap_or_default()));
         self.menu = None;
         // Reopened within 8 seconds: the last text comes back.
         let restored = query.is_none();
@@ -1736,6 +1777,7 @@ impl Ferret {
             window.focus(&this.focus, cx);
             match event {
                 PaletteEvent::Open { path, is_dir } => {
+                    crate::watchdog::act(format!("Ctrl+K: picked {path}"));
                     if let Some(b) = this.bench.as_ref() {
                         b.write("palette_opened", path);
                     }
@@ -2031,7 +2073,7 @@ impl Ferret {
             "previewWidth": self.preview_w,
             "shelf": self.shelf,
         });
-        let _ = browse::save_session(session);
+        save_session_soon(session);
     }
 
     // ───────────────────────────── keys ─────────────────────────────
@@ -2848,6 +2890,49 @@ impl Ferret {
         if current == want {
             return;
         }
+        // The next video's poster (its thumbnail) is what shows until its first frame. Not made
+        // yet: the last video stays a moment (300 ms at most) instead of an empty box flashing in
+        // between (2026-11-11). The ones either side are asked for now, so arrowing on has them.
+        let mut poster = None;
+        if let Some(path) = want.clone() {
+            poster = self.thumb(&path, 512, false, None, cx);
+            let around: Vec<String> = {
+                let p = self.pane();
+                p.selected
+                    .map(|i| [i.wrapping_sub(1), i + 1])
+                    .into_iter()
+                    .flatten()
+                    .filter_map(|i| p.rows.get(i))
+                    .filter(|r| r.kind == crate::kinds::Kind::Video && !r.e.in_archive && !paths::is_remote(&r.e.path))
+                    .map(|r| r.e.path.clone())
+                    .collect()
+            };
+            for near in around {
+                let _ = self.thumb(&near, 512, false, None, cx);
+            }
+            // Made and decoded too: GPUI decodes a picture the first time it's drawn, in the
+            // background, and draws nothing meanwhile (an empty box for a frame).
+            let poster_ready = poster.as_ref().is_some_and(|p| p.clone().get_render_image(window, cx).is_some());
+            if !poster_ready && self.video.is_some() {
+                let since = match &self.video_wait {
+                    Some((p, t)) if *p == path => *t,
+                    _ => {
+                        let t = Instant::now();
+                        self.video_wait = Some((path.clone(), t));
+                        cx.spawn(async move |this, cx| {
+                            cx.background_executor().timer(Duration::from_millis(310)).await;
+                            this.update(cx, |_, cx| cx.notify()).ok();
+                        })
+                        .detach();
+                        t
+                    }
+                };
+                if since.elapsed() < Duration::from_millis(300) {
+                    return;
+                }
+            }
+        }
+        self.video_wait = None;
         // The space the last video had: the next one in the same pane starts from it.
         let mut area = None;
         if let Some((old, _)) = self.video.take() {
@@ -2861,6 +2946,9 @@ impl Ferret {
             let view = cx.new(|_| VideoView::new(path, self.preview_w - 28., out));
             if let Some(a) = area {
                 view.read(cx).set_area(a);
+            }
+            if let Some(t) = poster {
+                view.update(cx, |v, _| v.poster = Some(t));
             }
             let sub = cx.subscribe_in(&view, window, |this, _, event: &VideoEvent, window, cx| match event {
                 VideoEvent::Compress => this.open_editor(window, cx),
@@ -2893,6 +2981,7 @@ impl Ferret {
 impl Render for Ferret {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         bench::rendered(bench::ROOT);
+        crate::imgmem::frame(self, window, cx);
         if self.parts.is_none() {
             let root = cx.entity();
             let sidebar = cx.new(|cx| Part::new(&root, Which::Sidebar, cx));
@@ -3032,8 +3121,6 @@ impl Render for Ferret {
                     })
                     .child(self.main_panel(main, split, split_open, preview, window, cx)),
             )
-            .children(self.jobs_card(cx))
-            .children(self.toasts_view(cx))
             // A narrow window: the sidebar slides in over a scrim (the toolbar's button; Esc or a click away closes it).
             .when(width < 860. && self.sidebar_overlay, |d| {
                 let side = sidebar.clone();
@@ -3070,6 +3157,10 @@ impl Render for Ferret {
                 )
             })
             .children(self.quicklook_view(window, cx))
+            // Jobs and toasts over Quick Look (a "Saved …" from it showed only once it closed),
+            // under dialogs and menus.
+            .children(self.jobs_card(cx))
+            .children(self.toasts_view(cx))
             // Menus, dialogs, Ctrl+K and the editor over everything (the video included: GPUI
             // draws it like any other element).
             .children(self.dialog_view(window, cx))

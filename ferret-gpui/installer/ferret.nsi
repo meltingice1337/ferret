@@ -12,8 +12,13 @@
 ; /DQA: a test build that installs as "Ferret QA" (its own registry entries and shortcut, and it
 ; leaves the default file manager, the search service and the Explorer redirect alone), to try
 ; the installer next to an installed Ferret.
+;
+; It's a 64-bit program, as Ferret is (its uninstaller too). NSIS's releases have 32-bit stubs and
+; plug-ins only: the 64-bit ones are built from NSIS's source (scripts/build-nsis-amd64.sh) into
+; installer\nsis-amd64, and release.sh hands makensis an NSIS folder with them added (NSISDIR).
 
 Unicode true
+Target amd64-unicode
 ManifestDPIAware true
 SetCompressor /SOLID lzma
 RequestExecutionLevel user
@@ -67,6 +72,7 @@ Var Passive
 Var UpdateMode
 Var Restart
 Var Args
+Var PowerShell
 
 !define MUI_PAGE_CUSTOMFUNCTION_PRE SkipWhenUpdating
 !insertmacro MUI_PAGE_WELCOME
@@ -125,9 +131,19 @@ FunctionEnd
 ; Ferret windows (and the Explorer redirect) running from this folder close first, or ferret.exe
 ; stays locked: the updater closes the window that started it, not the others. Only this
 ; folder's copies: Ferret run from anywhere else (a development build) is left alone.
+; The 64-bit PowerShell: a 32-bit one (a 32-bit installer's $SYSDIR is SysWOW64) can't read a
+; 64-bit program's path, so it never saw Ferret running and nothing was closed ("Error opening file
+; for writing: …\ferret.exe" on the 0.9.7 → 0.10.0 update). Sysnative is System32 as a 32-bit
+; program sees it; a 64-bit installer has no Sysnative and its $SYSDIR is System32 already.
+; /MBCS: nsExec guesses whether output is UTF-16 (IsTextUnicode) and takes a short "1\r\n" for it,
+; so the count came back as "?", read as 0, and nothing was closed either way.
 !macro CLOSE_FERRET un
 Function ${un}CloseFerret
-  nsExec::ExecToStack `"$SYSDIR\WindowsPowerShell\v1.0\powershell.exe" -NoProfile -NonInteractive -Command "@(Get-Process ferret -ErrorAction SilentlyContinue | Where-Object { $$_.Path -eq '$INSTDIR\ferret.exe' }).Count"`
+  StrCpy $PowerShell "$WINDIR\Sysnative\WindowsPowerShell\v1.0\powershell.exe"
+  ${IfNot} ${FileExists} "$PowerShell"
+    StrCpy $PowerShell "$SYSDIR\WindowsPowerShell\v1.0\powershell.exe"
+  ${EndIf}
+  nsExec::ExecToStack /MBCS `"$PowerShell" -NoProfile -NonInteractive -Command "@(Get-Process ferret -ErrorAction SilentlyContinue | Where-Object { $$_.Path -eq '$INSTDIR\ferret.exe' }).Count"`
   Pop $0
   Pop $1
   IntOp $1 $1 + 0
@@ -138,7 +154,7 @@ Function ${un}CloseFerret
       Quit
     ${EndIf}
     DetailPrint "Closing ${PRODUCT}…"
-    nsExec::ExecToStack `"$SYSDIR\WindowsPowerShell\v1.0\powershell.exe" -NoProfile -NonInteractive -Command "$$p = @(Get-Process ferret -ErrorAction SilentlyContinue | Where-Object { $$_.Path -eq '$INSTDIR\ferret.exe' }); $$p | ForEach-Object { [void]$$_.CloseMainWindow() }; $$p | Wait-Process -Timeout 3 -ErrorAction SilentlyContinue; $$p | Where-Object { -not $$_.HasExited } | Stop-Process -Force -ErrorAction SilentlyContinue; $$p | Wait-Process -Timeout 5 -ErrorAction SilentlyContinue"`
+    nsExec::ExecToStack /MBCS `"$PowerShell" -NoProfile -NonInteractive -Command "$$p = @(Get-Process ferret -ErrorAction SilentlyContinue | Where-Object { $$_.Path -eq '$INSTDIR\ferret.exe' }); $$p | ForEach-Object { [void]$$_.CloseMainWindow() }; $$p | Wait-Process -Timeout 3 -ErrorAction SilentlyContinue; $$p | Where-Object { -not $$_.HasExited } | Stop-Process -Force -ErrorAction SilentlyContinue; $$p | Wait-Process -Timeout 5 -ErrorAction SilentlyContinue"`
     Pop $0
     Pop $1
   ${EndIf}

@@ -63,6 +63,14 @@ impl Ferret {
         if crate::appdata::real_install() {
             cx.spawn(async move |this, cx| {
                 cx.background_executor().timer(FIRST_CHECK / 3).await;
+                // Installed but not running (stopped in Services, ended from Task Manager, or a
+                // crash Windows didn't restart it after): the user is asked whether to start it.
+                let (installed, running) = cx.background_executor().spawn(async { ferret_core::search::service::service_state() }).await;
+                if installed && !running {
+                    log::info!("search service is installed but not running: asking");
+                    this.update(cx, |f, cx| f.ask_start_search_service(cx)).ok();
+                    return;
+                }
                 let outdated = cx.background_executor().spawn(async { ferret_core::rt::block_on(ferret_core::search::search_service_outdated()) }).await;
                 if outdated == Ok(true) {
                     log::info!("search service is out of date");
@@ -102,6 +110,55 @@ impl Ferret {
             }
         })
         .detach();
+    }
+
+    /// "The search service isn't running: start it?" Start tries as the user first (a service from
+    /// this release on lets them); one that refuses is reinstalled from this copy's signed indexer
+    /// (Windows asks for administrator permission once), which also updates it and has Windows
+    /// restart it after a crash from then on.
+    pub fn ask_start_search_service(&mut self, cx: &mut Context<Self>) {
+        if self.dialog.is_some() {
+            // Another question is open: ask after it (checked again in a moment).
+            cx.spawn(async move |this, cx| {
+                cx.background_executor().timer(Duration::from_secs(3)).await;
+                this.update(cx, |f, cx| f.ask_start_search_service(cx)).ok();
+            })
+            .detach();
+            return;
+        }
+        self.confirm(
+            "Start the search service?".into(),
+            "Ferret's search service isn't running (it was stopped, or ended unexpectedly). Without it, searching your drives and counting folder sizes are much slower.".into(),
+            "Start",
+            false,
+            crate::view::action(|f, _, cx| {
+                crate::watchdog::act("starting the search service (asked)");
+                let task = cx.background_executor().spawn(async { ferret_core::search::service::start_if_stopped() });
+                cx.spawn(async move |this, cx| {
+                    let r = task.await;
+                    log::info!("search service start: {r:?}");
+                    match r {
+                        ferret_core::search::service::Started::Started | ferret_core::search::service::Started::Running => {
+                            this.update(cx, |f, cx| f.toast("The search service is running again", cx)).ok();
+                        }
+                        ferret_core::search::service::Started::NotInstalled => {}
+                        // An older service: only administrators may start it. Reinstalled.
+                        ferret_core::search::service::Started::Refused(_) => {
+                            let install = cx.background_executor().spawn(async { ferret_core::rt::block_on(ferret_core::search::search_install_service()) });
+                            let r = install.await;
+                            this.update(cx, |f, cx| match r {
+                                Ok(()) => f.toast("The search service is running again", cx),
+                                Err(e) => f.toast_error(e, cx),
+                            })
+                            .ok();
+                        }
+                    }
+                })
+                .detach();
+                let _ = f;
+            }),
+            cx,
+        );
     }
 
     /// Asks the feed. `manual` (Settings' button): says when it's up to date or couldn't ask,

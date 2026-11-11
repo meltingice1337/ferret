@@ -11,8 +11,10 @@ use std::time::Duration;
 
 use gpui::{
     AnyElement, Bounds, ClickEvent, Context, Entity, Focusable, FontWeight, Image, ImageFormat, MouseButton, MouseDownEvent, MouseMoveEvent,
-    Pixels, Point, SharedString, Window, div, img, prelude::*, px,
+    Pixels, Point, SharedString, Window, div, prelude::*, px,
 };
+
+use crate::imgmem::img;
 
 use crate::dialogs::Dialog;
 use crate::input::TextInput;

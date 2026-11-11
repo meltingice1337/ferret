@@ -7,9 +7,11 @@ use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
 use gpui::{
-    Animation, AnimationExt, AnyElement, Context, Div, FontWeight, HighlightStyle, Hsla, Image, ImageFormat, ObjectFit, StyledText, div, img,
+    Animation, AnimationExt, AnyElement, Context, Div, FontWeight, HighlightStyle, Hsla, Image, ImageFormat, ObjectFit, StyledText, div,
     prelude::*, px, relative,
 };
+
+use crate::imgmem::img;
 
 use crate::kinds;
 use crate::theme as t;

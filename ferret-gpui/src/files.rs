@@ -9,9 +9,11 @@ use ferret_core::paths;
 use gpui::AnimationExt;
 use gpui::{
     AnyElement, Bounds, ClickEvent, Context, Div, FontWeight, Image, ImageFormat, MouseButton, MouseDownEvent,
-    MouseMoveEvent, ObjectFit, Pixels, Point, SharedString, Stateful, Window, canvas, div, img, list, point, prelude::*,
+    MouseMoveEvent, ObjectFit, Pixels, Point, SharedString, Stateful, Window, canvas, div, list, point, prelude::*,
     px, relative, uniform_list,
 };
+
+use crate::imgmem::img;
 
 use crate::kinds::{self, Kind};
 use crate::pane::{HEADER_H, Item, Nav, Pane};

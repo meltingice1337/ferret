@@ -12,12 +12,15 @@
 #
 # Once the version is picked it runs the Rust tests (the app's and ferret-core's), builds the app
 # and the search service, starts the built app once in the background (a smoke test), then makes
-# the installer (NSIS) and signs it and the search service with the updater key. A failure stops it.
+# the installer (NSIS, a 64-bit program: scripts/make-installer.sh) and signs it and the search
+# service with the updater key. A failure stops it. The build's exes and symbols (PDBs) are kept in
+# ferret-gpui/target/symbols/<version>, to read addresses logged by installed copies.
 # Release notes are the commit subjects since the previous tag, plus a compare link. The updater
 # feed (latest.json) also lists every previous release's notes, for copies that skipped versions.
-# Needs: a clean working tree, `gh` logged in, NSIS (Tauri's copy in %LOCALAPPDATA%\tauri\NSIS, or
-# makensis on PATH), node with the repo's packages (the signer is @tauri-apps/cli's), and the
-# updater signing key at ~/.tauri/ferret.key (or $TAURI_SIGNING_PRIVATE_KEY).
+# Needs: a clean working tree, `gh` logged in, NSIS 3.11 (Tauri's copy in %LOCALAPPDATA%\tauri\NSIS,
+# or makensis on PATH; its 64-bit stubs are in ferret-gpui/installer/nsis-amd64), node with the
+# repo's packages (the signer is @tauri-apps/cli's), and the updater signing key at
+# ~/.tauri/ferret.key (or $TAURI_SIGNING_PRIVATE_KEY).
 set -euo pipefail
 
 repo="meltingice1337/ferret"
@@ -36,7 +39,7 @@ while [[ $# -gt 0 ]]; do
     --draft) draft=1; shift ;;
     -y|--yes) shift ;;  # no-op, kept so old invocations still work
     --dry-run) dry=1; shift ;;
-    -h|--help) sed -n '2,20p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    -h|--help) sed -n '2,23p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
     *) echo "unknown option: $1 (see --help)" >&2; exit 1 ;;
   esac
 done
@@ -53,12 +56,9 @@ step() { echo "${cyan}==>${reset} $*"; }
 [[ -z "$version" || "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || fail "--version must look like 1.2.3"
 if [[ $dry -eq 0 && -n "$(git status --porcelain)" ]]; then fail "the working tree has uncommitted changes"; fi
 
-# NSIS: Tauri's copy (it downloads one for its own builds), or one on PATH, or the usual install.
-makensis=""
-for m in "${LOCALAPPDATA:-}/tauri/NSIS/Bin/makensis.exe" "$(command -v makensis 2>/dev/null || true)" "/c/Program Files (x86)/NSIS/makensis.exe"; do
-  [[ -n "$m" && -x "$m" ]] && { makensis=$m; break; }
-done
-[[ -n "$makensis" ]] || fail "NSIS (makensis) wasn't found: install NSIS, or let a Tauri build fetch it"
+# NSIS: Tauri's copy (it downloads one for its own builds), or one on PATH, or the usual install,
+# the version of the 64-bit stubs in ferret-gpui/installer/nsis-amd64 (make-installer.sh says).
+scripts/make-installer.sh --check || fail "the installer can't be made (see above)"
 signer="$root/node_modules/@tauri-apps/cli/tauri.js"
 [[ -f "$signer" ]] || fail "the signer isn't installed (run yarn): $signer"
 
@@ -184,6 +184,15 @@ fi
 built="$app/target/release"
 said=$(powershell.exe -NoProfile -Command "(Get-Item '$(cygpath -w "$built/ferret-gpui.exe")').VersionInfo.ProductVersion" | tr -d '\r')
 [[ "$said" == "$version" ]] || { revert; fail "the built exe says it's ${said:-no version}, not $version"; }
+# This build's symbols, with its exes under their installed names: addresses logged by installed
+# copies (the UI-stall watchdog's ferret.exe+0x…) are read with them (scripts/symbolize-log.ps1).
+# target/ is git-ignored: a local archive.
+symbols="$app/target/symbols/$version"
+rm -rf "$symbols" && mkdir -p "$symbols"
+{ cp "$built/ferret-gpui.exe" "$symbols/ferret.exe" &&
+  cp "$built/ferret_gpui.pdb" "$built/ferret-indexer.exe" "$built/ferret_indexer.pdb" "$symbols/"; } ||
+  { revert; fail "the build's exes and symbols (PDBs) couldn't be kept in $symbols"; }
+echo "${dim}Symbols kept in $symbols${reset}"
 
 # ---- smoke test: the built app starts, lists a folder and quits (a background window) ----
 if [[ $skip_smoke -eq 1 ]]; then
@@ -212,8 +221,7 @@ sign "$stage/ferret-indexer.exe"
 step "Making the installer (NSIS)"
 setup="$out/Ferret_${version}_x64-setup.exe"
 rm -f "$setup" "$setup.sig"
-"$makensis" -V2 -DVERSION="$version" -DSRC="$(cygpath -w "$root/$stage")" -DOUTFILE="$(cygpath -w "$root/$setup")" \
-  "$(cygpath -w "$app/installer/ferret.nsi")" || { revert; fail "makensis failed"; }
+scripts/make-installer.sh "$version" "$root/$stage" "$root/$setup" || { revert; fail "makensis failed"; }
 step "Signing the installer"
 sign "$setup"
 
