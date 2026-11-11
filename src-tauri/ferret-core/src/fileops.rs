@@ -158,14 +158,14 @@ pub async fn rename_item(path: String, new_name: String) -> Res<String> {
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Conflict {
-    name: String,
-    source: String,
-    target: String,
-    source_size: u64,
-    target_size: u64,
-    source_modified: Option<i64>,
-    target_modified: Option<i64>,
-    is_dir: bool,
+    pub name: String,
+    pub source: String,
+    pub target: String,
+    pub source_size: u64,
+    pub target_size: u64,
+    pub source_modified: Option<i64>,
+    pub target_modified: Option<i64>,
+    pub is_dir: bool,
 }
 
 fn ms(m: &fs::Metadata) -> Option<i64> {
@@ -507,6 +507,14 @@ const RECYCLE_BATCH: usize = 64;
 // Off the main thread: with thousands of items this can take a moment, and the window
 // must keep answering meanwhile.
 pub fn delete_items(items: Vec<String>, permanent: bool) -> Res<u64> {
+    delete_items_opts(items, permanent, false)
+}
+
+/// `delete_items`, where with `admin_last` an item that needs an administrator doesn't stop the
+/// job: it's left in place (failed, its reason starting "elevate:") and the rest goes on, for
+/// the window to ask about once, at the end, for all of them (instead of a question, and a new
+/// job, per protected item).
+pub fn delete_items_opts(items: Vec<String>, permanent: bool, admin_last: bool) -> Res<u64> {
     if crate::remote::ops::involves(&items, None) {
         return crate::remote::ops::delete(items, permanent);
     }
@@ -517,14 +525,25 @@ pub fn delete_items(items: Vec<String>, permanent: bool) -> Res<u64> {
     if let Some(p) = items.iter().find(|p| crate::wsl::linux_path(p).is_none() && paths::parent(p).is_none()) {
         return Err(refused_delete(p));
     }
-    if let Some(p) = items.iter().take(256).find(|p| crate::shellops::needs_admin_delete(p)) {
-        return Err(admin_err(format!("delete “{}”", file_name(p))));
-    }
+    // Protected items (Program Files, another user's…): with `admin_last` they're set aside for
+    // the end, otherwise nothing starts.
+    let (admin_first, items): (Vec<String>, Vec<String>) = if admin_last {
+        let mut n = 0;
+        items.into_iter().partition(|p| {
+            n += 1;
+            n <= 256 && crate::shellops::needs_admin_delete(p)
+        })
+    } else {
+        if let Some(p) = items.iter().take(256).find(|p| crate::shellops::needs_admin_delete(p)) {
+            return Err(admin_err(format!("delete “{}”", file_name(p))));
+        }
+        (Vec::new(), items)
+    };
     // WSL has no Recycle Bin: those are deleted for good, in Linux (the window asked first).
     let (in_wsl, items): (Vec<String>, Vec<String>) = items.into_iter().partition(|p| crate::wsl::linux_path(p).is_some());
     // Without a Recycle Bin it's for good whatever was asked for, so it says so and Cancel works.
-    let permanent = permanent || items.iter().all(|p| !crate::recycle::has_bin(p));
-    let count = in_wsl.len() + items.len();
+    let permanent = permanent || items.iter().chain(&admin_first).all(|p| !crate::recycle::has_bin(p));
+    let count = in_wsl.len() + items.len() + admin_first.len();
     let label = if count == 1 {
         format!("{} “{}”", if permanent { "Deleting" } else { "Recycling" }, in_wsl.first().or(items.first()).map(|p| file_name(p)).unwrap_or_default())
     } else {
@@ -541,22 +560,27 @@ pub fn delete_items(items: Vec<String>, permanent: bool) -> Res<u64> {
         // Like Explorer: an item that can't go (open in another program, protected) pauses the
         // job with Try again / Skip / Skip all / Cancel instead of failing the whole job.
         let mut skip_all = false;
+        for p in &admin_first {
+            ctx.failed(p.clone(), admin_err(format!("delete “{}”", file_name(p))));
+            ctx.file_done();
+        }
         delete_in_linux(ctx, &in_wsl, &mut skip_all)?;
         if items.is_empty() {
             return Ok(());
         }
         if permanent {
-            delete_for_good(ctx, &items, &mut skip_all)
+            delete_for_good(ctx, &items, &mut skip_all, admin_last)
         } else {
             crate::recycle::refuse_too_big(ctx, &items)?;
-            recycle_items(ctx, &items, &mut skip_all)
+            recycle_items(ctx, &items, &mut skip_all, admin_last)
         }
     }))
 }
 
 /// Deletes `items` for good: counts everything, then deletes it with the job showing how far it
-/// got, and Cancel stopping it midway (what was reached is gone, the rest stays).
-fn delete_for_good(ctx: &JobCtx, items: &[String], skip_all: &mut bool) -> Res<()> {
+/// got, and Cancel stopping it midway (what was reached is gone, the rest stays). With
+/// `admin_last`, what Windows denies is left for an administrator without asking.
+fn delete_for_good(ctx: &JobCtx, items: &[String], skip_all: &mut bool, admin_last: bool) -> Res<()> {
     let threads = crate::remove::threads_for(&items[0]);
     let started = std::time::Instant::now();
     let stop = || ctx.is_cancelled();
@@ -573,11 +597,28 @@ fn delete_for_good(ctx: &JobCtx, items: &[String], skip_all: &mut bool) -> Res<(
         });
         ctx.check()?;
         let mut again = Vec::new();
+        // With `admin_last`: what's in use, asked about together below; what an administrator
+        // could delete, left for the window to ask about.
+        let mut later: Vec<(String, String)> = Vec::new();
+        let mut for_admin: Vec<&String> = Vec::new();
         for f in failures {
             let item = rest[f.top];
             let others = if f.more > 0 { format!(" and {} more", jobs::grouped(f.more)) } else { String::new() };
             let name = f.path.file_name().unwrap_or_default().to_string_lossy();
             let why = format!("Couldn't delete “{name}”{others}: {}", crate::remove::reason(&f.error));
+            if admin_last {
+                if for_admin.contains(&item) || later.iter().any(|(p, _)| p == item) {
+                    continue;
+                }
+                // Try again wouldn't change it; an administrator might.
+                if f.error.raw_os_error() == Some(5) {
+                    for_admin.push(item);
+                    ctx.failed(item.clone(), format!("elevate:{why}"));
+                } else {
+                    later.push((item.clone(), why));
+                }
+                continue;
+            }
             if *skip_all {
                 ctx.failed(item.clone(), why);
                 continue;
@@ -595,10 +636,45 @@ fn delete_for_good(ctx: &JobCtx, items: &[String], skip_all: &mut bool) -> Res<(
                 }
             }
         }
+        if admin_last {
+            let retry = ask_about(ctx, later, skip_all)?;
+            again = items.iter().filter(|i| retry.iter().any(|r| r == *i)).collect();
+        }
         rest = again;
     }
     log::info!("delete: {} items on {threads} threads in {:?}", items.len(), started.elapsed());
     Ok(())
+}
+
+/// One question for the items that couldn't go, `(item, why)`, asked once everything else has
+/// gone (not one per item, with the rest waiting behind it): the items to try again; skipped,
+/// they're left in place as failed.
+fn ask_about(ctx: &JobCtx, left: Vec<(String, String)>, skip_all: &mut bool) -> Res<Vec<String>> {
+    if left.is_empty() {
+        return Ok(Vec::new());
+    }
+    let question = if left.len() == 1 {
+        left[0].1.clone()
+    } else {
+        let shown: Vec<String> = left.iter().take(3).map(|(p, _)| format!("“{}”", file_name(p))).collect();
+        let more = if left.len() > 3 { format!(" and {} more", left.len() - 3) } else { String::new() };
+        format!("{} items are still here ({}{more}). {}", left.len(), shown.join(", "), left[0].1)
+    };
+    let answer = if *skip_all { "skipAll".to_string() } else { ctx.ask(question) };
+    match answer.as_str() {
+        "retry" => Ok(left.into_iter().map(|(p, _)| p).collect()),
+        "skip" | "skipAll" => {
+            *skip_all |= answer == "skipAll";
+            for (p, why) in left {
+                ctx.failed(p, why);
+            }
+            Ok(Vec::new())
+        }
+        _ => {
+            ctx.mark_cancelled();
+            Err("Cancelled".into())
+        }
+    }
 }
 
 /// What a recycle tells its job: the job counts the items itself, since a group that stopped
@@ -625,7 +701,7 @@ impl crate::shellops::Report for RecycleReport<'_> {
 
 /// Moves `items` to the Recycle Bin (`recycle::refuse_too_big` has said they fit), through the
 /// engine that lets Cancel stop it and stops Windows from destroying what it can't recycle.
-fn recycle_items(ctx: &JobCtx, items: &[String], skip_all: &mut bool) -> Res<()> {
+fn recycle_items(ctx: &JobCtx, items: &[String], skip_all: &mut bool, admin_last: bool) -> Res<()> {
     let send = |paths: &[String]| {
         crate::shellops::perform(&crate::shellops::ShellOp::Delete { items: paths.to_vec(), permanent: false }, None, false, &RecycleReport(ctx))
     };
@@ -633,6 +709,8 @@ fn recycle_items(ctx: &JobCtx, items: &[String], skip_all: &mut bool) -> Res<()>
     let for_the_ui = |why: &str| why.starts_with(crate::recycle::NO_BIN) || why.starts_with("elevate:");
     let job_start = std::time::Instant::now();
     let (mut fast_ok, mut fast_failed, mut slowest) = (0usize, 0usize, (std::time::Duration::ZERO, String::new()));
+    // Items in use (with `admin_last`): asked about together once the rest has gone.
+    let mut later: Vec<(String, String)> = Vec::new();
     for batch in recycle_units(items).iter() {
         ctx.check()?;
         let started = std::time::Instant::now();
@@ -668,12 +746,22 @@ fn recycle_items(ctx: &JobCtx, items: &[String], skip_all: &mut bool) -> Res<()>
                 let Err(why) = send(std::slice::from_ref(p)) else { break };
                 // Cancelled while it ran: nothing to ask about.
                 ctx.check()?;
+                // Left for an administrator, asked about once at the end.
+                if admin_last && why.starts_with("elevate:") {
+                    ctx.failed(p.clone(), why);
+                    break;
+                }
                 if for_the_ui(&why) {
                     ctx.failed(p.clone(), why.clone());
                     return Err(why);
                 }
                 if *skip_all {
                     ctx.failed(p.clone(), why);
+                    break;
+                }
+                // The rest goes first; this is asked about once at the end, with any others.
+                if admin_last {
+                    later.push((p.clone(), why));
                     break;
                 }
                 match ctx.ask(why.clone()).as_str() {
@@ -700,6 +788,27 @@ fn recycle_items(ctx: &JobCtx, items: &[String], skip_all: &mut bool) -> Res<()>
                 slowest = (took, file_name(p));
             }
             ctx.file_done();
+        }
+    }
+    // What was in use: one question for all of it; Try again goes through them again.
+    while !later.is_empty() {
+        let retry = ask_about(ctx, std::mem::take(&mut later), skip_all)?;
+        for p in retry {
+            ctx.check()?;
+            if fs::symlink_metadata(io(&p)).is_err() {
+                continue;
+            }
+            ctx.set_current(&file_name(&p));
+            let Err(why) = send(std::slice::from_ref(&p)) else { continue };
+            ctx.check()?;
+            if why.starts_with("elevate:") {
+                ctx.failed(p, why);
+            } else if why.starts_with(crate::recycle::NO_BIN) {
+                ctx.failed(p, why.clone());
+                return Err(why);
+            } else {
+                later.push((p, why));
+            }
         }
     }
     log::info!(
@@ -895,18 +1004,18 @@ pub async fn find_in_trash(items: Vec<String>) -> Res<Vec<String>> {
 #[derive(Serialize, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct ItemInfo {
-    path: String,
-    name: String,
-    is_dir: bool,
-    size: u64,
-    created: Option<i64>,
-    modified: Option<i64>,
-    accessed: Option<i64>,
-    readonly: bool,
-    hidden: bool,
-    system: bool,
-    is_symlink: bool,
-    link_target: Option<String>,
+    pub path: String,
+    pub name: String,
+    pub is_dir: bool,
+    pub size: u64,
+    pub created: Option<i64>,
+    pub modified: Option<i64>,
+    pub accessed: Option<i64>,
+    pub readonly: bool,
+    pub hidden: bool,
+    pub system: bool,
+    pub is_symlink: bool,
+    pub link_target: Option<String>,
 }
 
 /// A server item's details (SFTP knows no creation time or Windows attributes).
@@ -967,11 +1076,11 @@ pub async fn item_info(path: String) -> Res<ItemInfo> {
 #[derive(Serialize, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct Stats {
-    files: u64,
-    dirs: u64,
-    bytes: u64,
+    pub files: u64,
+    pub dirs: u64,
+    pub bytes: u64,
     /// Stopped early (too many items or unreadable folders).
-    partial: bool,
+    pub partial: bool,
 }
 
 /// Recursive size/count for the properties dialog and status bar.
@@ -1057,13 +1166,13 @@ pub fn set_attributes(path: String, readonly: bool, hidden: bool) -> Res<()> {
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TextPreview {
-    text: String,
-    truncated: bool,
-    binary: bool,
-    encoding: String,
-    size: u64,
+    pub text: String,
+    pub truncated: bool,
+    pub binary: bool,
+    pub encoding: String,
+    pub size: u64,
     /// Lines in the whole file when only its start was read (counted up to TEXT_COUNT_MAX).
-    lines: Option<u64>,
+    pub lines: Option<u64>,
 }
 
 /// Files up to this size get their lines counted when the preview shows only their start.

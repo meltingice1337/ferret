@@ -3,6 +3,7 @@
 //! through (link.rs).
 
 mod cmd;
+mod filedrop;
 mod link;
 mod log_setup;
 mod protocol;
@@ -84,6 +85,8 @@ pub fn run() {
             // was, and so it first appears with the app drawn (integration::reveal).
             if let Some(window) = app.get_webview_window("main") {
                 window::set_big_icon(&window);
+                // Files dropped in from other apps (Tauri's own handler is off: see filedrop.rs).
+                filedrop::install(&window);
                 // Development builds say so in the taskbar, so they can't be mistaken for the installed app.
                 let title = match (admin, cfg!(debug_assertions)) {
                     (true, true) => Some("Ferret (Dev, Administrator)"),
@@ -138,6 +141,8 @@ pub fn run() {
             cmd::browse::clear_recents,
             cmd::browse::set_backdrop,
             cmd::browse::drag_icon,
+            filedrop::drop_feedback,
+            filedrop::e2e_drop,
             log_setup::log_folder,
             cmd::fileops::cancel_job,
             cmd::fileops::answer_job,

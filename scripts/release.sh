@@ -1,37 +1,42 @@
 #!/usr/bin/env bash
-# Builds a signed Ferret release and publishes it on GitHub, where installed copies
-# find it through the updater feed (releases/latest/download/latest.json).
-# Run from Git Bash:
+# Builds a signed Ferret release (the GPUI app, ferret-gpui) and publishes it on GitHub, where
+# installed copies find it through the updater feed (releases/latest/download/latest.json).
+# Copies of the Tauri app (archived in src-tauri and src) take the same feed, so they update
+# into this one. Run from Git Bash:
 #
 #   scripts/release.sh                     asks patch / minor / major up front, then runs unattended
 #   scripts/release.sh --bump patch        no questions
 #   scripts/release.sh --version 1.0.0     exact version
 #   options: --notes "text" (replaces the commit list), --draft, --dry-run (show the plan, change nothing),
-#            --skip-e2e (skip the end-to-end run), --skip-checks (emergencies only)
+#            --skip-smoke (skip starting the built app once), --skip-checks (emergencies only)
 #
-# Once the version is picked it type-checks the frontend and runs the unit tests, the Rust tests and
-# the end-to-end tests (an off-screen test copy of the app); a failure stops it.
+# Once the version is picked it runs the Rust tests (the app's and ferret-core's), builds the app
+# and the search service, starts the built app once in the background (a smoke test), then makes
+# the installer (NSIS) and signs it and the search service with the updater key. A failure stops it.
 # Release notes are the commit subjects since the previous tag, plus a compare link. The updater
 # feed (latest.json) also lists every previous release's notes, for copies that skipped versions.
-# Needs: a clean working tree, `gh` logged in, and the updater signing key at
-# ~/.tauri/ferret.key (or $TAURI_SIGNING_PRIVATE_KEY).
+# Needs: a clean working tree, `gh` logged in, NSIS (Tauri's copy in %LOCALAPPDATA%\tauri\NSIS, or
+# makensis on PATH), node with the repo's packages (the signer is @tauri-apps/cli's), and the
+# updater signing key at ~/.tauri/ferret.key (or $TAURI_SIGNING_PRIVATE_KEY).
 set -euo pipefail
 
 repo="meltingice1337/ferret"
 cd "$(dirname "$0")/.."
+root=$PWD
+app=ferret-gpui
 
-bump="" version="" notes="" draft=0 dry=0 skip=0 skip_e2e=0
+bump="" version="" notes="" draft=0 dry=0 skip=0 skip_smoke=0
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --skip-checks) skip=1; shift ;;
-    --skip-e2e) skip_e2e=1; shift ;;
+    --skip-smoke|--skip-e2e) skip_smoke=1; shift ;;
     --bump) bump="${2:-}"; shift 2 ;;
     --version) version="${2:-}"; shift 2 ;;
     --notes) notes="${2:-}"; shift 2 ;;
     --draft) draft=1; shift ;;
     -y|--yes) shift ;;  # no-op, kept so old invocations still work
     --dry-run) dry=1; shift ;;
-    -h|--help) sed -n '2,15p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    -h|--help) sed -n '2,20p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
     *) echo "unknown option: $1 (see --help)" >&2; exit 1 ;;
   esac
 done
@@ -48,8 +53,17 @@ step() { echo "${cyan}==>${reset} $*"; }
 [[ -z "$version" || "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || fail "--version must look like 1.2.3"
 if [[ $dry -eq 0 && -n "$(git status --porcelain)" ]]; then fail "the working tree has uncommitted changes"; fi
 
+# NSIS: Tauri's copy (it downloads one for its own builds), or one on PATH, or the usual install.
+makensis=""
+for m in "${LOCALAPPDATA:-}/tauri/NSIS/Bin/makensis.exe" "$(command -v makensis 2>/dev/null || true)" "/c/Program Files (x86)/NSIS/makensis.exe"; do
+  [[ -n "$m" && -x "$m" ]] && { makensis=$m; break; }
+done
+[[ -n "$makensis" ]] || fail "NSIS (makensis) wasn't found: install NSIS, or let a Tauri build fetch it"
+signer="$root/node_modules/@tauri-apps/cli/tauri.js"
+[[ -f "$signer" ]] || fail "the signer isn't installed (run yarn): $signer"
+
 # ---- pick the version (the only question; everything after runs unattended) ----
-current=$(node -p 'require("./src-tauri/tauri.conf.json").version')
+current=$(sed -n 's/^version = "\([^"]*\)"/\1/p' "$app/Cargo.toml" | head -n1)
 [[ "$current" =~ ^([0-9]+)\.([0-9]+)\.([0-9]+)$ ]] || fail "can't read the current version ($current)"
 maj=${BASH_REMATCH[1]} min=${BASH_REMATCH[2]} pat=${BASH_REMATCH[3]}
 next_patch="$maj.$min.$((pat + 1))"
@@ -90,7 +104,7 @@ fi
 tag="v$version"
 [[ -z "$(git tag --list "$tag")" ]] || fail "tag $tag already exists"
 # The folder-size helper (WSL and SSH servers) is built for x86_64 and ARM64 Linux with the
-# app (src-tauri/build.rs).
+# app (ferret-core's build.rs).
 for t in x86_64-unknown-linux-musl aarch64-unknown-linux-musl; do
   rustup target list --installed | grep -qx "$t" ||
     fail "Rust's Linux target is missing: rustup target add $t"
@@ -126,21 +140,11 @@ if [[ $dry -eq 1 ]]; then echo "Dry run: nothing was changed."; exit 0; fi
 if [[ $skip -eq 1 ]]; then
   echo "${dim}Skipping checks (--skip-checks).${reset}"
 else
-  step "Type-checking the frontend (tsc)"
-  yarn tsc --noEmit -p . || fail "type check failed (fix it, or use --skip-checks)"
-  step "Running the unit tests (vitest)"
-  yarn test || fail "unit tests failed (fix them, or use --skip-checks)"
-  step "Running the Rust tests (cargo test)"
-  # A debug build: it compiles in seconds from the dev builds' cache (a --release one took
-  # ~40 s after a change, rebuilding everything optimized just to test it) and checks more
-  # (overflow checks, debug assertions).
-  (cd src-tauri && cargo test --workspace --quiet) || fail "tests failed (fix them, or use --skip-checks)"
-  if [[ $skip_e2e -eq 1 ]]; then
-    echo "${dim}Skipping the end-to-end tests (--skip-e2e).${reset}"
-  else
-    step "Running the end-to-end tests"
-    yarn test:e2e || fail "end-to-end tests failed (see e2e-artifacts/; fix them, or use --skip-e2e)"
-  fi
+  step "Running the app's tests (cargo test)"
+  (cd "$app" && cargo test --quiet) || fail "tests failed (fix them, or use --skip-checks)"
+  step "Running ferret-core's tests"
+  # A debug build of ferret-core alone (not the archived Tauri shell around it).
+  (cd src-tauri && cargo test -p ferret-core --quiet) || fail "ferret-core's tests failed (fix them, or use --skip-checks)"
   echo "${green}Checks passed.${reset}"
 fi
 
@@ -150,35 +154,72 @@ if [[ -z "${TAURI_SIGNING_PRIVATE_KEY:-}" ]]; then
   export TAURI_SIGNING_PRIVATE_KEY="$key"
 fi
 export TAURI_SIGNING_PRIVATE_KEY_PASSWORD="${TAURI_SIGNING_PRIVATE_KEY_PASSWORD:-}"
+# `tauri signer sign <file>`: writes <file>.sig (the key comes as a file or as its contents).
+sign() {
+  local args=(signer sign)
+  if [[ -f "$TAURI_SIGNING_PRIVATE_KEY" ]]; then
+    args+=(--private-key-path "$TAURI_SIGNING_PRIVATE_KEY")
+    env -u TAURI_SIGNING_PRIVATE_KEY node "$signer" "${args[@]}" "$1" >/dev/null
+  else
+    node "$signer" "${args[@]}" "$1" >/dev/null
+  fi
+  [[ -s "$1.sig" ]] || fail "signing $1 failed"
+}
 
-# ---- version bump (tauri.conf.json, Cargo.toml, package.json) ----
+# ---- version bump: the app, and ferret-core's workspace (the search service compares it) ----
 step "Setting version $version"
-bumped=(src-tauri/tauri.conf.json src-tauri/Cargo.toml src-tauri/Cargo.lock package.json)
+bumped=("$app/Cargo.toml" "$app/Cargo.lock" src-tauri/Cargo.toml src-tauri/Cargo.lock)
 revert() { git checkout -- "${bumped[@]}" 2>/dev/null || true; }
-VERSION="$version" node -e '
-  const fs = require("fs");
-  for (const f of ["src-tauri/tauri.conf.json", "package.json"]) {
-    const s = fs.readFileSync(f, "utf8");
-    if (!/"version":\s*"[^"]+"/.test(s)) { console.error("no version in " + f); process.exit(1); }
-    fs.writeFileSync(f, s.replace(/"version":\s*"[^"]+"/, `"version": "${process.env.VERSION}"`));
-  }'
+sed -i "0,/^version = \"[^\"]*\"/s//version = \"$version\"/" "$app/Cargo.toml"
 sed -i "0,/^version = \"[^\"]*\"/s//version = \"$version\"/" src-tauri/Cargo.toml
+(cd src-tauri && cargo update --workspace --offline --quiet) || { revert; fail "couldn't update src-tauri/Cargo.lock"; }
 
-# ---- build + sign ----
-step "Building (yarn tauri build)"
-if ! yarn tauri build; then
+# ---- build ----
+step "Building ferret.exe and ferret-indexer.exe (cargo build --release)"
+# FERRET_RELEASE=1: the exe gets Ferret's icon (other builds show the development one).
+if ! (cd "$app" && FERRET_RELEASE=1 cargo build --release); then
   revert
   fail "build failed (version bump reverted)"
 fi
+built="$app/target/release"
+said=$(powershell.exe -NoProfile -Command "(Get-Item '$(cygpath -w "$built/ferret-gpui.exe")').VersionInfo.ProductVersion" | tr -d '\r')
+[[ "$said" == "$version" ]] || { revert; fail "the built exe says it's ${said:-no version}, not $version"; }
 
-bundle="src-tauri/target/release/bundle/nsis"
-setup=$(ls "$bundle"/*_"${version}"_x64-setup.exe 2>/dev/null | head -n1 || true)
-[[ -n "$setup" ]] || { revert; fail "installer for $version not found in $bundle"; }
-[[ -f "$setup.sig" ]] || { revert; fail "signature $setup.sig is missing (is createUpdaterArtifacts on?)"; }
+# ---- smoke test: the built app starts, lists a folder and quits (a background window) ----
+if [[ $skip_smoke -eq 1 ]]; then
+  echo "${dim}Skipping the smoke test (--skip-smoke).${reset}"
+else
+  step "Starting the built app once (smoke test)"
+  smoke=$(mktemp -d)
+  printf 'wait 2500\nstate smoke\nquit\n' >"$smoke/script.txt"
+  if ! FERRET_DATA_DIR="$(cygpath -w "$smoke/data")" FERRET_GPUI_BACKGROUND=1 FERRET_GPUI_MUTE=1 FERRET_GPUI_NO_INTRO=1 \
+      FERRET_GPUI_OPEN="$(cygpath -w "$root")" FERRET_GPUI_SCRIPT="$(cygpath -w "$smoke/script.txt")" \
+      FERRET_GPUI_SCRIPT_OUT="$(cygpath -w "$smoke/out.txt")" timeout 60 "$built/ferret-gpui.exe"; then
+    revert
+    fail "the built app didn't start and quit cleanly (smoke test; --skip-smoke to skip)"
+  fi
+  grep -q '"items":[1-9]' "$smoke/out.txt" 2>/dev/null || { revert; fail "the built app didn't list a folder (smoke test: $smoke/out.txt)"; }
+  rm -rf "$smoke"
+fi
+
+# ---- package + sign ----
+out="$app/target/installer"
+stage="$out/stage-$version"
+rm -rf "$stage" && mkdir -p "$stage"
+cp "$built/ferret-gpui.exe" "$built/ferret-indexer.exe" "$stage/"
+step "Signing the search service"
+sign "$stage/ferret-indexer.exe"
+step "Making the installer (NSIS)"
+setup="$out/Ferret_${version}_x64-setup.exe"
+rm -f "$setup" "$setup.sig"
+"$makensis" -V2 -DVERSION="$version" -DSRC="$(cygpath -w "$root/$stage")" -DOUTFILE="$(cygpath -w "$root/$setup")" \
+  "$(cygpath -w "$app/installer/ferret.nsi")" || { revert; fail "makensis failed"; }
+step "Signing the installer"
+sign "$setup"
 
 # ---- updater feed ----
 asset=$(basename "$setup" | tr ' ' '.')  # GitHub stores spaces in asset names as dots
-latest="$bundle/latest.json"
+latest="$out/latest.json"
 VERSION="$version" NOTES="$feed_notes" SIG="$setup.sig" URL="https://github.com/$repo/releases/download/$tag/$asset" OUT="$latest" node -e '
   const fs = require("fs"), e = process.env;
   const feed = {

@@ -193,9 +193,9 @@ pub async fn remote_disconnect(id: String) {
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TestResult {
-    home: String,
+    pub home: String,
     /// What the server runs ("x86_64"), or None (SFTP only: no helper).
-    arch: Option<String>,
+    pub arch: Option<String>,
 }
 
 /// The connection form's Test: connects with what's in the form, then disconnects.
@@ -239,8 +239,8 @@ pub fn test_connection(alias: &str) -> Res<String> {
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ConnectionState {
-    id: String,
-    connected: bool,
+    pub id: String,
+    pub connected: bool,
 }
 
 pub fn remote_status() -> Vec<ConnectionState> {

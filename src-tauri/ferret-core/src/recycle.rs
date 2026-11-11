@@ -304,8 +304,8 @@ pub fn list() -> Result<Vec<Entry>, String> {
 
 #[derive(Serialize, Default, Clone, Copy)]
 pub struct RecycleInfo {
-    items: u64,
-    bytes: u64,
+    pub items: u64,
+    pub bytes: u64,
 }
 
 /// Item count and total size on the fixed drives (no enumeration). Removable drives are

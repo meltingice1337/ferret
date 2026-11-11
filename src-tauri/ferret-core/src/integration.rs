@@ -171,14 +171,14 @@ const CLASSES: &str = r"Software\Classes";
 const EXPLORER_CLSID: &str = r"Software\Classes\CLSID\{52205fd8-5dfb-447d-801a-d0b52f2e83e1}";
 const VERB: &str = "ferret";
 
-#[derive(Serialize)]
+#[derive(Serialize, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct DefaultStatus {
-    enabled: bool,
+    pub enabled: bool,
     /// The exe the registry points at (when enabled).
-    target: Option<String>,
+    pub target: Option<String>,
     /// This build runs from `target\debug` and needs the dev server: it can't be the default.
-    dev_build: bool,
+    pub dev_build: bool,
 }
 
 /// Not an installed Ferret: a development build, or a release build run from the project's cargo
@@ -479,8 +479,8 @@ pub fn log_shown() {
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct WindowInfo {
-    elevated: bool,
-    first_window: bool,
+    pub elevated: bool,
+    pub first_window: bool,
 }
 
 pub fn window_info() -> WindowInfo {

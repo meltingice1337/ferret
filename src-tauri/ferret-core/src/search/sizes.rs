@@ -220,13 +220,13 @@ const COUNTED: u8 = 4;
 pub struct Tree {
     /// Per record number: its sequence number, what it is, its size, and the folder of its
     /// first name (the others' are in `more`).
-    seq: Vec<u16>,
-    flags: Vec<u8>,
-    size: Vec<u64>,
-    parent: Vec<u32>,
-    more: FastMap<u32, Vec<u32>>,
+    pub seq: Vec<u16>,
+    pub flags: Vec<u8>,
+    pub size: Vec<u64>,
+    pub parent: Vec<u32>,
+    pub more: FastMap<u32, Vec<u32>>,
     /// The folders that reach the root (the root too).
-    dirs: FastMap<u32, Dir>,
+    pub dirs: FastMap<u32, Dir>,
     /// Bumped on every change.
     pub generation: u64,
 }
@@ -469,12 +469,12 @@ impl Tree {
 /// Collects records for a `Tree` (they come in record order, and a name's folder can come later).
 #[derive(Default)]
 pub struct Builder {
-    tree: Tree,
+    pub tree: Tree,
     /// Per record: its names' folders (file references), and its security id.
-    first: Vec<u64>,
-    more: FastMap<u32, Vec<u64>>,
-    security: Vec<u32>,
-    records: u64,
+    pub first: Vec<u64>,
+    pub more: FastMap<u32, Vec<u64>>,
+    pub security: Vec<u32>,
+    pub records: u64,
 }
 
 impl Builder {

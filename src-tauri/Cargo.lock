@@ -1608,6 +1608,7 @@ version = "0.9.7"
 dependencies = [
  "chrono",
  "dirs 6.0.0",
+ "drag",
  "ferret-core",
  "log",
  "mime_guess",
@@ -1624,6 +1625,7 @@ dependencies = [
  "tauri-plugin-updater",
  "window-vibrancy",
  "windows 0.62.2",
+ "windows-core 0.62.2",
 ]
 
 [[package]]

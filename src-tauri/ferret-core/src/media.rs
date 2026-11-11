@@ -15,7 +15,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime};
 use windows::core::{HSTRING, w};
-use windows::Foundation::TimeSpan;
+use windows::Foundation::{PropertyValue, TimeSpan};
 use windows::Media::MediaProperties::{AudioEncodingProperties, MediaEncodingProfile, VideoEncodingQuality};
 use windows::Media::Transcoding::{MediaTranscoder, TranscodeFailureReason};
 use windows::Storage::{CreationCollisionOption, StorageFile, StorageFolder};
@@ -155,15 +155,15 @@ pub async fn video_info(path: String) -> Result<VideoInfo, String> {
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AudioInfo {
-    title: String,
-    artist: String,
-    album: String,
-    album_artist: String,
-    year: u32,
-    track: u32,
+    pub title: String,
+    pub artist: String,
+    pub album: String,
+    pub album_artist: String,
+    pub year: u32,
+    pub track: u32,
     /// Bits per second.
-    bitrate: u32,
-    duration_ms: u64,
+    pub bitrate: u32,
+    pub duration_ms: u64,
 }
 
 pub async fn audio_info(path: String) -> Result<AudioInfo, String> {
@@ -253,9 +253,21 @@ fn transcode(j: &VideoJob, info: &VideoInfo, dest: &Path, hardware: bool, tick: 
         } else {
             profile.Audio().and_then(|a| a.SetBitrate(j.audio_bitrate)).map_err(hr)?;
         }
+        let levels = needs_levels(j, info, &src);
+        if levels {
+            // Studio range in BT.709, said in the stream (without these the HEVC encoder writes
+            // matrix 0, "RGB", which players following the standard decode with wrong colours).
+            let props = v.Properties().map_err(hr)?;
+            for (key, value) in [(MF_MT_VIDEO_NOMINAL_RANGE, 2u32), (MF_MT_YUV_MATRIX, 1), (MF_MT_VIDEO_PRIMARIES, 2), (MF_MT_TRANSFER_FUNCTION, 5)] {
+                props.Insert(key, &PropertyValue::CreateUInt32(value).map_err(hr)?).map_err(hr)?;
+            }
+        }
 
         let t = MediaTranscoder::new().map_err(hr)?;
         t.SetHardwareAccelerationEnabled(hardware).map_err(hr)?;
+        if levels {
+            t.AddVideoEffect(&HSTRING::from("Windows.Media.Effects.VideoTransformEffect")).map_err(hr)?;
+        }
         let start = j.trim_start_ms.unwrap_or(0).min(info.duration_ms);
         if start > 0 {
             t.SetTrimStartTime(TimeSpan { Duration: start as i64 * 10_000 }).map_err(hr)?;
@@ -331,6 +343,403 @@ fn transcode(j: &VideoJob, info: &VideoInfo, dest: &Path, hardware: bool, tick: 
             Err(e)
         }
     }
+}
+
+// ─────────────────────── full-range videos ───────────────────────
+//
+// Phone recordings store brightness 0–255 ("full range"), not video's usual 16–235. Scaled,
+// cropped or turned, such a video goes through the transcoder's video processor, which converts
+// it to 16–235 properly. Kept at the size it's stored at, it went from the decoder straight to
+// the encoder: values unchanged, nothing in the copy saying they're 0–255, so players read them
+// as 16–235 (0, 8 and 16 all black, 235 and 255 both white). Then Windows' own video processor is
+// added as an effect (VideoTransformEffect, no settings: it converts only what the encoder asks
+// for), and the copy is plain 16–235 BT.709, as players expect without any flag.
+
+// Media Foundation's media type attributes (mfapi.h) and the values used.
+const MF_MT_VIDEO_NOMINAL_RANGE: windows::core::GUID = windows::core::GUID::from_u128(0xc21b8ee5_b956_4071_8daf_325edf5cab11);
+const MF_MT_YUV_MATRIX: windows::core::GUID = windows::core::GUID::from_u128(0x3e23d450_2c75_4d25_a00e_b91670d12327);
+const MF_MT_VIDEO_PRIMARIES: windows::core::GUID = windows::core::GUID::from_u128(0xdbfbe4d7_0740_4ee0_8192_850ab0e21935);
+const MF_MT_TRANSFER_FUNCTION: windows::core::GUID = windows::core::GUID::from_u128(0x5fb0fce9_be5c_4935_a811_ec838f8eed93);
+
+/// The copy is a full-range video kept at its stored size, upright: the one case no video
+/// processor converts (see above).
+fn needs_levels(j: &VideoJob, info: &VideoInfo, src: &StorageFile) -> bool {
+    if info.rotation != 0 || video_full_range(&j.source) != Some(true) {
+        return false;
+    }
+    // The size the decoder hands over (a 1206 × 2622 recording decodes as 1216 × 2624, and then
+    // the processor crops it, converting as it goes).
+    let Ok(v) = MediaEncodingProfile::CreateFromFileAsync(src).and_then(|op| op.join()).and_then(|p| p.Video()) else {
+        return false;
+    };
+    (v.Width().unwrap_or(0), v.Height().unwrap_or(0)) == (j.width.max(2) & !1, j.height.max(2) & !1)
+}
+
+/// Whether an MP4 / MOV file's video says its brightness runs 0–255 (`Some(true)`), 16–235
+/// (`Some(false)`), or doesn't say: its sample entry's `colr` box, else its H.264 / HEVC sequence
+/// parameter set, as Media Foundation reads them.
+pub fn video_full_range(path: &str) -> Option<bool> {
+    sample_entry_full_range(&video_sample_entry(path)?)
+}
+
+/// The boxes inside `start..end` of an ISO media file: (type, contents' start, end).
+fn mp4_boxes(f: &mut std::fs::File, start: u64, end: u64) -> Vec<([u8; 4], u64, u64)> {
+    use std::io::{Read, Seek, SeekFrom};
+    let mut out = Vec::new();
+    let mut at = start;
+    while at + 8 <= end && out.len() < 4096 {
+        let mut h = [0u8; 16];
+        if f.seek(SeekFrom::Start(at)).is_err() || f.read_exact(&mut h[..8]).is_err() {
+            break;
+        }
+        let (mut size, mut head) = (u32::from_be_bytes([h[0], h[1], h[2], h[3]]) as u64, 8);
+        if size == 1 {
+            if f.read_exact(&mut h[8..]).is_err() {
+                break;
+            }
+            size = u64::from_be_bytes(h[8..].try_into().unwrap());
+            head = 16;
+        } else if size == 0 {
+            size = end - at;
+        }
+        if size < head || at + size > end {
+            break;
+        }
+        out.push(([h[4], h[5], h[6], h[7]], at + head, at + size));
+        at += size;
+    }
+    out
+}
+
+/// The first video track's sample description (its first entry, a box: avc1, hvc1…).
+fn video_sample_entry(path: &str) -> Option<Vec<u8>> {
+    use std::io::{Read, Seek, SeekFrom};
+    let mut f = std::fs::File::open(path).ok()?;
+    let len = f.metadata().ok()?.len();
+    let read = |f: &mut std::fs::File, at: u64, n: u64| -> Option<Vec<u8>> {
+        let mut buf = vec![0u8; usize::try_from(n).ok().filter(|n| *n <= 1 << 20)?];
+        f.seek(SeekFrom::Start(at)).ok()?;
+        f.read_exact(&mut buf).ok()?;
+        Some(buf)
+    };
+    let child = |f: &mut std::fs::File, of: ([u8; 4], u64, u64), t: &[u8; 4]| mp4_boxes(f, of.1, of.2).into_iter().find(|b| &b.0 == t);
+    let moov = mp4_boxes(&mut f, 0, len).into_iter().find(|b| &b.0 == b"moov")?;
+    for trak in mp4_boxes(&mut f, moov.1, moov.2).into_iter().filter(|b| &b.0 == b"trak") {
+        let Some(mdia) = child(&mut f, trak, b"mdia") else { continue };
+        // hdlr: version and flags, pre_defined, then the handler type.
+        let Some(hdlr) = child(&mut f, mdia, b"hdlr") else { continue };
+        if read(&mut f, hdlr.1 + 8, 4).as_deref() != Some(b"vide") {
+            continue;
+        }
+        let minf = child(&mut f, mdia, b"minf")?;
+        let stbl = child(&mut f, minf, b"stbl")?;
+        let stsd = child(&mut f, stbl, b"stsd")?;
+        let data = read(&mut f, stsd.1, stsd.2 - stsd.1)?;
+        // stsd: version and flags, entry count, then the entries.
+        let size = u32::from_be_bytes(data.get(8..12)?.try_into().ok()?) as usize;
+        return data.get(8..8 + size).map(<[u8]>::to_vec);
+    }
+    None
+}
+
+/// What a video sample entry says about its range: `colr` (nclx) first, else the SPS.
+fn sample_entry_full_range(entry: &[u8]) -> Option<bool> {
+    // A visual sample entry's own fields take 78 bytes after its header; its boxes follow.
+    let mut at = 8 + 78;
+    let (mut colr, mut sps) = (None, None);
+    while at + 8 <= entry.len() {
+        let size = u32::from_be_bytes(entry[at..at + 4].try_into().ok()?) as usize;
+        if size < 8 || at + size > entry.len() {
+            break;
+        }
+        let body = &entry[at + 8..at + size];
+        match &entry[at + 4..at + 8] {
+            // colour type, primaries, transfer, matrix (u16 each), then the full-range bit.
+            b"colr" if body.get(..4) == Some(b"nclx") => colr = body.get(10).map(|b| b & 0x80 != 0),
+            // avcC: 5 bytes, the SPS count, then each SPS's length and bytes.
+            b"avcC" if body.get(5).is_some_and(|n| n & 0x1f > 0) => {
+                let n = u16::from_be_bytes(body.get(6..8)?.try_into().ok()?) as usize;
+                sps = body.get(8..8 + n).and_then(h264_full_range);
+            }
+            // hvcC: 22 bytes, the array count, then arrays of one NAL type each (SPS: 33).
+            b"hvcC" => {
+                let mut i = 23;
+                for _ in 0..*body.get(22)? {
+                    let (kind, count) = (body.get(i)? & 0x3f, u16::from_be_bytes(body.get(i + 1..i + 3)?.try_into().ok()?));
+                    i += 3;
+                    for _ in 0..count {
+                        let n = u16::from_be_bytes(body.get(i..i + 2)?.try_into().ok()?) as usize;
+                        if kind == 33 && sps.is_none() {
+                            sps = body.get(i + 2..i + 2 + n).and_then(hevc_full_range);
+                        }
+                        i += 2 + n;
+                    }
+                }
+            }
+            _ => {}
+        }
+        at += size;
+    }
+    colr.or(sps)
+}
+
+/// A parameter set's bits (after its NAL header, emulation-prevention bytes removed).
+struct Bits {
+    b: Vec<u8>,
+    at: usize,
+}
+
+impl Bits {
+    fn new(nal: &[u8]) -> Self {
+        let mut b = Vec::with_capacity(nal.len());
+        let mut zeros = 0;
+        for &x in nal {
+            if zeros >= 2 && x == 3 {
+                zeros = 0;
+                continue;
+            }
+            zeros = if x == 0 { zeros + 1 } else { 0 };
+            b.push(x);
+        }
+        Self { b, at: 0 }
+    }
+
+    fn u(&mut self, n: u32) -> Option<u32> {
+        let mut v = 0u32;
+        for _ in 0..n {
+            let byte = *self.b.get(self.at / 8)?;
+            v = (v << 1) | ((byte >> (7 - self.at % 8)) & 1) as u32;
+            self.at += 1;
+        }
+        Some(v)
+    }
+
+    fn flag(&mut self) -> Option<bool> {
+        Some(self.u(1)? == 1)
+    }
+
+    fn skip(&mut self, n: usize) -> Option<()> {
+        self.at += n;
+        (self.at <= self.b.len() * 8).then_some(())
+    }
+
+    /// Exp-Golomb, unsigned.
+    fn ue(&mut self) -> Option<u32> {
+        let mut zeros = 0;
+        while !self.flag()? {
+            zeros += 1;
+            if zeros > 31 {
+                return None;
+            }
+        }
+        Some(((1u64 << zeros) - 1 + self.u(zeros)? as u64) as u32)
+    }
+
+    /// Exp-Golomb, signed.
+    fn se(&mut self) -> Option<i32> {
+        let k = self.ue()? as i64;
+        Some(if k % 2 == 1 { ((k + 1) / 2) as i32 } else { -(k / 2) as i32 })
+    }
+
+    /// The start of the VUI (the same in H.264 and HEVC) up to video_full_range_flag. None when
+    /// it's not there.
+    fn vui_full_range(&mut self) -> Option<bool> {
+        if !self.flag()? {
+            return None;
+        }
+        // aspect_ratio_info_present_flag: aspect_ratio_idc, 255 = a SAR of two u16 follows.
+        if self.flag()? && self.u(8)? == 255 {
+            self.skip(32)?;
+        }
+        // overscan_info_present_flag: overscan_appropriate_flag.
+        if self.flag()? {
+            self.skip(1)?;
+        }
+        // video_signal_type_present_flag: video_format (3), video_full_range_flag.
+        if !self.flag()? {
+            return None;
+        }
+        self.skip(3)?;
+        self.flag()
+    }
+}
+
+/// An H.264 SPS NAL unit's video_full_range_flag (H.264 7.3.2.1.1, E.1.1).
+fn h264_full_range(nal: &[u8]) -> Option<bool> {
+    let mut r = Bits::new(nal.get(1..)?);
+    let profile = r.u(8)?;
+    r.skip(16)?;
+    r.ue()?;
+    if matches!(profile, 100 | 110 | 122 | 244 | 44 | 83 | 86 | 118 | 128 | 138 | 139 | 134 | 135) {
+        let chroma = r.ue()?;
+        if chroma == 3 {
+            r.skip(1)?;
+        }
+        r.ue()?;
+        r.ue()?;
+        r.skip(1)?;
+        if r.flag()? {
+            for i in 0..if chroma == 3 { 12 } else { 8 } {
+                if r.flag()? {
+                    let (mut last, mut next) = (8i32, 8i32);
+                    for _ in 0..if i < 6 { 16 } else { 64 } {
+                        if next != 0 {
+                            next = (last + r.se()? + 256) % 256;
+                        }
+                        if next != 0 {
+                            last = next;
+                        }
+                    }
+                }
+            }
+        }
+    }
+    r.ue()?;
+    match r.ue()? {
+        0 => {
+            r.ue()?;
+        }
+        1 => {
+            r.skip(1)?;
+            r.se()?;
+            r.se()?;
+            let n = r.ue()?;
+            if n > 255 {
+                return None;
+            }
+            for _ in 0..n {
+                r.se()?;
+            }
+        }
+        _ => {}
+    }
+    r.ue()?;
+    r.skip(1)?;
+    r.ue()?;
+    r.ue()?;
+    if !r.flag()? {
+        r.skip(1)?;
+    }
+    r.skip(1)?;
+    if r.flag()? {
+        for _ in 0..4 {
+            r.ue()?;
+        }
+    }
+    r.vui_full_range()
+}
+
+/// An HEVC SPS NAL unit's video_full_range_flag (H.265 7.3.2.2, E.2.1).
+fn hevc_full_range(nal: &[u8]) -> Option<bool> {
+    let mut r = Bits::new(nal.get(2..)?);
+    r.skip(4)?;
+    let sub = r.u(3)? as usize;
+    r.skip(1)?;
+    // profile_tier_level: the general profile (88 bits) and level (8), then the sub-layers'.
+    r.skip(96)?;
+    let mut present = [(false, false); 8];
+    for p in present.iter_mut().take(sub) {
+        *p = (r.flag()?, r.flag()?);
+    }
+    if sub > 0 {
+        r.skip(2 * (8 - sub))?;
+    }
+    for &(profile, level) in present.iter().take(sub) {
+        r.skip(if profile { 88 } else { 0 } + if level { 8 } else { 0 })?;
+    }
+    r.ue()?;
+    if r.ue()? == 3 {
+        r.skip(1)?;
+    }
+    r.ue()?;
+    r.ue()?;
+    if r.flag()? {
+        for _ in 0..4 {
+            r.ue()?;
+        }
+    }
+    r.ue()?;
+    r.ue()?;
+    let poc_lsb_bits = r.ue()? as usize + 4;
+    let first = if r.flag()? { 0 } else { sub };
+    for _ in first..=sub {
+        r.ue()?;
+        r.ue()?;
+        r.ue()?;
+    }
+    for _ in 0..6 {
+        r.ue()?;
+    }
+    // scaling_list_enabled_flag, sps_scaling_list_data_present_flag: scaling_list_data().
+    if r.flag()? && r.flag()? {
+        for size in 0..4 {
+            let mut matrix = 0;
+            while matrix < 6 {
+                if !r.flag()? {
+                    r.ue()?;
+                } else {
+                    if size > 1 {
+                        r.se()?;
+                    }
+                    for _ in 0..64.min(1 << (4 + (size << 1))) {
+                        r.se()?;
+                    }
+                }
+                matrix += if size == 3 { 3 } else { 1 };
+            }
+        }
+    }
+    r.skip(2)?;
+    // pcm_enabled_flag
+    if r.flag()? {
+        r.skip(8)?;
+        r.ue()?;
+        r.ue()?;
+        r.skip(1)?;
+    }
+    // The short-term reference picture sets (7.3.7): each counts its pictures, which a later set
+    // predicted from it needs.
+    let sets = r.ue()? as usize;
+    if sets > 64 {
+        return None;
+    }
+    let mut pictures: Vec<u32> = Vec::with_capacity(sets);
+    for i in 0..sets {
+        if i > 0 && r.flag()? {
+            r.skip(1)?;
+            r.ue()?;
+            let mut n = 0;
+            for _ in 0..=pictures[i - 1] {
+                let used = r.flag()?;
+                if used || r.flag()? {
+                    n += 1;
+                }
+            }
+            pictures.push(n);
+        } else {
+            let (negative, positive) = (r.ue()?, r.ue()?);
+            if negative + positive > 32 {
+                return None;
+            }
+            for _ in 0..negative + positive {
+                r.ue()?;
+                r.skip(1)?;
+            }
+            pictures.push(negative + positive);
+        }
+    }
+    // long_term_ref_pics_present_flag
+    if r.flag()? {
+        let n = r.ue()?;
+        if n > 32 {
+            return None;
+        }
+        for _ in 0..n {
+            r.skip(poc_lsb_bits + 1)?;
+        }
+    }
+    r.skip(2)?;
+    r.vui_full_range()
 }
 
 /// Starts one job converting every video in `items`; returns its id.
@@ -978,6 +1387,67 @@ mod tests {
         assert_eq!(err, "Cancelled");
         std::thread::sleep(Duration::from_millis(300));
         assert!(!cancelled.exists() && !part_path(&cancelled).exists());
+    }
+
+    fn hex(s: &str) -> Vec<u8> {
+        (0..s.len()).step_by(2).map(|i| u8::from_str_radix(&s[i..i + 2], 16).unwrap()).collect()
+    }
+
+    #[test]
+    fn range_from_parameter_sets() {
+        // ffmpeg-made (x264 fullrange=on; x265 range=full / limited) and Windows-made SPSs.
+        assert_eq!(h264_full_range(&hex("6764001facd9405005bb016e02020280000003008000001e078c18cb")), Some(true));
+        // No video_signal_type in its VUI: unsaid.
+        assert_eq!(h264_full_range(&hex("67640028acd940780227e5c044000003000400000300f03c60c658")), None);
+        let hevc = "42010101600000030090000003000003005da00280802d165959a4932bc05b808080820000030002000003003c10";
+        assert_eq!(hevc_full_range(&hex(hevc)), Some(true));
+        assert_eq!(hevc_full_range(&hex(&hevc.replace("bc05b8", "bc05a8"))), Some(false));
+        assert_eq!(hevc_full_range(&hex("420101016000000300900000030000030096a0025c800a41d565959a4932bc05a020000003002000000781")), Some(false));
+        // Cut short: unsaid, not a guess.
+        assert_eq!(hevc_full_range(&hex("4201010160000003009000")), None);
+    }
+
+    /// FerretQA\fullrange: test clips with grey patches stored 0 8 16 28 64 128 235 255, made with
+    /// ffmpeg (see the .vf files there). Copies are written to FerretQA\fullrange-out.
+    fn fullrange(name: &str) -> Option<(String, PathBuf)> {
+        let home = dirs::home_dir()?.join("FerretQA");
+        let p = home.join("fullrange").join(name);
+        let out = home.join("fullrange-out");
+        (p.exists() && std::fs::create_dir_all(&out).is_ok()).then(|| (p.to_string_lossy().to_string(), out))
+    }
+
+    #[test]
+    fn full_range_files_are_recognised() {
+        let Some((full, _)) = fullrange("fullrange-ramp-hevc.mp4") else { return };
+        assert_eq!(video_full_range(&full), Some(true));
+        let (h264, _) = fullrange("fullrange-ramp-h264.mp4").unwrap();
+        assert_eq!(video_full_range(&h264), Some(true));
+        if let Some(limited) = fixture("landscape-1080p.mp4") {
+            assert_ne!(video_full_range(&limited), Some(true));
+        }
+        if let Some(phone) = fixture("phone-hevc-60fps.mp4") {
+            assert_eq!(video_full_range(&phone), Some(false));
+        }
+    }
+
+    #[test]
+    fn full_range_kept_size_is_converted_to_studio_range() {
+        let Some((src, out)) = fullrange("fullrange-ramp-hevc.mp4") else { return };
+        let info = probe_video(&src).unwrap();
+        for hevc in [false, true] {
+            let dest = out.join(if hevc { "test-kept-hevc.mp4" } else { "test-kept-h264.mp4" });
+            let mut j = job(&src, &info, info.width, info.height);
+            (j.hevc, j.audio_bitrate) = (hevc, 0);
+            let file = open_file(&src).unwrap();
+            assert!(needs_levels(&j, &info, &file));
+            transcode(&j, &info, &dest, true, &mut |_| true).unwrap();
+            // Studio range said in the stream (it said nothing before: players took the
+            // unconverted 0–255 values as 16–235).
+            assert_eq!(video_full_range(&dest.to_string_lossy()), Some(false), "hevc {hevc}");
+        }
+        // Scaled, the transcoder's own processor converts: nothing added.
+        let j = job(&src, &info, 640, 360);
+        assert!(!needs_levels(&j, &info, &open_file(&src).unwrap()));
     }
 
     #[test]

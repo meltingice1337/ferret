@@ -258,8 +258,11 @@ pub fn start_drag<W: HasWindowHandle, F: Fn(DragResult, CursorPosition) + Send +
                         DragMode::Move => DROPEFFECT_MOVE,
                     };
 
+                    // Ferret patch: see `crate::dragging`.
+                    crate::DRAGGING.store(true, std::sync::atomic::Ordering::Release);
                     let drop_result =
                         DoDragDrop(&data_object, &drop_source, effect, &mut out_dropeffect);
+                    crate::DRAGGING.store(false, std::sync::atomic::Ordering::Release);
                     let mut pt = POINT { x: 0, y: 0 };
                     GetCursorPos(&mut pt)?;
                     if drop_result == DRAGDROP_S_DROP {

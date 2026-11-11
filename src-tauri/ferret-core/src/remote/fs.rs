@@ -483,7 +483,7 @@ async fn remove_tree(s: &Session, linux: &str, stop: &dyn Fn() -> bool) -> Res<(
 
 /// A server as a file system for the copy engine (blocking calls, run on job threads).
 pub struct RemoteFs {
-    id: String,
+    pub id: String,
 }
 
 impl RemoteFs {

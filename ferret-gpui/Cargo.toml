@@ -1,0 +1,122 @@
+[package]
+name = "ferret-gpui"
+# Ferret's version: scripts/release.sh bumps it (with src-tauri's, which ferret-core and the
+# search service compare), the updater compares it with the feed's, and the exe carries it.
+version = "0.9.7"
+description = "Ferret file manager: its UI in GPUI (Zed's Rust UI framework) on ferret-core, with no web view and no IPC"
+edition = "2024"
+publish = false
+# Two programs: the app (ferret-gpui.exe, installed as ferret.exe) and the search service
+# (src/bin/ferret-indexer.rs). `cargo run` runs the app.
+default-run = "ferret-gpui"
+
+# Its own workspace, apart from the archived Tauri app's (src-tauri).
+[workspace]
+
+[build-dependencies]
+# build.rs: the exe's icon and version details (rc.exe, from the Windows SDK).
+embed-resource = "3"
+
+[dependencies]
+# A weekly snapshot of Zed's GPUI on crates.io (the official `gpui` crate stopped at 0.2.2).
+# Pinned exactly: its API changes from week to week.
+gpui = { package = "gpui-pre", version = "=0.3.12" }
+# The platform layer (the Windows backend lives in gpui-pre-windows, pulled in by this one).
+gpui_platform = { package = "gpui-pre-platform", version = "=0.3.12" }
+ferret-core = { path = "../src-tauri/ferret-core" }
+# The accent glow behind the panels is drawn once into a small picture (GPUI has no radial gradient).
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "webp", "bmp", "ico"] }
+chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
+serde_json = "1"
+# GPUI's Windows backend, patched (vendor/gpui-pre-windows, see [patch] below): its Direct3D
+# device and image atlas, so video frames go GPU to GPU.
+gpui_windows = { package = "gpui-pre-windows", version = "=0.3.12" }
+# Video (Media Foundation's media engine + Direct3D 11), the same windows-rs version as ferret-core.
+windows = { version = "0.62", features = [
+    "Win32_Foundation",
+    "Win32_Graphics_Direct3D",
+    "Win32_Graphics_Direct3D11",
+    "Win32_Graphics_Dxgi",
+    "Win32_Graphics_Dxgi_Common",
+    "Win32_Media_MediaFoundation",
+    "Win32_System_Com",
+    # quality.rs: seeking the source reader (a PROPVARIANT time)
+    "Win32_System_Com_StructuredStorage",
+    "Win32_System_Variant",
+    # settings.rs: Windows' app theme and animation effects
+    "Win32_System_Registry",
+    # update.rs: the update feed and installer, over Windows' own HTTP stack
+    "Win32_Networking_WinHttp",
+    "Win32_UI_WindowsAndMessaging",
+    "Win32_UI_Input_KeyboardAndMouse",
+    # view.rs: Mica follows the app's theme (not only Windows')
+    "Win32_Graphics_Dwm",
+    # slidedraw.rs: turned slide shapes and vertical text drawn with Direct2D and DirectWrite
+    "Win32_Graphics_Direct2D",
+    "Win32_Graphics_Direct2D_Common",
+    "Win32_Graphics_DirectWrite",
+    "Win32_Graphics_Imaging",
+    # render.rs: PDF pages through Windows' own renderer
+    "Data_Pdf",
+    "Foundation",
+    "Storage",
+    "Storage_Streams",
+    # render.rs: text of .doc, .rtf, .ppt… through Windows' own text extractors (IFilter)
+    "Win32_Storage",
+    "Win32_Storage_IndexServer",
+    # ocr.rs: text in scanned PDFs, read with Windows' own text recognition
+    "Media_Ocr",
+    "Globalization",
+    "Graphics_Imaging",
+    "Foundation_Collections",
+] }
+# ocr.rs: the optional better text recognition (addons.rs downloads it): PaddleOCR's models run
+# by Microsoft's ONNX Runtime, whose DLL comes with the add-on and is loaded only then (nothing
+# of it is linked into Ferret). `ort` 2.0.0-rc.15 speaks ONNX Runtime 1.31's API.
+ort = { version = "=2.0.0-rc.15", default-features = false, features = ["std", "load-dynamic"] }
+windows-core = "0.62"
+windows-numerics = "0.3"
+# Dragging files out to Explorer and other apps: the app's own vendored copy (Ferret patches).
+drag = { path = "../src-tauri/vendor/drag" }
+raw-window-handle = "0.6"
+# Word previews (docx.rs): the same versions ferret-core uses. The add-on packs (addons.rs) are
+# zips too, each file checked against its SHA-256.
+zip = "9"
+sha2 = "0.10"
+roxmltree = "0.21"
+# The text field (input.rs): moving by whole characters, emoji and accents included.
+unicode-segmentation = "1"
+# ferret-core's events and UI-thread work reach GPUI over a channel (link.rs).
+futures = "0.3"
+# Sorting: names compare without accents ("sensitivity: base"), as the app's collator does.
+unicode-normalization = "0.1"
+serde = { version = "1", features = ["derive"] }
+# Batch rename's find and replace.
+regex = "1"
+# Previews: highlighted code (GitHub-like themes), Markdown, font names.
+syntect = { version = "5", default-features = false, features = ["default-fancy"] }
+pulldown-cmark = { version = "0.13", default-features = false }
+ttf-parser = "0.25"
+# Legacy .doc and .ppt (compound files): the version the app's own dependencies use.
+cfb = "0.14"
+# PDF previews' text layer: each character and where it is on its page (Windows' PDF renderer
+# draws pages but has no text API), so the text over a page can be selected and copied. Its
+# lopdf (re-exported) also opens documents that have a password.
+pdf-extract = "0.12"
+log = "0.4"
+rusqlite = { version = "0.40", features = ["bundled"] }
+# Benchmark timing: when the OS created this process.
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_System_Threading", "Win32_System_SystemInformation"] }
+
+# GPUI's Windows renderer draws no external surfaces (macOS only), so video frames couldn't reach
+# the screen without a CPU copy. The vendored copy shares its Direct3D device (with video support)
+# and lets the app copy a frame over an image's atlas tile on the GPU. Changes marked "Ferret patch".
+[patch.crates-io]
+gpui-pre-windows = { path = "vendor/gpui-pre-windows" }
+# pdf-extract read CID fonts' `first last width` widths wrongly (text after such glyphs drifted
+# right of where Windows draws it, so the text layer missed the words): fixed in a vendored copy,
+# changes marked "Ferret patch".
+pdf-extract = { path = "vendor/pdf-extract" }
+
+[profile.release]
+debug = "line-tables-only"

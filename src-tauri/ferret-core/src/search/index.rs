@@ -208,9 +208,9 @@ pub struct Index {
     /// MFT volumes: record number (FRN & 0xFFFF_FFFF_FFFF) → entry.
     pub(crate) frn_map: Vec<u32>,
     pub(crate) byte_freq: Box<[u64; 256]>,
-    live: usize,
-    dead: usize,
-    garbage: usize,
+    pub live: usize,
+    pub dead: usize,
+    pub garbage: usize,
     /// Bumped on every mutation batch; used to invalidate query caches.
     pub generation: u64,
 }
@@ -864,8 +864,8 @@ impl Index {
 }
 
 pub struct Children<'a> {
-    ix: &'a Index,
-    cur: u32,
+    pub ix: &'a Index,
+    pub cur: u32,
 }
 
 impl Iterator for Children<'_> {

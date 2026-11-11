@@ -2,40 +2,40 @@ use serde::Serialize;
 
 use crate::paths;
 
-#[derive(Serialize)]
+#[derive(Serialize, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct KnownFolder {
-    id: &'static str,
-    name: &'static str,
-    path: String,
+    pub id: &'static str,
+    pub name: &'static str,
+    pub path: String,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct Drive {
     pub path: String,
-    label: String,
-    total: u64,
-    free: u64,
+    pub label: String,
+    pub total: u64,
+    pub free: u64,
     pub removable: bool,
-    fs: String,
+    pub fs: String,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct WslDistro {
     pub name: String,
-    path: String,
-    is_default: bool,
+    pub path: String,
+    pub is_default: bool,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct Places {
-    home: String,
-    known: Vec<KnownFolder>,
-    drives: Vec<Drive>,
-    wsl: Vec<WslDistro>,
+    pub home: String,
+    pub known: Vec<KnownFolder>,
+    pub drives: Vec<Drive>,
+    pub wsl: Vec<WslDistro>,
 }
 
 pub fn known() -> Vec<KnownFolder> {

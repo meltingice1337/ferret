@@ -1,6 +1,7 @@
 node_modules
 dist
 src-tauri/target
+ferret-gpui/target
 src-tauri/gen
 *.log
 .vite
@@ -11,3 +12,4 @@ e2e-artifacts
 !.yarn/patches
 !.yarn/plugins
 !.yarn/releases
+research/

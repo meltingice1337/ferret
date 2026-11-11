@@ -3,13 +3,15 @@
 //  - inside the window: drop onto any element with `data-drop="<folder path>"`
 //    (folders in the list, sidebar places, breadcrumbs, tabs);
 //  - leaving the window: hand off to a native OLE drag (Explorer, desktop, other apps);
-//  - files dragged in from Explorer arrive through Tauri's drag-drop event.
+//  - files dragged in from other apps arrive as `ferret-drop` events from Ferret's own drop
+//    target (src-tauri/src/filedrop.rs), with what the app they come from allows.
 
 import { createSignal } from "solid-js";
 import { startDrag } from "@crabnebula/tauri-plugin-drag";
-import { getCurrentWebview } from "@tauri-apps/api/webview";
+import { listen } from "@tauri-apps/api/event";
 import { api } from "./api";
-import { basename, inRecycleBin, isRecycle, isRemote, isWithin, parent, samePath } from "./path";
+import { dropOp, mayTakeAway } from "./dropop";
+import { basename, inRecycleBin, isRecycle, isRemote, isSearch, isWithin, parent, samePath } from "./path";
 import { activeTab, addToShelf, SHELF, setActiveId, tabs, toast } from "./state";
 import { deleteItems, realPath, transferTo } from "./ops";
 
@@ -34,18 +36,14 @@ export const [drag, setDrag] = createSignal<DragState | null>(null);
 /** Server files dragged to another app are downloaded first, up to this much. */
 const DRAG_DOWNLOAD_MAX = 128 << 20;
 
-const sameVolume = (a: string, b: string) => {
-  const root = (p: string) => (p.startsWith("\\\\") ? p.split("\\").slice(2, 4).join("\\") : p.slice(0, 2)).toLowerCase();
-  return root(a) === root(b);
-};
-
 function chooseOp(sources: string[], target: string, e: { ctrlKey: boolean; shiftKey: boolean }, inArchive: boolean, copies = false): "copy" | "move" {
   if (inArchive) return "copy";
-  if (e.ctrlKey) return "copy";
-  if (e.shiftKey) return "move";
-  if (copies) return "copy";
-  return sameVolume(sources[0], target) ? "move" : "copy";
+  if (copies && !e.shiftKey) return "copy";
+  return dropOp(sources, target, e);
 }
+
+/** The last drag that left the window was one that copies (`DragFrom.copies`), for when it comes back in. */
+let nativeCopies = false;
 
 let hoverEl: HTMLElement | null = null;
 function setHover(el: HTMLElement | null) {
@@ -167,6 +165,7 @@ export function beginDrag(down: MouseEvent, getPaths: () => string[], inArchive 
   async function goNative() {
     const d = drag();
     cleanup();
+    nativeCopies = !!from.copies;
     const dragged = d?.paths ?? paths;
     const shown = new Map(activeTab().entries[0]().map((e) => [e.path, e]));
     const about = (p: string) => shown.get(p) ?? from.known?.(p);
@@ -242,40 +241,141 @@ export function beginReorder(down: MouseEvent, selector: string, from: number, o
 
 // ---------- files dropped in from other apps ----------
 
-export const [externalDrag, setExternalDrag] = createSignal<{ count: number; target: string | null } | null>(null);
+/** A `ferret-drop` event (src-tauri/src/filedrop.rs). */
+interface DropEvent {
+  kind: "enter" | "over" | "drop" | "leave";
+  /** On "enter" and "drop". */
+  paths: string[];
+  /** Physical pixels in the window. */
+  x: number;
+  y: number;
+  /** DROPEFFECT bits: what the app the files come from allows (1 copy, 2 move). */
+  allowed: number;
+  ctrl: boolean;
+  shift: boolean;
+  /** Ferret's own drag out of this window, coming back in. */
+  own: boolean;
+}
 
-getCurrentWebview().onDragDropEvent((ev) => {
-  const p = ev.payload;
-  if (p.type === "leave") {
+/**
+ * What dropping where the pointer is does: copy or move into `target`, recycle, add to the
+ * Dropzone, or nothing: "keep" (Recycle Bin, but the app only lets its files be copied),
+ * "here" (they're already in that folder), "search" (a search tab isn't a folder).
+ */
+export type DropAction = "copy" | "move" | "recycle" | "shelf" | "keep" | "here" | "search" | "none";
+
+export interface ExternalDrag {
+  count: number;
+  target: string | null;
+  action: DropAction;
+  /** A copy only because the app the files come from allows nothing else. */
+  copyOnly: boolean;
+}
+
+export const [externalDrag, setExternalDrag] = createSignal<ExternalDrag | null>(null);
+
+let dropPaths: string[] = [];
+let toldCursor = "";
+
+function planDrop(e: DropEvent, x: number, y: number): { el: HTMLElement | null; drag: ExternalDrag } {
+  const t = dropTargetAt(x, y, dropPaths);
+  const dest = t?.path ?? activeTab()?.p ?? null;
+  // From another app, what it allows decides first; Ferret's own drag back in works as inside the window.
+  const allowed = e.own ? undefined : e.allowed;
+  const keys = { ctrlKey: e.ctrl, shiftKey: e.shift };
+  let action: DropAction;
+  let copyOnly = false;
+  if (!dest || !dropPaths.length) action = "none";
+  else if (dest === SHELF) action = "shelf";
+  else if (isRecycle(dest)) action = mayTakeAway(allowed) ? "recycle" : "keep";
+  else if (isSearch(dest)) action = "search";
+  else if (dropPaths.every((s) => samePath(parent(s), dest))) action = "here";
+  else if (e.own && nativeCopies && !e.shift) action = "copy";
+  else {
+    action = dropOp(dropPaths, dest, keys, allowed);
+    copyOnly = action === "copy" && dropOp(dropPaths, dest, keys) === "move";
+  }
+  return { el: t?.el ?? null, drag: { count: dropPaths.length, target: dest, action, copyOnly } };
+}
+
+/** The cursor Windows shows for the drag (filedrop.rs keeps what it was last told). */
+function tellCursor(action: DropAction) {
+  const op = action === "copy" || action === "shelf" ? "copy" : action === "move" || action === "recycle" ? "move" : "none";
+  if (op === toldCursor) return;
+  toldCursor = op;
+  api.dropFeedback(op).catch(() => {});
+}
+
+listen<DropEvent>("ferret-drop", ({ payload: e }) => {
+  if (e.kind === "leave") {
     setHover(null);
     setExternalDrag(null);
+    dropPaths = [];
     return;
   }
+  if (e.kind === "enter") toldCursor = "";
+  if (e.paths.length) dropPaths = e.paths;
   const scale = window.devicePixelRatio || 1;
-  const x = p.position.x / scale;
-  const y = p.position.y / scale;
-  const paths = "paths" in p ? p.paths : [];
-  if (p.type === "enter" || p.type === "over") {
-    const t = dropTargetAt(x, y, paths);
-    setHover(t?.el ?? null);
+  const x = e.x / scale;
+  const y = e.y / scale;
+  const { el, drag: plan } = planDrop(e, x, y);
+  if (e.kind !== "drop") {
+    setHover(el);
     hoverTabs(x, y);
-    setExternalDrag((prev) => ({ count: paths.length || prev?.count || 0, target: t?.path ?? activeTab()?.p ?? null }));
+    tellCursor(plan.action);
+    setExternalDrag(plan);
     return;
   }
-  if (p.type === "drop") {
-    const t = dropTargetAt(x, y, paths);
-    setHover(null);
-    setExternalDrag(null);
-    if (t?.path === SHELF) return addToShelf(paths);
-    const dest = t?.path ?? activeTab()?.p;
-    if (dest && isRecycle(dest)) return deleteItems(paths, false);
-    if (!dest || !paths.length) return;
-    if (paths.every((s) => samePath(parent(s), dest))) return;
-    const op = sameVolume(paths[0], dest) ? "move" : "copy";
-    toast(`${op === "move" ? "Moving" : "Copying"} ${paths.length === 1 ? basename(paths[0]) : `${paths.length} items`} to ${basename(dest)}`);
-    transferTo(op, paths, dest);
+  setHover(null);
+  setExternalDrag(null);
+  const paths = dropPaths;
+  dropPaths = [];
+  const dest = plan.target;
+  const what = paths.length === 1 ? basename(paths[0]) : `${paths.length} items`;
+  switch (plan.action) {
+    case "shelf":
+      return addToShelf(paths);
+    case "recycle":
+      return deleteItems(paths, false);
+    case "keep":
+      return toast(KEEP_NOTE);
+    case "search":
+      return void transferTo("copy", paths, dest!);
+    case "copy":
+    case "move":
+      toast(`${plan.action === "move" ? "Moving" : "Copying"} ${what} to ${basename(dest!)}`);
+      return void transferTo(plan.action, paths, dest!);
   }
 });
+
+const KEEP_NOTE = "The app these come from only lets them be copied, so they can't go to the Recycle Bin";
+
+/**
+ * The banner shown while files from another app are over the window, saying what a drop
+ * there does: `lead`, then `name` in bold, then `tail`. Empty when it does nothing to say.
+ */
+export function externalDragLabel(d: ExternalDrag): { lead: string; name?: string; tail?: string } {
+  const what = d.count > 1 ? `${d.count} items` : "here";
+  const into = d.target ? basename(d.target) : "this folder";
+  switch (d.action) {
+    case "copy":
+      return { lead: `Drop ${what} to copy into `, name: into, tail: d.copyOnly ? ": the app they come from only allows a copy" : "" };
+    case "move":
+      return { lead: `Drop ${what} to move into `, name: into };
+    case "recycle":
+      return { lead: `Drop ${what} to move to the `, name: "Recycle Bin" };
+    case "shelf":
+      return { lead: `Drop ${what} to add to the `, name: "Dropzone" };
+    case "keep":
+      return { lead: KEEP_NOTE };
+    case "here":
+      return { lead: "Already in ", name: into };
+    case "search":
+      return { lead: "Search results aren't a folder: open a folder to drop into it" };
+    case "none":
+      return { lead: "" };
+  }
+}
 
 export const dragLabel = (d: DragState) => {
   const what = d.paths.length === 1 ? basename(d.paths[0]) : `${d.paths.length} items`;

@@ -11,9 +11,9 @@ use crate::paths;
 #[serde(rename_all = "camelCase")]
 pub struct FileDetails {
     /// (label, value) pairs from the version resource, in display order.
-    version: Vec<(String, String)>,
+    pub version: Vec<(String, String)>,
     /// "64-bit (x64)", "32-bit (x86)", "ARM64"… for PE files.
-    arch: Option<String>,
+    pub arch: Option<String>,
 }
 
 /// Machine field of a PE image (`MZ` → `PE\0\0` → IMAGE_FILE_HEADER.Machine).

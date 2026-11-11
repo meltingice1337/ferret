@@ -170,9 +170,9 @@ pub fn build_from_records(root_path: &str, root_frn: u64, recs: impl IntoIterato
 
 /// Incremental builder used during enumeration (parents may come later).
 pub struct Builder {
-    ix: Index,
-    parents: Vec<u64>,
-    root_frn: u64,
+    pub ix: Index,
+    pub parents: Vec<u64>,
+    pub root_frn: u64,
 }
 
 impl Builder {

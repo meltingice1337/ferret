@@ -86,6 +86,16 @@ use std::path::PathBuf;
 mod platform_impl;
 pub use platform_impl::start_drag;
 
+/// Ferret patch: set while `start_drag` runs a drag of files (Windows: inside `DoDragDrop`).
+pub(crate) static DRAGGING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Ferret patch: true while this process is dragging files out with `start_drag`, so the app's
+/// own drop target can tell its own files coming back in from another app's. The drag only
+/// offers a copy (`DragMode::Copy`), so the drop target can't tell from what it allows.
+pub fn dragging() -> bool {
+    DRAGGING.load(std::sync::atomic::Ordering::Acquire)
+}
+
 pub type Result<T> = std::result::Result<T, Error>;
 
 #[derive(Debug, thiserror::Error)]

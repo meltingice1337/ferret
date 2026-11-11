@@ -80,6 +80,8 @@ export const api = {
   /** Answers a job paused on an item it couldn't handle. */
   answerJob: (id: number, answer: "retry" | "skip" | "skipAll") => invoke<void>("answer_job", { id, answer }),
   dragIcon: (path?: string) => invoke<string>("drag_icon", { path }),
+  /** The cursor for files dragged in from another app: what a drop under it would do. */
+  dropFeedback: (op: "copy" | "move" | "none") => invoke<void>("drop_feedback", { op }),
 
   // ---- windows shell ----
   showNativeMenu: (paths: string[], x: number, y: number) => invoke<string | null>("show_native_menu", { paths, x, y }),

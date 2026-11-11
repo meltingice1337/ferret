@@ -940,6 +940,142 @@ export const tests = [
     },
   },
   {
+    name: "drag in the list: dropped on a folder on the same drive it moves, with Ctrl it's copied",
+    async run(t) {
+      const dir = t.p("drag-own");
+      mkdirSync(join(dir, "target"), { recursive: true });
+      writeFileSync(join(dir, "moved.txt"), "m");
+      writeFileSync(join(dir, "copied.txt"), "c");
+      const mouse = (type, at, extra = {}) => t.c.send("Input.dispatchMouseEvent", { type, x: at.x, y: at.y, ...extra });
+      const rowAt = (name) => t.c.eval(`(() => {
+        const r = [...document.querySelectorAll(".files .row")].find((r) => r.querySelector(".name")?.textContent === ${JSON.stringify(name)});
+        if (!r) return null; const b = r.getBoundingClientRect(); return { x: b.left + Math.min(60, b.width / 2), y: b.top + b.height / 2 };
+      })()`);
+      const until = async (ok, what) => {
+        const began = Date.now();
+        while (!ok() && Date.now() - began < 8000) await sleep(150);
+        assert(ok(), what);
+      };
+      let held = null;
+      // Ferret's own drag, inside the window (it never leaves it: that would start a real OLE drag).
+      // Ctrl goes down once the drag has started, as a user does (Ctrl+click toggles the selection).
+      const drag = async (name, modifiers, label) => {
+        const from = await rowAt(name);
+        assert(from, `no row “${name}”`);
+        await mouse("mousePressed", from, { button: "left", buttons: 1, clickCount: 1 });
+        held = { at: from, modifiers };
+        await mouse("mouseMoved", { x: from.x + 12, y: from.y + 12 }, { buttons: 1 });
+        const at = await rowAt("target");
+        held.at = at;
+        await mouse("mouseMoved", at, { buttons: 1, modifiers });
+        await t.c.waitFor(`document.querySelector(".drag-ghost span:last-child")?.textContent === ${JSON.stringify(`${label} ${name} to target`)}`, { what: `“${label} ${name} to target” by the pointer` });
+        await mouse("mouseReleased", at, { button: "left", buttons: 0, clickCount: 1, modifiers });
+        held = null;
+      };
+      try {
+        await go(t, dir);
+        await t.c.waitFor(`["target", "moved.txt", "copied.txt"].every((n) => [...document.querySelectorAll(".files .row .name")].some((e) => e.textContent === n))`, { what: "the test folder's rows" });
+        await drag("moved.txt", 0, "Move");
+        await until(() => existsSync(join(dir, "target", "moved.txt")) && !existsSync(join(dir, "moved.txt")), "not moved into the folder");
+        await t.c.waitFor(`![...document.querySelectorAll(".files .row .name")].some((e) => e.textContent === "moved.txt")`, { what: "the moved file gone from the list" });
+        await drag("copied.txt", 2, "Copy");
+        await until(() => existsSync(join(dir, "target", "copied.txt")), "not copied into the folder with Ctrl");
+        assert(existsSync(join(dir, "copied.txt")), "Ctrl moved it instead of copying");
+      } finally {
+        if (held) await mouse("mouseReleased", held.at, { button: "left", buttons: 0, clickCount: 1, modifiers: held.modifiers }).catch(() => {});
+        await go(t, t.root);
+        rmSync(dir, { recursive: true, force: true });
+      }
+    },
+  },
+  {
+    name: "drops from other apps: a copy-only app's file is copied, Explorer's moved, and the banner says which",
+    async run(t) {
+      // Through Ferret's real drop target (src-tauri/src/filedrop.rs), fed as Windows would.
+      const dir = t.p("drop-in");
+      const src = join(dir, "from-app");
+      mkdirSync(join(dir, "target"), { recursive: true });
+      mkdirSync(src, { recursive: true });
+      for (const n of ["mail.png", "explorer.png", "ctrl.png", "keep.png", "own.png"]) writeFileSync(join(src, n), n);
+      const COPY = 1, MOVE = 2, EXPLORER = 7;
+      const at = (expr) => t.c.eval(`(() => { const el = ${expr}; if (!el) return null; const b = el.getBoundingClientRect(); return { x: b.left + Math.min(60, b.width / 2), y: b.top + b.height / 2 }; })()`);
+      const step = (step, file, p, allowed, keys = {}) =>
+        t.c.eval(`window.__TAURI_INTERNALS__.invoke("e2e_drop", ${JSON.stringify({ step, paths: file ? [join(src, file)] : [], x: p.x, y: p.y, allowed, ctrl: !!keys.ctrl, shift: !!keys.shift, own: !!keys.own })})`);
+      const banner = `(document.querySelector(".drop-banner")?.textContent ?? "")`;
+      const until = async (ok, what) => {
+        const began = Date.now();
+        while (!ok() && Date.now() - began < 8000) await sleep(150);
+        assert(ok(), what);
+      };
+      /** Holds `file` over `p` as a drag from an app allowing `allowed`; checks the banner, then the cursor Windows would show. */
+      const hover = async (file, p, allowed, keys, text, cursor) => {
+        await step("enter", file, p, allowed, keys);
+        await step("over", null, p, allowed, keys);
+        await t.c.waitFor(`${banner} === ${JSON.stringify(text)}`, { what: `the banner “${text}” (it says “${await t.c.eval(banner)}”)` });
+        await sleep(150); // the page tells the drop target what the cursor shows
+        const shown = await step("over", null, { x: p.x + 1, y: p.y }, allowed, keys);
+        assert(shown === cursor, `the cursor shows effect ${shown}, not ${cursor}, for “${text}”`);
+      };
+      const dropped = async (file, p, allowed, keys = {}) => {
+        const told = await step("drop", file, p, allowed, keys);
+        // A source told "moved" may delete its original itself: the drop never says so.
+        assert(told === (allowed & COPY ? COPY : 0), `the drop told the app ${told}`);
+        await t.c.waitFor(`!document.querySelector(".drop-banner")`, { what: "the banner gone after the drop" });
+      };
+      const keepPath = join(src, "keep.png");
+      try {
+        await go(t, dir);
+        await t.c.waitFor(`["target", "from-app"].every((n) => [...document.querySelectorAll(".files .row .name")].some((e) => e.textContent === n))`, { what: "the test folder's rows" });
+        const target = await at(`[...document.querySelectorAll(".files .row")].find((r) => r.querySelector(".name")?.textContent === "target")`);
+        assert(target, "no “target” row");
+
+        // A mail client, browser or editor only allows a copy: copied even on the same drive.
+        await hover("mail.png", target, COPY, {}, "Drop here to copy into target: the app they come from only allows a copy", COPY);
+        await dropped("mail.png", target, COPY);
+        await until(() => existsSync(join(dir, "target", "mail.png")), "the copy-only app's file wasn't copied");
+        await sleep(300);
+        assert(existsSync(join(src, "mail.png")), "the copy-only app's file was moved out of its folder");
+
+        // Explorer allows copy, move and link: the same drive moves.
+        await hover("explorer.png", target, EXPLORER, {}, "Drop here to move into target", MOVE);
+        await dropped("explorer.png", target, EXPLORER);
+        await until(() => existsSync(join(dir, "target", "explorer.png")) && !existsSync(join(src, "explorer.png")), "Explorer's file wasn't moved");
+
+        // Ctrl copies.
+        await hover("ctrl.png", target, EXPLORER, { ctrl: true }, "Drop here to copy into target", COPY);
+        await dropped("ctrl.png", target, EXPLORER, { ctrl: true });
+        await until(() => existsSync(join(dir, "target", "ctrl.png")), "Ctrl didn't copy");
+        assert(existsSync(join(src, "ctrl.png")), "Ctrl moved it");
+
+        // Ferret's own drag, out of the window and back in: it only offers a copy, but moves as inside the window.
+        await hover("own.png", target, COPY, { own: true }, "Drop here to move into target", COPY);
+        await dropped("own.png", target, COPY, { own: true });
+        await until(() => existsSync(join(dir, "target", "own.png")) && !existsSync(join(src, "own.png")), "Ferret's own drag back in wasn't moved");
+
+        // The Recycle Bin can't take a copy-only app's file.
+        const bin = await at(`document.querySelector('.side-item[data-drop="shell:RecycleBinFolder"]')`);
+        if (bin) {
+          await hover("keep.png", bin, COPY, {}, "The app these come from only lets them be copied, so they can't go to the Recycle Bin", 0);
+          await dropped("keep.png", bin, COPY);
+          await sleep(800);
+          assert(existsSync(keepPath), "the copy-only app's file went to the Recycle Bin");
+        } else t.note("no Recycle Bin in the sidebar: its part skipped");
+
+        // Leaving takes the banner away.
+        await step("enter", "keep.png", target, COPY);
+        await t.c.waitFor(`!!document.querySelector(".drop-banner")`, { what: "the banner" });
+        await step("leave", null, target, COPY);
+        await t.c.waitFor(`!document.querySelector(".drop-banner")`, { what: "the banner gone after leaving" });
+      } finally {
+        await step("leave", null, { x: 0, y: 0 }, 0).catch(() => {});
+        // A failed Recycle Bin check left the file in the user's Recycle Bin: put it back.
+        if (!existsSync(keepPath)) await t.c.eval(`${T}.api.restoreFromTrash(${JSON.stringify([keepPath])})`).catch(() => {});
+        await go(t, t.root);
+        rmSync(dir, { recursive: true, force: true });
+      }
+    },
+  },
+  {
     name: "keyboard: the list reports its selection, and Shift+F10 opens the focused item's menu",
     async run(t) {
       await t.c.eval(`document.querySelector(".files")?.focus()`);

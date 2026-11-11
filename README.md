@@ -11,9 +11,8 @@
 
 <p align="center">
   <img alt="Windows 10/11" src="https://img.shields.io/badge/Windows-10%20%7C%2011-0078D4?logo=windows&logoColor=white">
-  <img alt="Tauri 2" src="https://img.shields.io/badge/Tauri-2-24C8DB?logo=tauri&logoColor=white">
-  <img alt="Rust" src="https://img.shields.io/badge/Rust-backend-B7410E?logo=rust&logoColor=white">
-  <img alt="SolidJS" src="https://img.shields.io/badge/SolidJS-UI-2C4F7C?logo=solid&logoColor=white">
+  <img alt="Rust" src="https://img.shields.io/badge/Rust-all%20the%20way-B7410E?logo=rust&logoColor=white">
+  <img alt="GPUI" src="https://img.shields.io/badge/GPUI-native%20UI-6E56CF">
 </p>
 
 <p align="center">
@@ -53,7 +52,7 @@ Right-click → **Compress video…** / **Compress picture…** opens an editor 
 - Asks before a rename changes a file's extension
 - Recycle Bin you can browse and restore from
 - Asks for admin rights only when a protected folder needs it, and any window can restart as administrator with its tabs intact
-- Drag files to and from other apps, including switching apps with `Alt+Tab` mid-drag
+- Drag files to and from other apps, including switching apps with `Alt+Tab` mid-drag. Files dropped in follow Explorer's rule: on the same drive they're moved (`Ctrl` copies, `Shift` moves), but an app that only lets its files be copied (mail, browsers, editors) always keeps its own, and the banner says which will happen before you let go
 - Middle-click autoscroll, like Explorer: press the mouse wheel and move away from that point to scroll (hold it, or click once to follow the mouse until the next click)
 - Windows 11-style menus, and each window is named after its folder in the taskbar and `Alt+Tab`, like Explorer
 - Optional: make Ferret the default file manager (Win+E, folder double-clicks), with a one-click switch back. Apps' "Show in folder" opens Ferret too, with the file selected when the app passes it to Explorer: a small background helper swaps in Ferret before Explorer's window appears, and Control Panel and other non-folder windows stay in Explorer. Uninstalling Ferret gives folders back to Explorer
@@ -109,25 +108,29 @@ ferret-indexer --install | --uninstall | --status | --query <text> | --sizes <fo
 
 ## Development
 
-**Requirements:** Windows 10/11, [Rust](https://rustup.rs) with its Linux target (`rustup target add x86_64-unknown-linux-musl`, for the WSL folder-size helper), Node.js 22.12 or newer (an LTS version, like 24 or 26) with Yarn 4, and WebView2 (included with Windows 11). Yarn comes through Corepack: `npm install -g corepack` then `corepack enable`, and the project picks its own Yarn version (`packageManager` in `package.json`).
+Ferret is a native Rust app drawn with [GPUI](https://www.gpui.rs) (Zed's UI framework), in `ferret-gpui/`. The first versions, up to 0.9.7, were a Tauri app with a SolidJS UI (`src/`, `src-tauri/`): it's kept as an archive for comparison, and its core (`src-tauri/ferret-core/`) is shared.
+
+**Requirements:** Windows 10/11, [Rust](https://rustup.rs) with its Linux targets (`rustup target add x86_64-unknown-linux-musl aarch64-unknown-linux-musl`, for the folder-size helper inside WSL and on SSH servers), and the Windows SDK (`rc.exe`, for the exe's icon and version details). Releases also need [NSIS](https://nsis.sourceforge.io) (a Tauri build's cached copy in `%LOCALAPPDATA%\tauri\NSIS` works) and Node.js with `yarn` (the updater's signer comes from the repo's packages).
 
 ```powershell
-yarn                  # install
-yarn app:dev          # run the app with hot reload
-yarn tauri build      # release build + installer
-yarn test             # unit tests (yarn test:e2e for the end-to-end run)
+cd ferret-gpui
+cargo run --release   # run Ferret
+cargo test            # unit tests
 ```
 
-`app:dev` runs a development build under its own app identity (`com.ferret.dev`), with its own settings, a "Ferret (Dev)" window title and an icon with a DEV badge. It can run next to the installed app without the two being mixed up. Releases are published with `scripts/release.sh`.
+A build run from `target\` is a development copy: its settings live in `%TEMP%\ferret-gpui` (never the installed app's), it shows a DEV badge and the DEV icon, and it never takes over as the default file manager or updates itself. Releases are published with `scripts/release.sh`: tests, a release build of `ferret.exe` and `ferret-indexer.exe`, a smoke test, the installer (`ferret-gpui/installer/ferret.nsi`), signatures and the updater feed. The installer and feed are the ones the Tauri app used, so installed Tauri copies update into the GPUI app with their settings.
+
+The archived Tauri app still builds: `yarn` then `yarn app:dev` (development) or `yarn tauri build`. Its release script is in `scripts/archive/`.
 
 | Path | What's there |
 | --- | --- |
-| `src/` | UI (SolidJS + TypeScript) |
+| `ferret-gpui/` | The app: its UI in GPUI on ferret-core (`src/`), the installer (`installer/`), the updater (`src/update.rs`) |
+| `src/` | Archived Tauri app's UI (SolidJS + TypeScript) |
 | `src-tauri/ferret-core/` | Backend without a UI (no Tauri): file operations, shell integration, archives, previews, SSH |
 | `src-tauri/ferret-core/src/search/` | Search engine, MFT/USN indexer, named-pipe protocol |
 | `src-tauri/ferret-core/src/redirect.rs` | Background helper that opens Explorer's folder windows in Ferret |
 | `src-tauri/ferret-core/src/media.rs` | Video (Media Foundation transcoder) and picture (WIC) compression |
-| `src-tauri/src/` | Tauri shell: the window, the commands the UI calls (`cmd/`), the `fs://` and `thumb://` schemes |
-| `src-tauri/src/bin/ferret-indexer.rs` | Entry point of the indexer service |
+| `src-tauri/src/` | Archived Tauri shell: the window, the commands the UI calls (`cmd/`), the `fs://` and `thumb://` schemes, the drop target for files from other apps (`filedrop.rs`) |
+| `ferret-gpui/src/bin/ferret-indexer.rs` | Entry point of the indexer service (the archived app's is `src-tauri/src/bin/`) |
 | `src-tauri/wsl-size` | Linux program that counts folder sizes inside WSL (static, built into the app) |
-| `src-tauri/vendor/drag` | Patched copy of the `drag` crate (dragging files out of Ferret) |
+| `src-tauri/vendor/drag` | Patched copy of the `drag` crate (dragging files out of Ferret; tells the drop target a drag is Ferret's own) |

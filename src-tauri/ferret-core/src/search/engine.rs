@@ -85,9 +85,9 @@ pub struct Volume {
     /// MFT volumes: every folder's size (sizes.rs), once the file table has been read.
     pub sizes: RwLock<Option<super::sizes::Tree>>,
     pub ready: AtomicBool,
-    progress: AtomicU32,
+    pub progress: AtomicU32,
     /// Live entry count published by builders (readable without the lock).
-    entries: AtomicU64,
+    pub entries: AtomicU64,
 }
 
 impl Volume {
@@ -133,8 +133,8 @@ impl Volume {
 
 #[derive(Default)]
 pub struct Engine {
-    volumes: RwLock<Vec<Arc<Volume>>>,
-    cache: Mutex<Option<Arc<QueryCache>>>,
+    pub volumes: RwLock<Vec<Arc<Volume>>>,
+    pub cache: Mutex<Option<Arc<QueryCache>>>,
 }
 
 pub const DEFAULT_LIMIT: u32 = 50;

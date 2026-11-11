@@ -2,12 +2,11 @@ import { ArchiveRestore, Check, Copy, FileArchive, FilePlus, Minimize2, MoveRigh
 import { For, Show } from "solid-js";
 import { Dynamic } from "solid-js/web";
 import { api } from "../lib/api";
-import { drag, dragLabel, externalDrag } from "../lib/drag";
+import { drag, dragLabel, externalDrag, externalDragLabel } from "../lib/drag";
 import { formatSize } from "../lib/format";
 import { jobs, NO_BIN } from "../lib/ops";
 import { friendly } from "../lib/state";
 import { createSignal, onCleanup } from "solid-js";
-import { basename } from "../lib/path";
 
 const ICON: Record<string, any> = {
   copy: Copy, move: MoveRight, delete: Trash2, recycle: Trash2, extract: PackageOpen, compress: FileArchive,
@@ -109,11 +108,15 @@ export function DragGhost() {
           </div>
         )}
       </Show>
-      <Show when={externalDrag()}>
-        {(x) => (
-          <div class="drop-banner">
-            Drop {x().count > 1 ? `${x().count} items` : "here"} to copy into <b>{x().target ? basename(x().target!) : "this folder"}</b>
-          </div>
+      <Show when={externalDrag() && externalDragLabel(externalDrag()!)}>
+        {(l) => (
+          <Show when={l().lead}>
+            <div class="drop-banner">
+              {l().lead}
+              <Show when={l().name}><b>{l().name}</b></Show>
+              {l().tail}
+            </div>
+          </Show>
         )}
       </Show>
     </>

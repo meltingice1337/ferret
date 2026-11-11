@@ -286,13 +286,13 @@ pub fn clear_folder_view(conn: &Connection, path: &str) -> rusqlite::Result<()> 
     Ok(())
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct FolderView {
-    path: String,
-    view: Value,
-    recursive: bool,
-    updated_at: i64,
+    pub path: String,
+    pub view: Value,
+    pub recursive: bool,
+    pub updated_at: i64,
 }
 
 pub fn list_folder_views(conn: &Connection) -> rusqlite::Result<Vec<FolderView>> {
@@ -310,13 +310,13 @@ pub fn list_folder_views(conn: &Connection) -> rusqlite::Result<Vec<FolderView>>
 
 // ---------- favorites ----------
 
-#[derive(Serialize)]
+#[derive(Serialize, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct Favorite {
-    path: String,
-    name: String,
-    is_dir: bool,
-    color: Option<String>,
+    pub path: String,
+    pub name: String,
+    pub is_dir: bool,
+    pub color: Option<String>,
 }
 
 pub fn favorites(conn: &Connection) -> rusqlite::Result<Vec<Favorite>> {
@@ -359,12 +359,12 @@ pub fn reorder_favorites(conn: &mut Connection, ordered: &[String]) -> rusqlite:
 
 // ---------- recents ----------
 
-#[derive(Serialize)]
+#[derive(Serialize, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct Recent {
-    path: String,
-    last_opened: i64,
-    count: i64,
+    pub path: String,
+    pub last_opened: i64,
+    pub count: i64,
 }
 
 /// Folders you use most come first: visits weighted by how recent they are (like Explorer's

@@ -23,16 +23,16 @@ const MAX_COLS: usize = 200;
 #[serde(rename_all = "camelCase")]
 pub struct SheetPreview {
     /// Every sheet's name, in workbook order.
-    sheets: Vec<String>,
+    pub sheets: Vec<String>,
     /// The sheet shown.
-    sheet: usize,
+    pub sheet: usize,
     /// Cell text row by row, starting at `first_row` / `first_col` (0-based) of the sheet.
-    rows: Vec<Vec<String>>,
-    first_row: u32,
-    first_col: u32,
+    pub rows: Vec<Vec<String>>,
+    pub first_row: u32,
+    pub first_col: u32,
     /// The sheet's used size (more than `rows` holds when it's cut).
-    total_rows: usize,
-    total_cols: usize,
+    pub total_rows: usize,
+    pub total_cols: usize,
 }
 
 pub async fn sheet_preview(path: String, sheet: Option<usize>) -> Result<SheetPreview, String> {
@@ -117,88 +117,88 @@ const EMU_PER_PT: f64 = 12_700.0;
 #[serde(rename_all = "camelCase")]
 pub struct Deck {
     /// Slide size in EMU (914 400 to the inch).
-    width: i64,
-    height: i64,
-    slides: Vec<Slide>,
+    pub width: i64,
+    pub height: i64,
+    pub slides: Vec<Slide>,
     /// Slides in the deck (more than `slides` holds when it's cut).
-    total: usize,
+    pub total: usize,
 }
 
 #[derive(Serialize, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct Slide {
     /// CSS colour.
-    background: Option<String>,
-    background_image: Option<String>,
-    shapes: Vec<Shape>,
+    pub background: Option<String>,
+    pub background_image: Option<String>,
+    pub shapes: Vec<Shape>,
     /// Hidden in the slide show.
-    hidden: bool,
+    pub hidden: bool,
 }
 
 #[derive(Serialize, Default, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct Shape {
     /// Position and size in EMU.
-    x: i64,
-    y: i64,
-    w: i64,
-    h: i64,
+    pub x: i64,
+    pub y: i64,
+    pub w: i64,
+    pub h: i64,
     /// Degrees, clockwise.
-    rot: f64,
-    flip_h: bool,
-    flip_v: bool,
+    pub rot: f64,
+    pub flip_h: bool,
+    pub flip_v: bool,
     /// Preset geometry ("rect", "ellipse", "roundRect", "line"…).
-    geom: String,
-    fill: Option<String>,
-    line: Option<String>,
+    pub geom: String,
+    pub fill: Option<String>,
+    pub line: Option<String>,
     /// Outline width in points.
-    line_w: f64,
+    pub line_w: f64,
     /// Picture file, extracted to the cache.
-    image: Option<String>,
+    pub image: Option<String>,
     /// The part of the picture shown: left, top, right, bottom cut off, as fractions.
-    crop: Option<[f64; 4]>,
-    paras: Vec<Para>,
+    pub crop: Option<[f64; 4]>,
+    pub paras: Vec<Para>,
     /// Vertical anchor of the text: "t", "ctr" or "b".
-    anchor: String,
+    pub anchor: String,
     /// Text insets in EMU: left, top, right, bottom.
-    inset: [i64; 4],
+    pub inset: [i64; 4],
     /// Table cells' text, row by row.
-    table: Option<Vec<Vec<String>>>,
+    pub table: Option<Vec<Vec<String>>>,
     /// What stands in for content not drawn ("Chart", "SmartArt").
-    label: Option<String>,
+    pub label: Option<String>,
     /// Vertical text: "vert" (top to bottom), "vert270" (bottom to top).
-    vert: Option<String>,
+    pub vert: Option<String>,
 }
 
 #[derive(Serialize, Default, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct Para {
     /// "l", "ctr", "r" or "just".
-    align: String,
-    level: u32,
-    bullet: Option<String>,
-    runs: Vec<Run>,
+    pub align: String,
+    pub level: u32,
+    pub bullet: Option<String>,
+    pub runs: Vec<Run>,
     /// Size (pt) of an empty paragraph's line.
-    size: f64,
+    pub size: f64,
     /// Line spacing, as a multiple of single spacing.
-    line: f64,
+    pub line: f64,
     /// Space above, in points (not for a text box's first paragraph).
-    before: f64,
+    pub before: f64,
 }
 
 #[derive(Serialize, Default, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct Run {
-    text: String,
+    pub text: String,
     /// Points.
-    size: f64,
-    bold: bool,
-    italic: bool,
-    underline: bool,
-    color: Option<String>,
-    font: Option<String>,
+    pub size: f64,
+    pub bold: bool,
+    pub italic: bool,
+    pub underline: bool,
+    pub color: Option<String>,
+    pub font: Option<String>,
     /// "all" or "small" capitals.
-    caps: Option<String>,
+    pub caps: Option<String>,
 }
 
 pub async fn slides_preview(path: String) -> Result<Deck, String> {

@@ -12,11 +12,11 @@ use std::sync::Arc;
 use crate::{paths, recycle};
 
 pub struct DirWatcher {
-    watcher: Option<RecommendedWatcher>,
+    pub watcher: Option<RecommendedWatcher>,
     /// path key → display path
-    watched: HashMap<String, String>,
+    pub watched: HashMap<String, String>,
     /// Keys of watched Recycle Bin folders (events there mean "the Recycle Bin changed").
-    bins: Arc<Mutex<HashSet<String>>>,
+    pub bins: Arc<Mutex<HashSet<String>>>,
 }
 
 impl DirWatcher {

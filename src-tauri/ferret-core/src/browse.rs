@@ -21,12 +21,12 @@ fn with_db<T>(f: impl FnOnce(&mut Connection) -> rusqlite::Result<T>) -> Res<T> 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Bootstrap {
-    settings: Value,
-    session: Option<Value>,
-    places: places::Places,
-    favorites: Vec<db::Favorite>,
-    recents: Vec<db::Recent>,
-    connections: Vec<crate::remote::Connection>,
+    pub settings: Value,
+    pub session: Option<Value>,
+    pub places: places::Places,
+    pub favorites: Vec<db::Favorite>,
+    pub recents: Vec<db::Recent>,
+    pub connections: Vec<crate::remote::Connection>,
 }
 
 pub async fn bootstrap() -> Res<Bootstrap> {
@@ -47,10 +47,10 @@ pub async fn bootstrap() -> Res<Bootstrap> {
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SharedState {
-    settings: Value,
-    favorites: Vec<db::Favorite>,
-    recents: Vec<db::Recent>,
-    connections: Vec<crate::remote::Connection>,
+    pub settings: Value,
+    pub favorites: Vec<db::Favorite>,
+    pub recents: Vec<db::Recent>,
+    pub connections: Vec<crate::remote::Connection>,
 }
 
 /// What other Ferret windows may have changed (re-read when a window gets focus).
@@ -68,9 +68,9 @@ pub async fn get_places() -> Res<places::Places> {
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DirListing {
-    path: String,
-    entries: Vec<listing::Entry>,
-    resolved: db::ResolvedView,
+    pub path: String,
+    pub entries: Vec<listing::Entry>,
+    pub resolved: db::ResolvedView,
 }
 
 pub async fn list_dir(path: String) -> Res<DirListing> {
@@ -134,9 +134,9 @@ pub async fn list_dir(path: String) -> Res<DirListing> {
 
 #[derive(Serialize)]
 pub struct ResolvedInput {
-    path: String,
+    pub path: String,
     /// "dir" | "file" | "missing"
-    kind: &'static str,
+    pub kind: &'static str,
 }
 
 /// Turns whatever was typed in the path bar into a real path: `~`, `%VAR%`,
