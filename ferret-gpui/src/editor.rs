@@ -823,6 +823,7 @@ impl Editor {
                 e.check = Some(match result {
                     Ok(c) => {
                         let (level, text) = quality::verdict(c.score);
+                        log::info!(target: "ferret::perf", "quality check: worst SSIM {:.4} at {:.1} s, in {} ms ({})", c.score, c.at, started.elapsed().as_millis(), c.detail);
                         if let Some(out) = &e.bench {
                             bench::write_to(out, "editor_check_score", format!("{:.4}", c.score));
                             bench::write_to(out, "editor_check_ms", started.elapsed().as_millis());

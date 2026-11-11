@@ -38,8 +38,6 @@ pub enum Sub {
     Items(Vec<MenuItem>),
     /// Filled in when it opens (Open with ▸, New ▸ with Windows' own types…).
     Lazy(Rc<dyn Fn(&mut Ferret, usize, &mut Context<Ferret>)>),
-    Loading,
-    Failed(SharedString),
 }
 
 use std::rc::Rc;
@@ -283,8 +281,6 @@ impl Ferret {
         let (items, load) = match sub {
             Sub::Items(items) => (tidy(items), None),
             Sub::Lazy(load) => (vec![loading_item()], Some(load)),
-            Sub::Loading => (vec![loading_item()], None),
-            Sub::Failed(e) => (vec![item(e, action(|_, _, _| {})).disabled(true)], None),
         };
         self.place_level(depth + 1, at, items, window);
         // Filled in once the level exists ("Loading…" until then): a loader that has its items
@@ -322,16 +318,6 @@ impl Ferret {
         let y = at.y.min(px((vw.height.as_f32() - h - 6.).max(6.)));
         menu.levels.truncate(depth);
         menu.levels.push(Level::new(point(x, y), items));
-    }
-
-    /// A lazily loaded submenu's items arrived.
-    pub fn fill_sub(&mut self, depth: usize, items: Vec<MenuItem>, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(menu) = self.menu.as_ref() else { return };
-        let Some(level) = menu.levels.get(depth) else { return };
-        let at = level.at;
-        let items = if items.is_empty() { vec![item("Nothing here", action(|_, _, _| {})).disabled(true)] } else { tidy(items) };
-        self.place_level(depth, at, items, window);
-        cx.notify();
     }
 
     fn run_item(&mut self, depth: usize, ix: usize, window: &mut Window, cx: &mut Context<Self>) {
@@ -1225,7 +1211,7 @@ impl Ferret {
         cx.notify();
     }
 
-    /// Like fill_sub, without a window at hand (the next frame places it).
+    /// A lazily loaded submenu's items arrived (the next frame places them).
     pub fn fill_sub_now(&mut self, depth: usize, items: Vec<MenuItem>, cx: &mut Context<Self>) {
         let Some(menu) = self.menu.as_mut() else { return };
         let Some(level) = menu.levels.get_mut(depth) else { return };

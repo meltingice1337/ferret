@@ -335,6 +335,10 @@ pub struct Ferret {
     pub volume_bounds: std::rc::Rc<std::cell::Cell<gpui::Bounds<gpui::Pixels>>>,
     pub settings_scroll: gpui::ScrollHandle,
     pub folder_views: Vec<db::FolderView>,
+    /// Settings' list of remembered folder views is shown (this window's session; starts folded).
+    pub folder_views_open: bool,
+    /// The Dropzone's drop slot as last drawn (sidebar.rs `dropzone`), for its animations.
+    pub dz_slot: std::cell::Cell<crate::sidebar::DzSlot>,
     pub default_status: Option<ferret_core::integration::DefaultStatus>,
     /// Settings changed the window backdrop: applied at the next frame.
     pub backdrop_changed: bool,
@@ -565,6 +569,8 @@ impl Ferret {
             volume_bounds: Default::default(),
             settings_scroll: gpui::ScrollHandle::new(),
             folder_views: Vec::new(),
+            folder_views_open: false,
+            dz_slot: Default::default(),
             default_status: None,
             backdrop_changed: true,
             dwm_dark: None,

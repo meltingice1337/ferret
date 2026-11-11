@@ -1,0 +1,4 @@
+# rustfmt: the style the code is written in (long lines, short constructs kept on one line), for
+# an editor that formats on save. Not enforced: the code isn't run through `cargo fmt` as a whole.
+max_width = 160
+use_small_heuristics = "Max"

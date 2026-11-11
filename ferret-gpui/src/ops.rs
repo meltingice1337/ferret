@@ -1574,22 +1574,3 @@ pub fn jobs_view(f: &Ferret, cx: &mut Context<Ferret>) -> Option<AnyElement> {
     )
 }
 
-trait DeferFocus {
-    fn defer_in_window_or(&mut self, input: gpui::Entity<TextInput>);
-}
-
-impl DeferFocus for Context<'_, Ferret> {
-    /// Focuses a field that appears this frame (rename) once it's drawn.
-    fn defer_in_window_or(&mut self, input: gpui::Entity<TextInput>) {
-        self.spawn(async move |this, cx| {
-            cx.background_executor().timer(Duration::from_millis(16)).await;
-            let _ = this;
-            let _ = cx.update(|cx| {
-                if let Some(w) = cx.active_window() {
-                    let _ = w.update(cx, |_, window, cx| crate::input::focus(&input, window, cx));
-                }
-            });
-        })
-        .detach();
-    }
-}

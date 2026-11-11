@@ -616,9 +616,8 @@ const STEP: f64 = 0.5;
 pub struct FrameScore {
     /// When, in the sample (seconds).
     pub t: f64,
-    /// SSIM against the original's frame expected at that moment.
-    pub expected: f64,
-    /// SSIM against the best of the original's frames within `NEAR` of it.
+    /// SSIM against the best of the original's frames within `NEAR` of it (the one expected at
+    /// that moment included).
     pub best: f64,
     /// Which one that was (frames from the expected one).
     pub offset: i32,
@@ -688,7 +687,7 @@ pub fn frame_scores(original: &str, rotation: u32, sample: &str, at: f64, dur: f
         }
         let expected = score(&near[NEAR as usize], &samples[k]);
         let best = if pick.1 == NEAR as usize { expected } else { score(&near[pick.1], &samples[k]).max(expected) };
-        scores.push(FrameScore { t: *t, expected, best, offset: pick.1 as i32 - NEAR });
+        scores.push(FrameScore { t: *t, best, offset: pick.1 as i32 - NEAR });
     }
     let moved = scores.iter().filter(|f| f.offset != 0).count();
     let detail = format!(
@@ -784,18 +783,4 @@ mod tests {
         assert_eq!((r.w, r.h), (2, 3));
         assert_eq!(r.y, vec![3., 0., 4., 1., 5., 2.]);
     }
-}
-
-/// Brightness of `path`'s frames at `times` (seconds), upright, at `tw` × `th` (diagnostics and
-/// tests: what the check compares).
-pub fn luma_frames(path: &str, rotation: u32, times: &[f64], tw: usize, th: usize) -> Result<Vec<Luma>, String> {
-    let e = |e: windows::core::Error| e.to_string();
-    unsafe {
-        let _ = CoInitializeEx(None, COINIT_MULTITHREADED);
-        MFStartup(MF_VERSION, MFSTARTUP_FULL).map_err(e)?;
-    }
-    let mut r = Reader::open_luma(path).map_err(e)?;
-    let turned = rotation == 90 || rotation == 270;
-    let (w, h) = if turned { (th, tw) } else { (tw, th) };
-    Ok(r.frames(times, w, h).map_err(e)?.into_iter().map(|l| rotate(l, rotation)).collect())
 }

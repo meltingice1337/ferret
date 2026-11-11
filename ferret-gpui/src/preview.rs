@@ -96,6 +96,24 @@ impl Ferret {
         if self.quicklook {
             self.warm_neighbours(cx);
         }
+        // A picture's neighbours: their thumbnails made now, so the stand-in shown while one
+        // loads is sharp (it was the list's 64 px icon blown up, then the photo: a flash on every
+        // switch, 2026-11-11).
+        let near: Vec<String> = {
+            let p = self.pane();
+            match (p.selected, p.cursor_row()) {
+                (Some(i), Some(r)) if r.kind == Kind::Image => [i.wrapping_sub(1), i + 1, i + 2]
+                    .into_iter()
+                    .filter_map(|i| p.rows.get(i))
+                    .filter(|n| n.kind == Kind::Image && !n.e.in_archive && !ferret_core::paths::is_remote(&n.e.path))
+                    .map(|n| n.e.path.clone())
+                    .collect(),
+                _ => Vec::new(),
+            }
+        };
+        for n in near {
+            let _ = self.thumb(&n, 512, false, None, cx);
+        }
         let p = self.pane();
         let Some(r) = p.cursor_row().filter(|_| p.marked.len() <= 1) else {
             self.preview_want = None;
@@ -107,7 +125,14 @@ impl Ferret {
         }
         // PDFs are drawn for the width they're shown at (the pane, or Quick Look): another width reads them again.
         let shown_w = if self.quicklook { (self.viewport_w - 120.).max(300.) - 50. } else { self.preview_w - 28. };
-        let page_px = if r.kind == Kind::Pdf { ((shown_w - 12.).max(80.) * self.scale).round() as u32 } else { 0 };
+        let page_px = match r.kind {
+            Kind::Pdf => ((shown_w - 12.).max(80.) * self.scale).round() as u32,
+            // A picture is decoded for the size it's shown at (a 12 MP photo is 48 MB decoded;
+            // shown in the pane, a 1600 px copy is 8): 1.5× the width shown, 1600 px at least, up
+            // to 4096. Zoomed in, the original (the smaller copy stays on screen until it's read).
+            Kind::Image if self.preview_view.zoom <= 1.01 => (shown_w * self.scale * 1.5).clamp(1600., 4096.).round() as u32,
+            _ => 0,
+        };
         let key = format!("{}|{}|{}|{page_px}", r.e.path, r.e.modified.unwrap_or(0), r.e.size);
         if self.preview_data.as_ref().is_some_and(|l| l.key == key) || self.preview_want.as_ref().is_some_and(|(k, _)| *k == key) {
             return;
@@ -322,7 +347,7 @@ impl Ferret {
                     body
                 } else {
                     let key_ok = self.preview_data.as_ref().is_some_and(|l| l.key.starts_with(&format!("{path}|")));
-                    let loaded = key_ok && !matches!(self.preview_data.as_ref().unwrap().content, render::Content::Loading);
+                    let loaded = key_ok;
                     if key_ok {
                         let extra = render::facts(&self.preview_data.as_ref().unwrap().content);
                         facts.extend(extra.into_iter().map(|(k, v)| (k, SharedString::from(v))));
@@ -560,7 +585,19 @@ impl Ferret {
         }
         // Still loading: a picture shows its thumbnail meanwhile, where and as big as it will be
         // (a spinner on an empty pane flashed on every switch between pictures, 2026-11-11).
-        let loading = self.preview_data.as_ref().filter(|l| l.key.starts_with(&format!("{path}|"))).is_none_or(|l| matches!(l.content, Content::Loading));
+        let loading = self.preview_data.as_ref().filter(|l| l.key.starts_with(&format!("{path}|"))).is_none();
+        // Read but not decoded yet (GPUI decodes a picture the first time it's drawn, in the
+        // background, drawing nothing meanwhile): the stand-in stays until it is.
+        let undecoded = self
+            .preview_data
+            .as_ref()
+            .filter(|l| l.key.starts_with(&format!("{path}|")))
+            .and_then(|l| match &l.content {
+                Content::Picture { image, .. } => Some(image.clone()),
+                _ => None,
+            })
+            .is_some_and(|image| image.get_render_image(window, cx).is_none());
+        let loading = loading || undecoded;
         if loading {
             if let Some(stand_in) = self.picture_stand_in(path, kind, big, cx) {
                 return frame(stand_in);
@@ -580,7 +617,6 @@ impl Ferret {
         let mut want_text: Option<(String, usize)> = None;
         let me = cx.entity_id();
         let el: AnyElement = match &loaded.content {
-            Content::Loading => loading_view(kind, ext, width, big),
             Content::Picture { image, w, h } => self.picture_view(image.clone(), (*w, *h), big, cx),
             Content::Video(_) => message("Open it in your player"),
             Content::Audio(_, cover) => self.audio_view(path, cover.clone(), cx),

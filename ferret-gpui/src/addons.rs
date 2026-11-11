@@ -278,6 +278,8 @@ pub fn remove_ocr_pack() -> Result<bool, String> {
         return Err("FERRET_OCR_PACK_DIR is set: that folder is left alone".into());
     }
     cancel_ocr_download();
+    // The text reader (a helper process) may have the add-on's DLL loaded: stopped first.
+    crate::ocrhelper::stop();
     let mut s = state();
     s.read_disk();
     s.failed = None;
@@ -315,8 +317,9 @@ fn keep(s: &mut State) {
     s.removing = false;
 }
 
-/// ocr.rs loaded onnxruntime.dll from the pack: Windows keeps it locked until Ferret closes, so a
-/// removal now waits for the next start.
+/// ocr.rs loaded onnxruntime.dll from the pack: Windows keeps it locked until the process ends, so
+/// a removal now waits for the next start. Reading happens in the text reader (ocrhelper.rs), which
+/// `remove_ocr_pack` stops first, so in a window this only stays set by the `addon loaded` step.
 pub fn mark_ocr_loaded() {
     state().loaded = true;
 }

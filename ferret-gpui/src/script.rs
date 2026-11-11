@@ -6,6 +6,7 @@
 //!   sclick x y (Shift+click) | hscroll x y dx (sideways, as Shift+wheel or a trackpad)
 //!   drag x0 y0 x1 y1 | scroll x y dy | zoom x y dy (Ctrl+wheel) | wait ms | shot name | state | quit
 //!   down x y | hold x y | up x y (the left button in steps; mdown/mhold/mup: the middle one)
+//!   fenter x y path[|path] | fmove x y | fexit | fdrop x y (files dragged in) | owndrag on|off
 //!   settings [sidebar|addons|about] | addon download|cancel|remove|keep|verify|loaded
 //!   searchable [path] (a searchable copy of the PDF read with OCR)
 //!
@@ -139,6 +140,15 @@ async fn run(step: &str, this: &WeakEntity<Ferret>, cx: &mut AsyncWindowContext)
         "fmove" => dispatch(cx, PlatformInput::FileDrop(gpui::FileDropEvent::Pending { position: at(0) })),
         "fexit" => dispatch(cx, PlatformInput::FileDrop(gpui::FileDropEvent::Exited)),
         "fdrop" => dispatch(cx, PlatformInput::FileDrop(gpui::FileDropEvent::Submit { position: at(0) })),
+        // Files dragged from the window's own list come back over it as the same OLE drag
+        // (`fenter`…), marked as its own by `drag_out` (copy/move label by the pointer):
+        // `owndrag on|off` marks them so, without a real shell drag (it would follow the real mouse).
+        "owndrag" => {
+            let _ = this.update(cx, |f, cx| {
+                f.own_drag = rest.trim() != "off";
+                cx.notify();
+            });
+        }
         "scroll" | "zoom" => dispatch(
             cx,
             PlatformInput::Scroll(ScrollEvent {
@@ -263,7 +273,7 @@ impl Ferret {
             crate::dialogs::Dialog::BatchRename(_) => "batch-rename".into(),
             crate::dialogs::Dialog::Prompt { title, .. } => format!("prompt: {title}"),
             crate::dialogs::Dialog::Remote { title, .. } => format!("remote: {title}"),
-            crate::dialogs::Dialog::Settings(_) => "settings".into(),
+            crate::dialogs::Dialog::Settings => "settings".into(),
             crate::dialogs::Dialog::Server(_) => "server-form".into(),
             crate::dialogs::Dialog::NetworkAdd(_) => "network-form".into(),
             crate::dialogs::Dialog::Intro(_) => "intro".into(),

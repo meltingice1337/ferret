@@ -58,7 +58,6 @@ pub struct Span {
 }
 
 pub enum Content {
-    Loading,
     Picture { image: Arc<Image>, w: u32, h: u32 },
     Video(ferret_core::media::VideoInfo),
     Audio(ferret_core::media::AudioInfo, Option<Arc<Image>>),
@@ -97,7 +96,6 @@ pub struct View {
     pub hex: bool,
     pub sort: Option<(usize, bool)>,
     pub open: HashSet<String>,
-    pub sheet: usize,
     pub zoom: f32,
     pub zoom_at: (f32, f32),
     /// The Word preview's Ctrl+wheel zoom (0 = 100 %).
@@ -250,8 +248,27 @@ pub fn highlight(text: &str, ext: &str, name: &str) -> Vec<Line> {
     out
 }
 
-fn plain_lines(text: &str) -> Vec<Line> {
-    text.lines().map(|l| Line { text: l.to_string().into(), colors: Vec::new() }).collect()
+/// A picture made to fit `long` px on its longest side, turned as its EXIF says (the copy has
+/// none): JPEG (quality 92) unless it has transparency (PNG, fast). GPUI keeps what it draws
+/// decoded, so a big photo drawn small cost its full size in memory (48 MB for 12 MP).
+fn smaller_picture(bytes: &[u8], long: u32) -> Option<Image> {
+    use image::ImageDecoder;
+    let reader = image::ImageReader::new(std::io::Cursor::new(bytes)).with_guessed_format().ok()?;
+    let mut decoder = reader.into_decoder().ok()?;
+    let orientation = decoder.orientation().unwrap_or(image::metadata::Orientation::NoTransforms);
+    let mut img = image::DynamicImage::from_decoder(decoder).ok()?;
+    img.apply_orientation(orientation);
+    let small = img.resize(long, long, image::imageops::FilterType::Triangle);
+    let mut out = Vec::new();
+    if small.color().has_alpha() {
+        let enc = image::codecs::png::PngEncoder::new_with_quality(&mut out, image::codecs::png::CompressionType::Fast, image::codecs::png::FilterType::Adaptive);
+        small.write_with_encoder(enc).ok()?;
+        Some(Image::from_bytes(ImageFormat::Png, out))
+    } else {
+        let enc = image::codecs::jpeg::JpegEncoder::new_with_quality(&mut out, 92);
+        image::DynamicImage::ImageRgb8(small.to_rgb8()).write_with_encoder(enc).ok()?;
+        Some(Image::from_bytes(ImageFormat::Jpeg, out))
+    }
 }
 
 /// Reads what the preview of `path` needs (runs off the UI thread).
@@ -291,6 +308,13 @@ pub fn load(path: &str, ext: &str, kind: Kind, size: u64, px: u32) -> Content {
                             if turned { (h, w) } else { (w, h) }
                         })
                         .unwrap_or((0, 0));
+                    // Much bigger than it's shown: a copy at that size instead (`px`: its longest
+                    // side; 0 for the original, zoomed in). Animated GIFs, icons and SVGs as they are.
+                    if px > 0 && !matches!(ext, "gif" | "svg" | "ico") && w.max(h) as f32 > px as f32 * 1.15 {
+                        if let Some(small) = smaller_picture(&b, px) {
+                            return Content::Picture { image: Arc::new(small), w, h };
+                        }
+                    }
                     Content::Picture { image: Arc::new(Image::from_bytes(format, b)), w, h }
                 }
                 None => Content::Nothing("Couldn't read this picture".into()),
@@ -691,13 +715,14 @@ fn pdf_open(path: &str) -> Result<windows::Data::Pdf::PdfDocument, PdfError> {
     Err(PdfError::Locked(others.len() + own.is_some() as usize))
 }
 
-/// Opens a PDF to read its scanned pages' text (ocr.rs), as the preview opens it (with the
-/// password that opened it, if any).
-pub(crate) fn pdf_open_for_reading(path: &str) -> Result<windows::Data::Pdf::PdfDocument, String> {
-    pdf_open(path).map_err(|e| match e {
+/// Opens a PDF with this password (or none): the OCR helper's way in (`ocrhelper.rs`), which
+/// doesn't share Ferret's memory of the passwords typed this session (Ferret passes the one).
+pub(crate) fn pdf_open_with(path: &str, password: Option<&str>) -> Result<windows::Data::Pdf::PdfDocument, String> {
+    let file = pdf_file(path).map_err(|e| match e {
         PdfError::Locked(_) => "it needs its password".to_string(),
         PdfError::Other(e) => e,
-    })
+    })?;
+    pdf_load(&file, password).map_err(|e| if wrong_password(&e) { "it needs its password".to_string() } else { e.message().to_string() })
 }
 
 /// Tries a typed password on a PDF; kept for the session if it opens it. Err(None): wrong

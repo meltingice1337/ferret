@@ -20,7 +20,7 @@
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, LazyLock, Mutex, OnceLock};
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 use windows::Data::Pdf::{PdfDocument, PdfPageRenderOptions};
 use windows::Globalization::Language;
@@ -32,7 +32,7 @@ use windows::core::HSTRING;
 use crate::pdftext::{PdfLine, Turn, UPRIGHT};
 
 /// Which reader read a page.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub enum Reader {
     Windows,
     Paddle,
@@ -357,22 +357,29 @@ mod paddle {
     impl Paddle {
         pub fn load(env: &ort::environment::Environment, dir: &Path) -> Result<Paddle, String> {
             let threads = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4).saturating_sub(2).clamp(1, 4);
-            let open = |name: &str| -> Result<Session, String> {
-                Session::builder(env)
+            // `pool`: ONNX Runtime's memory arena, which keeps the most it ever needed. The detector
+            // runs once a page on a big picture: without it, its large buffers go back after each
+            // page (FERRET_OCR_DET_ARENA=1 keeps it, to compare). The recognizer runs many small
+            // times a page, where the arena is what makes it fast.
+            let open = |name: &str, pool: bool| -> Result<Session, String> {
+                let mut b = Session::builder(env)
                     .map_err(s)?
                     .with_intra_threads(threads)
                     .map_err(s)?
                     // pages and lines differ in size every time: no per-size memory plan
                     .with_memory_pattern(false)
-                    .map_err(s)?
-                    .commit_from_file(dir.join(name).join("inference.onnx"))
-                    .map_err(s)
+                    .map_err(s)?;
+                if !pool {
+                    b = b.with_execution_providers([ort::ep::CPU::default().with_arena_allocator(false).build()]).map_err(s)?;
+                }
+                b.commit_from_file(dir.join(name).join("inference.onnx")).map_err(s)
             };
+            let det_pool = std::env::var("FERRET_OCR_DET_ARENA").is_ok_and(|v| v == "1");
             let dict = dict(&std::fs::read_to_string(dir.join("rec").join("inference.yml")).map_err(s)?);
             if dict.len() < 50 {
                 return Err("the recognizer's character list is missing".into());
             }
-            Ok(Paddle { det: open("det")?, rec: open("rec")?, ori: open("ori")?, dict })
+            Ok(Paddle { det: open("det", det_pool)?, rec: open("rec", true)?, ori: open("ori", false)?, dict })
         }
 
         /// Area-average shrink to (dw, dh), as planar BGR 0–255.
@@ -739,14 +746,18 @@ mod paddle {
     }
 }
 
-/// The add-on's reader, loaded on first use and let go after a minute unused (its memory, about
-/// 250 MB while reading, goes back).
-struct Loaded {
-    reader: paddle::Paddle,
-    used: Instant,
-}
+/// The add-on's reader, loaded on first use in the helper process (which quits when idle, and
+/// its memory with it).
+static PADDLE: LazyLock<Mutex<Option<paddle::Paddle>>> = LazyLock::new(|| Mutex::new(None));
+/// What the helper said about the add-on (Ferret's side: it never loads the add-on itself).
+static REPORTED: Mutex<Option<String>> = Mutex::new(None);
 
-static PADDLE: LazyLock<Mutex<Option<Loaded>>> = LazyLock::new(|| Mutex::new(None));
+/// The helper's word on the add-on, with each page it reads.
+pub(crate) fn set_reported_problem(problem: Option<String>) {
+    if let Ok(mut r) = REPORTED.lock() {
+        *r = problem;
+    }
+}
 /// ONNX Runtime, loaded once (a DLL stays loaded until Ferret closes).
 static ORT: OnceLock<Result<ort::environment::Environment, String>> = OnceLock::new();
 /// Why the add-on couldn't be used, and which copy of it (its manifest's time) that was: a pack
@@ -760,6 +771,9 @@ fn pack_stamp() -> Option<std::time::SystemTime> {
 
 /// Why the add-on's reader couldn't start (shown with the note over the page), if it couldn't.
 pub fn addon_problem() -> Option<String> {
+    if let Some(p) = REPORTED.lock().ok().and_then(|r| r.clone()) {
+        return Some(p);
+    }
     // ONNX Runtime itself not loading is for the session (a DLL loads once).
     if let Some(Err(e)) = ORT.get() {
         return Some(e.clone());
@@ -793,7 +807,7 @@ fn with_paddle<T>(f: impl FnOnce(&mut paddle::Paddle) -> Result<T, String>) -> O
             paddle::Paddle::load(env, &dir)
         })();
         match loaded {
-            Ok(reader) => *slot = Some(Loaded { reader, used: Instant::now() }),
+            Ok(reader) => *slot = Some(reader),
             Err(e) => {
                 log::warn!("ocr: the add-on's reader didn't start: {e}");
                 if let Ok(mut b) = PADDLE_BROKEN.lock() {
@@ -803,21 +817,7 @@ fn with_paddle<T>(f: impl FnOnce(&mut paddle::Paddle) -> Result<T, String>) -> O
             }
         }
     }
-    let l = slot.as_mut()?;
-    l.used = Instant::now();
-    Some(f(&mut l.reader))
-}
-
-/// Lets the add-on's reader go once it's been unused for a minute.
-fn release_later() {
-    std::thread::spawn(|| {
-        std::thread::sleep(Duration::from_secs(61));
-        if let Ok(mut slot) = PADDLE.lock() {
-            if slot.as_ref().is_some_and(|l| l.used.elapsed() >= Duration::from_secs(60)) {
-                *slot = None;
-            }
-        }
-    });
+    Some(f(slot.as_mut()?))
 }
 
 /// A page read by the add-on: turned upright first if it's sideways or upside down.
@@ -1074,45 +1074,46 @@ pub struct Run {
 
 /// Reads `pages` of the PDF at `path` in the background (the one nearest `run.near` next each
 /// time), calling `each` with every page read (or why it couldn't be), on that thread.
+/// One page read (in the helper process, `ocrhelper.rs`): drawn, read by the add-on when it's
+/// installed and works, else by Windows (`engines`: made the first time Windows reads).
+pub(crate) fn read_page(doc: &PdfDocument, page: u32, engines: &mut Option<Vec<OcrEngine>>) -> Result<(Reader, Vec<PdfLine>), String> {
+    let pic = draw(doc, page)?;
+    let mut windows = |pic: &Picture| -> Result<Vec<Found>, String> {
+        let e = engines.get_or_insert_with(windows_engines);
+        if e.is_empty() {
+            return Err("Windows has no text recognition languages installed".into());
+        }
+        windows_page(e, pic)
+    };
+    let (found, reader) = match paddle_page(&pic) {
+        Some(Ok(f)) => (f, Reader::Paddle),
+        Some(Err(e)) => {
+            log::warn!("ocr: the add-on couldn't read page {page}: {e}; Windows reads it");
+            (windows(&pic)?, Reader::Windows)
+        }
+        None => (windows(&pic)?, Reader::Windows),
+    };
+    Ok((reader, lines_of(found, pic.w as f32, pic.h as f32, reader)))
+}
+
+/// Reads `pages` of the PDF at `path` in the background (the one nearest `run.near` next each
+/// time), calling `each` with every page read (or why it couldn't be), on that thread. The
+/// reading itself happens in a helper process (`ocrhelper.rs`), which quits when idle: Windows'
+/// recognizer and the add-on's runtime stay loaded in whatever process used them, and this way
+/// that isn't Ferret.
 pub fn read_pages(path: String, pages: Vec<u32>, run: Arc<Run>, each: impl Fn(u32, Result<(Reader, Arc<Vec<PdfLine>>), String>) + Send + 'static) {
     std::thread::Builder::new()
         .name("ocr".into())
         .spawn(move || {
-            let _com = unsafe { windows::Win32::System::Com::CoInitializeEx(None, windows::Win32::System::Com::COINIT_MULTITHREADED) };
-            let doc = match crate::render::pdf_open_for_reading(&path) {
-                Ok(d) => d,
-                Err(e) => {
-                    for p in pages {
-                        each(p, Err(e.clone()));
-                    }
-                    return;
-                }
-            };
-            let engines = windows_engines();
+            let password = crate::pdftext::password_for(&path);
             let mut left = pages;
             let key = key_of(&path);
-            let mut used_paddle = false;
             while !left.is_empty() && !run.cancel.load(Ordering::Relaxed) {
                 let near = run.near.load(Ordering::Relaxed);
                 let k = (0..left.len()).min_by_key(|&k| (left[k] as i64 - near as i64).abs()).unwrap_or(0);
                 let page = left.remove(k);
                 let t = Instant::now();
-                let result = (|| -> Result<(Reader, Vec<PdfLine>), String> {
-                    let pic = draw(&doc, page)?;
-                    let (found, reader) = match paddle_page(&pic) {
-                        Some(Ok(f)) => {
-                            used_paddle = true;
-                            (f, Reader::Paddle)
-                        }
-                        Some(Err(e)) => {
-                            log::warn!("ocr: the add-on couldn't read page {page}: {e}; Windows reads it");
-                            (windows_page(&engines, &pic)?, Reader::Windows)
-                        }
-                        None if engines.is_empty() => return Err("Windows has no text recognition languages installed".into()),
-                        None => (windows_page(&engines, &pic)?, Reader::Windows),
-                    };
-                    Ok((reader, lines_of(found, pic.w as f32, pic.h as f32, reader)))
-                })();
+                let result = crate::ocrhelper::read(&path, password.as_deref(), page);
                 log::info!("ocr: page {page} of {path} in {} ms", t.elapsed().as_millis());
                 match result {
                     Ok((reader, lines)) => {
@@ -1132,9 +1133,6 @@ pub fn read_pages(path: String, pages: Vec<u32>, run: Arc<Run>, each: impl Fn(u3
                     }
                     Err(e) => each(page, Err(e)),
                 }
-            }
-            if used_paddle {
-                release_later();
             }
         })
         .ok();

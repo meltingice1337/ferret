@@ -74,7 +74,7 @@ impl Ferret {
         self.settings_scroll = ScrollHandle::new();
         self.folder_views = ferret_core::browse::list_folder_views().unwrap_or_default();
         self.default_status = Some(ferret_core::integration::default_manager_status());
-        self.dialog = Some(Dialog::Settings(tab));
+        self.dialog = Some(Dialog::Settings);
         let target = match tab {
             SettingsTab::Top => None,
             // The cards' places in the body (`settings_view`).
@@ -302,23 +302,65 @@ impl Ferret {
                 })),
             ));
         }
+        // The folders with a view of their own: one folded line (none, nothing), the list only
+        // when asked, so a long one doesn't fill Settings. Folded again in a new window.
         let n = self.folder_views.len();
-        remembered = remembered.child(
-            div()
-                .flex()
-                .items_center()
-                .justify_between()
-                .child(div().text_color(t::fg2()).child(format!("{n} folder{} with a remembered view", if n == 1 { "" } else { "s" })))
-                .when(n > 0, |d| {
-                    d.child(ui::button("views-clear", "Clear all", false).text_color(t::danger()).on_click(cx.listener(|f, _, _, cx| {
+        let open = self.folder_views_open && n > 0;
+        let count = format!("{n} folder{}", if n == 1 { "" } else { "s" });
+        remembered = remembered.when(n > 0, |card| {
+            card.child(
+                div()
+                    .id("views-row")
+                    .role(gpui::Role::Group)
+                    .aria_label(format!("Remembered folder views, {count}"))
+                    .flex()
+                    .items_center()
+                    .gap(px(8.))
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .flex()
+                            .items_center()
+                            .gap(px(6.))
+                            .child(div().flex_none().child("Remembered folder views"))
+                            .child(div().min_w_0().truncate().text_color(t::fg3()).child(format!("· {count}"))),
+                    )
+                    .child(
+                        div()
+                            .id("views-toggle")
+                            .role(gpui::Role::Button)
+                            .aria_label("Remembered folder views")
+                            .aria_expanded(open)
+                            .group("views-toggle")
+                            .flex_none()
+                            .h(px(28.))
+                            .pl(px(10.))
+                            .pr(px(7.))
+                            .flex()
+                            .items_center()
+                            .gap(px(4.))
+                            .rounded(px(7.))
+                            .text_size(px(12.5))
+                            .text_color(t::fg2())
+                            .hover(|s| s.bg(t::hover()).text_color(t::fg()))
+                            .on_click(cx.listener(|f, _, _, cx| {
+                                f.folder_views_open = !f.folder_views_open;
+                                cx.notify();
+                            }))
+                            .child(if open { "Hide" } else { "Show" })
+                            .child(ui::hover_icon(if open { "chevron-down" } else { "chevron-right" }, 13., t::fg3(), t::fg(), "views-toggle")),
+                    )
+                    .child(ui::button("views-clear", "Forget all", false).h(px(28.)).px(px(12.)).text_color(t::danger()).on_click(cx.listener(|f, _, _, cx| {
                         let _ = ferret_core::browse::clear_all_folder_views();
                         f.folder_views.clear();
+                        f.folder_views_open = false;
                         f.reload_all(cx);
-                        f.toast("Cleared all remembered views", cx);
-                    })))
-                }),
-        );
-        remembered = remembered.child(div().flex().flex_col().gap(px(4.)).children(self.folder_views.iter().enumerate().map(|(i, v)| {
+                        f.toast("Forgot all remembered folder views", cx);
+                    }))),
+            )
+        });
+        remembered = remembered.when(open, |card| card.child(div().id("views-list").max_h(px(300.)).overflow_y_scroll().flex().flex_col().gap(px(4.)).children(self.folder_views.iter().enumerate().map(|(i, v)| {
             let path = v.path.clone();
             let vs = ViewSettings::from_json(&v.view);
             let summary = format!(
@@ -343,7 +385,7 @@ impl Ferret {
                     f.folder_views = ferret_core::browse::list_folder_views().unwrap_or_default();
                     f.reload_all(cx);
                 })))
-        })));
+        }))));
 
         // Behavior
         let behavior = card("Behavior", None)

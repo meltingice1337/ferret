@@ -1665,10 +1665,6 @@ impl Ferret {
         })
         .detach();
     }
-
-    pub fn point_in(&self, id: u64, pos: Point<Pixels>) -> bool {
-        self.pane_ref(id).is_some_and(|p| p.bounds.get().contains(&pos))
-    }
 }
 
 /// Pictures on a server up to this size get thumbnails (from a cached copy); other server files

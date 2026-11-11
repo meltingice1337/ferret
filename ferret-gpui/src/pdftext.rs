@@ -54,7 +54,7 @@ pub struct PdfText {
 
 /// A line of text on a page (a run of characters on one baseline). Places are fractions of the
 /// page as Windows shows it (cropped and turned), 0–1 from its top left.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct PdfLine {
     pub text: String,
     /// Each character: its byte offset in `text`, and where it starts and ends along the line: an
@@ -76,7 +76,7 @@ pub struct PdfLine {
 /// A turned line's frame: the page turned by `angle` (radians, clockwise as shown) about its top
 /// left, measured in page widths (the page is `aspect` of them tall). The line runs from `start`
 /// to `end` along it and from `top` to `bottom` across it.
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Turn {
     pub angle: f32,
     pub aspect: f32,

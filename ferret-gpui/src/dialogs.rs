@@ -33,9 +33,9 @@ pub enum Dialog {
     WhatsNew,
     Properties { paths: Vec<String>, info: Option<ItemInfo>, stats: Option<Stats>, thumb: Option<std::sync::Arc<gpui::Image>> },
     BatchRename(Box<BatchRename>),
-    Prompt { title: SharedString, body: SharedString, input: Entity<TextInput>, ok: SharedString, secret: bool, error: Option<SharedString>, submit: Submit, _sub: Subscription },
+    Prompt { title: SharedString, body: SharedString, input: Entity<TextInput>, ok: SharedString, error: Option<SharedString>, submit: Submit, _sub: Subscription },
     Remote { id: u64, title: SharedString, message: SharedString, fields: Vec<(SharedString, Entity<TextInput>, bool)>, fingerprint: Option<SharedString>, can_remember: bool, remember: bool, ok: SharedString, danger: bool },
-    Settings(crate::settings_view::SettingsTab),
+    Settings,
     Server(Box<crate::remote::ServerForm>),
     NetworkAdd(Box<crate::remote::NetworkForm>),
     Intro(crate::intro::Tour),
@@ -303,7 +303,6 @@ impl Ferret {
             body: body.to_string().into(),
             input: input.clone(),
             ok: ok.to_string().into(),
-            secret,
             error: None,
             submit,
             _sub: sub,
@@ -457,7 +456,7 @@ impl Ferret {
     /// Keys while a dialog is open. True if handled (the rest go to its fields).
     pub fn dialog_key(&mut self, key: &str, m: gpui::Modifiers, window: &mut Window, cx: &mut Context<Self>) -> bool {
         match self.dialog.as_mut() {
-            Some(Dialog::Settings(_)) => return self.settings_key(key, window, cx),
+            Some(Dialog::Settings) => return self.settings_key(key, window, cx),
             Some(Dialog::Intro(_)) => return self.intro_key(key, m, window, cx),
             Some(Dialog::Image(_)) => {
                 if self.image_editor_key(key, m.control, window, cx) {
@@ -568,7 +567,7 @@ impl Ferret {
 
     pub fn dialog_view(&mut self, window: &mut Window, cx: &mut Context<Self>) -> Option<AnyElement> {
         let card: AnyElement = match self.dialog.as_ref()? {
-            Dialog::Settings(_) => return Some(self.settings_view(window, cx)),
+            Dialog::Settings => return Some(self.settings_view(window, cx)),
             Dialog::Intro(_) => return Some(self.intro_view(window, cx)),
             Dialog::Image(_) => return Some(self.image_editor_view(window, cx)),
             Dialog::WhatsNew => self.whats_new_view(window, cx),

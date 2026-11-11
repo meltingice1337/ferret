@@ -361,7 +361,7 @@ impl Ferret {
 
         // The Dropzone: pinned under the list, above Settings (as the app's), so it's always there
         // to drop on, however long the list.
-        let dropzone = (!self.settings.hidden_section("dropzone")).then(|| self.dropzone(cx));
+        let dropzone = (!self.settings.hidden_section("dropzone")).then(|| self.dropzone(cx)).flatten();
 
         let version = env!("CARGO_PKG_VERSION");
         // A copy run from `target\` (not installed) says so, as the app's DEV pill.
@@ -382,6 +382,18 @@ impl Ferret {
             .flex()
             .flex_col()
             .overflow_hidden()
+            // Moving a favorite or a tab isn't dragging files: a hint left by files dragged over
+            // and away (not dropped) would open the Dropzone's target meanwhile.
+            .on_drag_move::<FavDrag>(cx.listener(|f, _: &gpui::DragMoveEvent<FavDrag>, _, cx| {
+                if f.drag_hint.take().is_some() {
+                    cx.notify();
+                }
+            }))
+            .on_drag_move::<crate::chrome::TabDrag>(cx.listener(|f, _: &gpui::DragMoveEvent<crate::chrome::TabDrag>, _, cx| {
+                if f.drag_hint.take().is_some() {
+                    cx.notify();
+                }
+            }))
             .child(
                 div()
                     .flex_1()
@@ -706,17 +718,43 @@ impl Ferret {
     }
 
     /// The Dropzone (Sidebar.tsx `Shelf`): park files here from anywhere, browse elsewhere, then
-    /// drag them out. A box pinned above Settings: dashed while empty, its items listed with a
-    /// count, "Drag all" and × (clear) in its head.
-    fn dropzone(&self, cx: &mut Context<Self>) -> AnyElement {
+    /// drag them out. Pinned above Settings, it takes room only when it's of use (the user found
+    /// the permanent box too big):
+    /// - empty, nothing at all, until files are dragged over the window (from its own list or
+    ///   another app): then a drop target, which grows a little under the pointer;
+    /// - with items, a compact box: a head with the count, "Drag all" and × (clear), the items,
+    ///   and while files are dragged, a slot under them to drop more on.
+    fn dropzone(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
         let n = self.shelf.len();
+        // Files dragged over the window: GPUI's drag of them, as the window's label follows it
+        // (`note_drag`). Moving a tab or a favorite is a drag too, but not of files.
+        let dragging = cx.has_active_drag() && self.drag_hint.is_some();
+        let over = dragging && self.drag_hint.as_ref().and_then(|h| h.target.as_ref()).is_some_and(|(p, _)| p == "dropzone");
+        let anim = self.dz_slot_anim(dragging, over, n == 0);
+        if n == 0 && !dragging {
+            return None;
+        }
+        let target = |el: Stateful<Div>, cx: &mut Context<Self>| {
+            el.on_drag_move::<gpui::ExternalPaths>(cx.listener(|f, ev: &gpui::DragMoveEvent<gpui::ExternalPaths>, _, cx| {
+                if ev.bounds.contains(&ev.event.position) {
+                    f.note_drag_target(ev.event.position, "dropzone", 3, cx);
+                }
+            }))
+            .on_drop(cx.listener(|f, paths: &gpui::ExternalPaths, window, cx| f.drop_paths(paths.paths().to_vec(), "dropzone".into(), window, cx)))
+        };
+        if n == 0 {
+            // Only the drop target, as one box.
+            let el = target(dz_slot("dropzone", true, over).role(Role::Group).aria_label("Dropzone: drop files here to keep them for later").mx(px(8.)).mb(px(8.)), cx);
+            return Some(dz_animate(el, true, anim));
+        }
         let all = self.shelf.clone();
         let head = div()
             .id("dz-head")
             .flex()
             .items_center()
-            .gap(px(7.))
-            .h(px(20.))
+            .gap(px(6.))
+            .h(px(22.))
+            .pl(px(3.))
             .text_size(px(11.))
             .font_weight(FontWeight::SEMIBOLD)
             .text_color(t::fg3())
@@ -735,140 +773,149 @@ impl Ferret {
                 items.push(item("Customize sidebar…", action(|f, _, cx| f.open_settings_at(crate::settings_view::SettingsTab::Sidebar, cx))).icon("settings"));
                 f.open_menu(ev.position, items, window, cx);
             }))
-            .child(icon("inbox", 14., t::fg3()))
+            .child(icon("inbox", 13., t::fg3()))
             .child("DROPZONE")
-            .when(n > 0, |d| {
-                d.child(
-                    div()
-                        .flex_none()
-                        .px(px(6.))
-                        .rounded(px(8.))
-                        .bg(t::accent())
-                        .text_size(px(10.5))
-                        .text_color(t::on_accent())
-                        .child(n.to_string()),
-                )
-                .child(div().flex_1())
-                .child(
-                    div()
-                        .id("dz-all")
-                        .role(Role::Button)
-                        .aria_label(format!("Drag all {n} items out"))
-                        .flex_none()
-                        .px(px(7.))
-                        .py(px(2.))
-                        .rounded(px(6.))
-                        .font_weight(FontWeight::NORMAL)
-                        .text_color(t::accent_text())
-                        .hover(|s| s.bg(t::accent_soft()))
-                        .cursor(gpui::CursorStyle::OpenHand)
-                        .tooltip(ui::tip("Drag all items out"))
-                        .on_mouse_down(MouseButton::Left, cx.listener(move |f, ev: &MouseDownEvent, _, _| f.shelf_press = Some((all.clone(), ev.position))))
-                        .on_mouse_move(cx.listener(Self::shelf_move))
-                        .child("Drag all"),
-                )
-                .child(
-                    div()
-                        .id("dz-clear")
-                        .role(Role::Button)
-                        .aria_label("Clear the Dropzone")
-                        .group("dz-clear")
-                        .flex_none()
-                        .size(px(22.))
-                        .flex()
-                        .items_center()
-                        .justify_center()
-                        .rounded(px(6.))
-                        .hover(|s| s.bg(t::hover()))
-                        .tooltip(ui::tip("Clear the Dropzone"))
-                        .on_click(cx.listener(|f, _, _, cx| {
-                            cx.stop_propagation();
-                            f.clear_shelf(cx);
-                        }))
-                        .child(hover_icon("x", 12., t::fg3(), t::fg(), "dz-clear")),
-                )
-            });
-        let body: AnyElement = if n == 0 {
-            div().pt(px(6.)).px(px(2.)).pb(px(2.)).text_size(px(12.)).text_color(t::fg3()).child("Drop files here and browse freely").into_any_element()
-        } else {
-            let items = self.shelf.iter().enumerate().map(|(i, p)| {
-                let (p1, p2, p3) = (p.clone(), p.clone(), p.clone());
-                let name = util::file_name(p);
-                // As the app: no extension reads as a folder (no disk access while drawing).
-                let ext = name.rsplit_once('.').map(|(_, e)| e.to_lowercase()).unwrap_or_default();
-                let kind = kinds::kind_of(ext.is_empty(), &ext);
+            .child(
                 div()
-                    .id(("dz", i))
-                    .role(Role::ListItem)
-                    .aria_label(name.clone())
-                    .group("dz-item")
                     .flex_none()
-                    .h(px(26.))
-                    .pl(px(6.))
-                    .pr(px(4.))
+                    .px(px(6.))
+                    .rounded(px(8.))
+                    .bg(t::accent())
+                    .text_size(px(10.5))
+                    .text_color(t::on_accent())
+                    .child(n.to_string()),
+            )
+            .child(div().flex_1())
+            .child(
+                div()
+                    .id("dz-all")
+                    .role(Role::Button)
+                    .aria_label(format!("Drag all {n} items out"))
+                    .flex_none()
+                    .px(px(6.))
+                    .py(px(1.))
+                    .rounded(px(6.))
+                    .font_weight(FontWeight::NORMAL)
+                    .text_color(t::accent_text())
+                    .hover(|s| s.bg(t::accent_soft()))
+                    .cursor(gpui::CursorStyle::OpenHand)
+                    .tooltip(ui::tip("Drag all items out"))
+                    .on_mouse_down(MouseButton::Left, cx.listener(move |f, ev: &MouseDownEvent, _, _| f.shelf_press = Some((all.clone(), ev.position))))
+                    .on_mouse_move(cx.listener(Self::shelf_move))
+                    .child("Drag all"),
+            )
+            .child(
+                div()
+                    .id("dz-clear")
+                    .role(Role::Button)
+                    .aria_label("Clear the Dropzone")
+                    .group("dz-clear")
+                    .flex_none()
+                    .size(px(20.))
                     .flex()
                     .items_center()
-                    .gap(px(8.))
-                    .rounded(px(6.))
-                    .text_color(t::fg2())
-                    .hover(|s| s.bg(t::press()).text_color(t::fg()))
-                    .cursor(gpui::CursorStyle::OpenHand)
-                    .tooltip(ui::tip(format!("{p}\nDrag out to copy/move · double-click to show")))
-                    .on_click(cx.listener(move |f, ev: &ClickEvent, _, cx| {
-                        if ev.click_count() >= 2 {
-                            f.shelf_open(&p1, cx);
-                        }
+                    .justify_center()
+                    .rounded(px(5.))
+                    .hover(|s| s.bg(t::hover()))
+                    .tooltip(ui::tip("Clear the Dropzone"))
+                    .on_click(cx.listener(|f, _, _, cx| {
+                        cx.stop_propagation();
+                        f.clear_shelf(cx);
                     }))
-                    .on_mouse_down(MouseButton::Left, cx.listener(move |f, ev: &MouseDownEvent, _, _| f.shelf_press = Some((vec![p2.clone()], ev.position))))
-                    .on_mouse_move(cx.listener(Self::shelf_move))
-                    .child(icon(kinds::icon(kind), 14., kinds::color(kind)))
-                    .child(div().flex_1().min_w_0().truncate().text_size(px(12.5)).child(name))
-                    .child(
-                        div()
-                            .id(("dz-x", i))
-                            .role(Role::Button)
-                            .aria_label("Remove from the Dropzone")
-                            .flex_none()
-                            .p(px(2.))
-                            .rounded(px(4.))
-                            .invisible()
-                            .group_hover("dz-item", |s| s.visible())
-                            .hover(|s| s.bg(t::press()))
-                            .tooltip(ui::tip("Remove from the Dropzone"))
-                            .on_click(cx.listener(move |f, _, _, cx| {
-                                cx.stop_propagation();
-                                f.shelf.retain(|s| !same(s, &p3));
-                                f.save_session();
-                                cx.notify();
-                            }))
-                            .child(icon("x", 12., t::fg3())),
-                    )
-            });
-            div().id("dz-list").mt(px(6.)).max_h(px(150.)).overflow_y_scroll().flex().flex_col().gap(px(1.)).children(items).into_any_element()
-        };
-        div()
-            .id("dropzone")
-            .role(Role::Group)
-            .aria_label(if n == 0 { "Dropzone, empty".to_string() } else { format!("Dropzone, {n} items") })
-            .flex_none()
-            .mx(px(8.))
-            .mb(px(8.))
-            .p(px(8.))
-            .rounded(px(10.))
-            .border_1()
-            .border_color(t::line2())
-            .when(n == 0, |d| d.border_dashed())
-            .when(n > 0, |d| d.bg(t::hover()))
-            .on_drag_move::<gpui::ExternalPaths>(cx.listener(|f, ev: &gpui::DragMoveEvent<gpui::ExternalPaths>, _, cx| {
-                if ev.bounds.contains(&ev.event.position) {
-                    f.note_drag_target(ev.event.position, "dropzone", 3, cx);
-                }
-            }))
-            .drag_over::<gpui::ExternalPaths>(|s, _, _, _| s.border_color(t::accent()).bg(t::accent_softer()))
-            .on_drop(cx.listener(|f, paths: &gpui::ExternalPaths, window, cx| f.drop_paths(paths.paths().to_vec(), "dropzone".into(), window, cx)))
-            .child(head)
-            .child(body)
-            .into_any_element()
+                    .child(hover_icon("x", 12., t::fg3(), t::fg(), "dz-clear")),
+            );
+        let items = self.shelf.iter().enumerate().map(|(i, p)| {
+            let (p1, p2, p3) = (p.clone(), p.clone(), p.clone());
+            let name = util::file_name(p);
+            // As the app: no extension reads as a folder (no disk access while drawing).
+            let ext = name.rsplit_once('.').map(|(_, e)| e.to_lowercase()).unwrap_or_default();
+            let kind = kinds::kind_of(ext.is_empty(), &ext);
+            div()
+                .id(("dz", i))
+                .role(Role::ListItem)
+                .aria_label(name.clone())
+                .group("dz-item")
+                .flex_none()
+                .h(px(24.))
+                .pl(px(5.))
+                .pr(px(3.))
+                .flex()
+                .items_center()
+                .gap(px(7.))
+                .rounded(px(6.))
+                .text_color(t::fg2())
+                .hover(|s| s.bg(t::press()).text_color(t::fg()))
+                .cursor(gpui::CursorStyle::OpenHand)
+                .tooltip(ui::tip(format!("{p}\nDrag out to copy/move · double-click to show")))
+                .on_click(cx.listener(move |f, ev: &ClickEvent, _, cx| {
+                    if ev.click_count() >= 2 {
+                        f.shelf_open(&p1, cx);
+                    }
+                }))
+                .on_mouse_down(MouseButton::Left, cx.listener(move |f, ev: &MouseDownEvent, _, _| f.shelf_press = Some((vec![p2.clone()], ev.position))))
+                .on_mouse_move(cx.listener(Self::shelf_move))
+                .child(icon(kinds::icon(kind), 13., kinds::color(kind)))
+                .child(div().flex_1().min_w_0().truncate().text_size(px(12.)).child(name))
+                .child(
+                    div()
+                        .id(("dz-x", i))
+                        .role(Role::Button)
+                        .aria_label("Remove from the Dropzone")
+                        .flex_none()
+                        .p(px(2.))
+                        .rounded(px(4.))
+                        .invisible()
+                        .group_hover("dz-item", |s| s.visible())
+                        .hover(|s| s.bg(t::press()))
+                        .tooltip(ui::tip("Remove from the Dropzone"))
+                        .on_click(cx.listener(move |f, _, _, cx| {
+                            cx.stop_propagation();
+                            f.shelf.retain(|s| !same(s, &p3));
+                            f.save_session();
+                            cx.notify();
+                        }))
+                        .child(icon("x", 12., t::fg3())),
+                )
+        });
+        // About four and a half rows, then it scrolls (the half row says there's more).
+        let list = div().id("dz-list").mt(px(2.)).max_h(px(112.)).overflow_y_scroll().flex().flex_col().gap(px(1.)).children(items);
+        let el = target(
+            div()
+                .id("dropzone")
+                .role(Role::Group)
+                .aria_label(format!("Dropzone, {n} item{}", if n == 1 { "" } else { "s" }))
+                .flex_none()
+                .mx(px(8.))
+                .mb(px(8.))
+                .px(px(6.))
+                .pt(px(4.))
+                .pb(px(6.))
+                .rounded(px(10.))
+                .border_1()
+                .border_color(if over { t::accent() } else { t::line2() })
+                .bg(if over { t::accent_softer() } else { t::hover() }),
+            cx,
+        )
+        .child(head)
+        .child(list)
+        .when(dragging, |d| d.child(dz_animate(dz_slot("dz-slot", false, over).mt(px(4.)), false, anim)));
+        Some(el.into_any_element())
+    }
+
+    /// The drop slot's animation: its number (a new one each time the slot shows, hides or goes
+    /// under the pointer), the height it starts from (the last state's, 0 as it shows) and the
+    /// one it ends at.
+    fn dz_slot_anim(&self, shown: bool, over: bool, empty: bool) -> (usize, f32, f32) {
+        let (base, grown) = if empty { (DZ_EMPTY, DZ_EMPTY + DZ_GROW) } else { (DZ_SLOT, DZ_SLOT + DZ_GROW) };
+        let mut s = self.dz_slot.get();
+        if s.shown != shown || (shown && s.over != over) {
+            s.from = if !s.shown { 0. } else if s.over { grown } else { base };
+            s.seq = s.seq.wrapping_add(1);
+            s.shown = shown;
+            s.over = over;
+            self.dz_slot.set(s);
+        }
+        (s.seq, s.from, if over { grown } else { base })
     }
 
     fn clear_shelf(&mut self, cx: &mut Context<Self>) {
@@ -1090,6 +1137,66 @@ impl Ferret {
         })
         .detach();
     }
+}
+
+/// The Dropzone's drop target's heights: alone (an empty Dropzone), under its items, and how much
+/// either grows under the pointer.
+const DZ_EMPTY: f32 = 38.;
+const DZ_SLOT: f32 = 28.;
+const DZ_GROW: f32 = 10.;
+
+/// The Dropzone's drop target as last drawn (shown while files are dragged, under the pointer),
+/// and its animation (`Ferret::dz_slot_anim`).
+#[derive(Clone, Copy, Default, Debug)]
+pub struct DzSlot {
+    shown: bool,
+    over: bool,
+    seq: usize,
+    from: f32,
+}
+
+/// Where files dragged over the window go into the Dropzone: the whole Dropzone while it's empty,
+/// a line under its items otherwise. Dashed; under the pointer, solid accent.
+fn dz_slot(id: &'static str, empty: bool, over: bool) -> Stateful<Div> {
+    let color = if over { t::accent_text() } else { t::fg2() };
+    div()
+        .id(id)
+        .flex_none()
+        .overflow_hidden()
+        .flex()
+        .items_center()
+        .justify_center()
+        .gap(px(7.))
+        .rounded(px(if empty { 10. } else { 7. }))
+        .border_1()
+        .when(!over, |d| d.border_dashed())
+        .border_color(if over { t::accent() } else { t::accent_line() })
+        .bg(if over { t::accent_softer() } else if empty { t::hover() } else { t::rgba(0, 0.) })
+        .text_size(px(12.))
+        .text_color(color)
+        .child(icon(if empty { "inbox" } else { "plus" }, 14., color))
+        .child(if empty { "Drop here to keep for later" } else { "Drop to add" })
+}
+
+/// The drop target at its height, eased from its last one (`Ferret::dz_slot_anim`): it opens
+/// as files come over the window and grows a little under the pointer. Without animations, at
+/// once.
+fn dz_animate(el: Stateful<Div>, empty: bool, (seq, from, to): (usize, f32, f32)) -> AnyElement {
+    let el = el.h(px(to));
+    if !t::animate() {
+        return el.into_any_element();
+    }
+    use gpui::AnimationExt;
+    el.with_animation(("dz-slot", seq), gpui::Animation::new(std::time::Duration::from_millis(150)).with_easing(gpui::ease_out_quint()), move |d, k| {
+        let d = d.h(px(from + (to - from) * k));
+        if from > 0. {
+            return d;
+        }
+        // Opening: its margin too, so nothing jumps.
+        let d = d.opacity(k);
+        if empty { d.mb(px(8. * k)) } else { d.mt(px(4. * k)) }
+    })
+    .into_any_element()
 }
 
 fn hint(text: &'static str) -> gpui::Stateful<Div> {

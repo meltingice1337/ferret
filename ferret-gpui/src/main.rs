@@ -27,6 +27,7 @@ mod link;
 mod menu;
 mod mx;
 mod ocr;
+mod ocrhelper;
 mod ops;
 mod palette;
 mod pane;
@@ -69,6 +70,10 @@ fn main() {
     // manager) and stops the redirect before removing Ferret.
     if std::env::args().any(|a| a == ferret_core::integration::UNREGISTER_ARG) {
         return ferret_core::integration::unregister(appdata::IDENTIFIER);
+    }
+    // A window's text reader (ocrhelper.rs): no window, its log lines go to the window's log.
+    if std::env::args().any(|a| a == ocrhelper::ARG) {
+        return ocrhelper::run();
     }
     appdata::start_log();
     // Before anything could load an add-on: a removal that waited for a restart happens now.

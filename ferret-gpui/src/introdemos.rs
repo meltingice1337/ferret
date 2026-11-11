@@ -935,39 +935,56 @@ fn jobs(frame: usize) -> AnyElement {
 const PARKED: [(&str, &str); 2] = [("logo.png", "42 KB"), ("notes.md", "1 KB")];
 /// The pointer for each frame: on the two files, dragged to the Dropzone, dropped, another
 /// folder, "Drag all", over the list, dropped.
-const POINTER: [(f32, f32); 8] = [(66., 100.), (15., 112.), (15., 112.), (14., 20.), (14., 20.), (29., 86.), (60., 150.), (60., 150.)];
+const POINTER: [(f32, f32); 8] = [(66., 100.), (15., 90.), (15., 90.), (14., 20.), (14., 20.), (29., 86.), (60., 150.), (60., 150.)];
 
 fn dropzone(frame: usize) -> AnyElement {
     let parked = frame >= 2;
     let in_projects = frame >= 4;
-    let shelf = div()
-        .mt(px(8.))
-        .p(px(6.))
-        .rounded(px(8.))
-        .border_1()
-        .when(!parked, |d| d.border_dashed())
-        .border_color(if frame == 1 { t::accent() } else { t::line2() })
-        .when(frame == 1, |d| d.bg(t::accent_soft()))
-        .flex()
-        .flex_col()
-        .gap(px(3.))
-        .child(
-            div()
+    // As the sidebar's: nothing while empty, a drop target while files are dragged (frame 1),
+    // a small box once it holds them.
+    let shelf = (frame >= 1).then(|| {
+        if !parked {
+            return div()
+                .mt(px(8.))
+                .h(px(40.))
                 .flex()
                 .items_center()
+                .justify_center()
                 .gap(px(6.))
-                .text_size(px(11.5))
-                .font_weight(FontWeight::SEMIBOLD)
-                .child(icon("inbox", 13., t::fg2()))
-                .child("Dropzone")
-                .when(parked, |d| d.child(div().px(px(5.)).rounded(px(4.)).bg(t::accent_soft()).text_color(t::accent_text()).child("2")).child(div().flex_1()).child(div().text_color(t::accent_text()).font_weight(FontWeight::NORMAL).child("Drag all"))),
-        )
-        .child(if parked {
-            div().flex().flex_col().gap(px(2.)).children(PARKED.iter().map(|(n, _)| arrives(div().flex().items_center().gap(px(6.)).text_size(px(11.5)).child(file_icon(n, false, 13.)).child(n.to_string()), "ix-shelf", frame))).into_any_element()
-        } else {
-            div().text_size(px(11.)).text_color(t::fg3()).child("Drop files here and browse freely").into_any_element()
-        });
-    let side = div().child(side_item("folder", "projects", in_projects, None)).child(side_item("folder", "Downloads", !in_projects, None)).child(shelf);
+                .rounded(px(8.))
+                .border_1()
+                .border_color(t::accent())
+                .bg(t::accent_softer())
+                .text_size(px(11.))
+                .text_color(t::accent_text())
+                .child(icon("inbox", 13., t::accent_text()))
+                .child("Drop here to keep for later");
+        }
+        div()
+            .mt(px(8.))
+            .p(px(6.))
+            .rounded(px(8.))
+            .border_1()
+            .border_color(t::line2())
+            .flex()
+            .flex_col()
+            .gap(px(3.))
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(px(6.))
+                    .text_size(px(11.5))
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .child(icon("inbox", 13., t::fg2()))
+                    .child("Dropzone")
+                    .child(div().px(px(5.)).rounded(px(4.)).bg(t::accent_soft()).text_color(t::accent_text()).child("2"))
+                    .child(div().flex_1())
+                    .child(div().text_color(t::accent_text()).font_weight(FontWeight::NORMAL).child("Drag all")),
+            )
+            .child(div().flex().flex_col().gap(px(2.)).children(PARKED.iter().map(|(n, _)| arrives(div().flex().items_center().gap(px(6.)).text_size(px(11.5)).child(file_icon(n, false, 13.)).child(n.to_string()), "ix-shelf", frame))))
+    });
+    let side = div().child(side_item("folder", "projects", in_projects, None)).child(side_item("folder", "Downloads", !in_projects, None)).children(shelf);
     let pane = div()
         .size_full()
         .flex()

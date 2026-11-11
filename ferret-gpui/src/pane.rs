@@ -439,8 +439,4 @@ impl Tab {
         }
         self.split.as_mut().filter(|s| s.id == id)
     }
-
-    pub fn has(&self, id: u64) -> bool {
-        self.main.id == id || self.split.as_ref().is_some_and(|s| s.id == id)
-    }
 }

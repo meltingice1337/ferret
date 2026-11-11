@@ -10,7 +10,8 @@
 #   options: --notes "text" (replaces the commit list), --draft, --dry-run (show the plan, change nothing),
 #            --skip-smoke (skip starting the built app once), --skip-checks (emergencies only)
 #
-# Once the version is picked it runs the Rust tests (the app's and ferret-core's), builds the app
+# Once the version is picked it refuses to go on with any compiler warning (even with
+# --skip-checks), runs the Rust tests (the app's and ferret-core's), builds the app
 # and the search service, starts the built app once in the background (a smoke test), then makes
 # the installer (NSIS, a 64-bit program: scripts/make-installer.sh) and signs it and the search
 # service with the updater key. A failure stops it. The build's exes and symbols (PDBs) are kept in
@@ -39,7 +40,7 @@ while [[ $# -gt 0 ]]; do
     --draft) draft=1; shift ;;
     -y|--yes) shift ;;  # no-op, kept so old invocations still work
     --dry-run) dry=1; shift ;;
-    -h|--help) sed -n '2,23p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    -h|--help) sed -n '2,24p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
     *) echo "unknown option: $1 (see --help)" >&2; exit 1 ;;
   esac
 done
@@ -137,6 +138,22 @@ echo
 if [[ $dry -eq 1 ]]; then echo "Dry run: nothing was changed."; exit 0; fi
 
 # ---- checks: nothing else happens unless these pass ----
+# No release with a compiler warning, in the app or in ferret-core (its tests included). Not
+# skipped by --skip-checks: an unused function or field is fixed (or removed) before it ships.
+# `cargo check --all-targets` sees both builds' code (with and without the tests); dependencies'
+# own warnings are hidden by cargo, so what shows is ours.
+no_warnings() {
+  local dir=$1 out
+  shift
+  out=$(cd "$dir" && cargo check "$@" --all-targets --quiet --message-format short 2>&1) || { echo "$out" >&2; fail "cargo check failed in $dir"; }
+  if grep -qE '(^|: )warning' <<<"$out"; then
+    echo "$out" >&2
+    fail "compiler warnings in $dir: fix them first (a release never builds with warnings)"
+  fi
+}
+step "Checking for compiler warnings (cargo check)"
+no_warnings "$app"
+no_warnings src-tauri -p ferret-core
 if [[ $skip -eq 1 ]]; then
   echo "${dim}Skipping checks (--skip-checks).${reset}"
 else
