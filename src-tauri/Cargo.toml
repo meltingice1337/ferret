@@ -17,7 +17,7 @@ exclude = ["wsl-size", "vendor"]
 # One version for both crates (scripts/release.sh bumps the first `version = ` line: this one).
 # The search service compares it (CARGO_PKG_VERSION) between the app and the installed indexer.
 [workspace.package]
-version = "0.11.0"
+version = "0.11.1"
 authors = ["Ferret"]
 edition = "2024"
 
