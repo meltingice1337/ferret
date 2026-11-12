@@ -147,9 +147,11 @@ fn ferret_args(found: &Found) -> Vec<String> {
 /// The same thing asked for again this soon means "where is it?", not "open another one".
 const REPEAT_WITHIN: Duration = Duration::from_secs(10);
 
-/// Whether this request repeats the last one, whose window is still open.
+/// Whether this request repeats the last one, whose window is still open. Never with no
+/// arguments: that's Win+E (Explorer's Home), and each press is another window, as it was
+/// when Windows started Ferret for it directly.
 fn is_repeat(last: &[String], age: Duration, still_open: bool, args: &[String]) -> bool {
-    still_open && age < REPEAT_WITHIN && last == args
+    !args.is_empty() && still_open && age < REPEAT_WITHIN && last == args
 }
 
 // ---------- the background process ----------
@@ -645,6 +647,8 @@ mod tests {
         assert!(!is_repeat(&a, soon, true, &b));
         assert!(!is_repeat(&a, REPEAT_WITHIN, true, &a));
         assert!(!is_repeat(&a, soon, false, &a));
+        // Win+E (no arguments): every press opens a window.
+        assert!(!is_repeat(&[], soon, true, &[]));
     }
 
     /// Only windows made fully transparent count as hidden by an earlier run.
