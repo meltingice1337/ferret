@@ -67,7 +67,9 @@ cp "$amd64"/Plugins/amd64-unicode/* "$tree/Plugins/amd64-unicode/"
 
 defs=(-DVERSION="$version" -DSRC="$(cygpath -w "$src")" -DOUTFILE="$(cygpath -w "$outfile")")
 [[ $qa -eq 1 ]] && defs+=(-DQA)
-NSISDIR="$(cygpath -w "$tree")" "$makensis" -V2 "${defs[@]}" "$(cygpath -w "$script")"
+# -INPUTCHARSET UTF8: the script is UTF-8 without a signature, which makensis otherwise reads
+# as Windows-1252 (the installer said "Closing Ferretâ€¦" for "Closing Ferret…").
+NSISDIR="$(cygpath -w "$tree")" "$makensis" -V2 -INPUTCHARSET UTF8 "${defs[@]}" "$(cygpath -w "$script")"
 
 # ---- a 64-bit program? (the PE header's machine: 0x8664) ----
 pe=$(od -An -tu4 -j60 -N4 "$outfile" | tr -d ' ')
