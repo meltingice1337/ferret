@@ -539,6 +539,8 @@ fn read_window(app: &windows::Win32::UI::Shell::IWebBrowserApp, timeout: Duratio
         if let Some(view) = folder_view(app) {
             if let Some(path) = view_folder(&view) {
                 if matches!(classify(&path, None), Found::Keep) {
+                    // Which place it was, for when a window Ferret should have taken stays.
+                    say(&format!("Explorer window shows {path}"));
                     return Some(Found::Keep);
                 }
                 let since = folder.get_or_insert_with(|| (path.clone(), Instant::now())).1;
