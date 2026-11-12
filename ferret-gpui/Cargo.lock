@@ -1919,7 +1919,7 @@ dependencies = [
 
 [[package]]
 name = "ferret-core"
-version = "0.10.3"
+version = "0.10.4"
 dependencies = [
  "base64 0.22.1",
  "bzip2",
@@ -1970,7 +1970,7 @@ dependencies = [
 
 [[package]]
 name = "ferret-gpui"
-version = "0.10.3"
+version = "0.10.4"
 dependencies = [
  "cfb",
  "chrono",
