@@ -103,12 +103,18 @@ fn take_pass() -> bool {
 /// What an Explorer window showed, in Ferret's command-line terms.
 #[derive(Debug, PartialEq)]
 enum Found {
-    /// Not a folder Ferret opens (Control Panel, Home, libraries, Network…): leave it.
+    /// Not a folder Ferret opens (Control Panel, libraries, Network…): leave it.
     Keep,
     Open { folder: String, select: Option<String> },
+    /// Explorer's Home: what Win+E and the taskbar's Explorer open. Ferret starts as it does on
+    /// its own. Win+E is also set to start Ferret directly (the registry's `opennewwindow`
+    /// command), but Windows 26300.9974 (2026-11-12) opened Explorer's Home regardless, with
+    /// the registry as it should be: this catches it either way.
+    Start,
 }
 
 const THIS_PC: &str = "::{20D04FE0-3AEA-1069-A2D8-08002B30309D}";
+const HOME: &str = "::{F874310E-B6B7-47DC-BC84-B9E6B38F5903}";
 
 /// Explorer's parsing name for its folder → whether (and where) Ferret takes over.
 fn classify(folder: &str, select: Option<String>) -> Found {
@@ -123,13 +129,16 @@ fn classify(folder: &str, select: Option<String>) -> Found {
     if crate::recycle::is_recycle(f) {
         return Found::Open { folder: crate::recycle::PATH.into(), select: None };
     }
+    if f.eq_ignore_ascii_case(HOME) {
+        return Found::Start;
+    }
     Found::Keep
 }
 
 /// Ferret's arguments for what was found.
 fn ferret_args(found: &Found) -> Vec<String> {
     match found {
-        Found::Keep => vec![],
+        Found::Keep | Found::Start => vec![],
         Found::Open { select: Some(item), .. } => vec![format!("/select,{item}")],
         Found::Open { folder, select: None } => vec![folder.clone()],
     }
@@ -335,7 +344,7 @@ fn read_and_open(veil: Veil, seen: Instant) {
     };
     let found = read_window(&browser, Duration::from_millis(2_500));
     match &found {
-        Some(Found::Open { .. }) => {}
+        Some(Found::Open { .. } | Found::Start) => {}
         other => {
             say(&format!("Explorer window left alone: {other:?}"));
             return;
@@ -612,9 +621,12 @@ mod tests {
         assert_eq!(classify(r"\\wsl.localhost\Arch\home", None), open(r"\\wsl.localhost\Arch\home", None));
         assert_eq!(classify(THIS_PC, None), open(THIS_PC, None));
         assert_eq!(classify("::{645FF040-5081-101B-9F08-00AA002F954E}", None), open(crate::recycle::PATH, None));
-        // Control Panel, Home, libraries and Network stay in Explorer.
+        // Home (Win+E, the taskbar's Explorer): Ferret starts as it does on its own.
+        assert_eq!(classify("::{F874310E-B6B7-47DC-BC84-B9E6B38F5903}", None), Found::Start);
+        assert_eq!(classify("::{f874310e-b6b7-47dc-bc84-b9e6b38f5903}", Some("x".into())), Found::Start);
+        assert!(ferret_args(&Found::Start).is_empty());
+        // Control Panel, libraries and Network stay in Explorer.
         assert_eq!(classify("::{26EE0668-A00A-44D7-9371-BEB064C98683}\\0", None), Found::Keep);
-        assert_eq!(classify("::{F874310E-B6B7-47DC-BC84-B9E6B38F5903}", None), Found::Keep);
         assert_eq!(classify("::{031E4825-7B94-4DC3-B131-E946B44C8DD5}\\Documents.library-ms", None), Found::Keep);
         assert_eq!(ferret_args(&open(r"C:\x", Some(r"C:\x\a b.txt"))), vec![r"/select,C:\x\a b.txt".to_string()]);
         assert_eq!(ferret_args(&open(r"C:\x", None)), vec![r"C:\x".to_string()]);
