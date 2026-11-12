@@ -50,6 +50,13 @@ const THUMBS_MAX: u64 = 64 << 20;
 const PREVIEW_KEEP: Duration = Duration::from_secs(120);
 /// The code highlighter's tables are let go after this long without a code or text preview.
 const SYNTAX_KEEP: Duration = Duration::from_secs(120);
+/// The WSL distros' search index is let go after this long without a search in this window
+/// (FERRET_GPUI_WSL_KEEP=<seconds> for tests). Long: listing a big distro again takes seconds,
+/// during which its files are missing from the results.
+fn wsl_index_keep() -> Duration {
+    static KEEP: std::sync::OnceLock<Duration> = std::sync::OnceLock::new();
+    *KEEP.get_or_init(|| Duration::from_secs(std::env::var("FERRET_GPUI_WSL_KEEP").ok().and_then(|v| v.parse().ok()).unwrap_or(30 * 60)))
+}
 const PREVIEWS_MAX: u64 = 96 << 20;
 /// A sweep that let go of this much asks the GPU driver to give memory back (`trim_gpu`), at
 /// most this often (a trim makes the driver allocate again for what comes next).
@@ -250,6 +257,10 @@ async fn sweep(this: &WeakEntity<Ferret>, cx: &mut AsyncWindowContext) -> Result
         .spawn(async {
             if crate::render::forget_syntaxes(SYNTAX_KEEP) {
                 log::info!(target: "ferret::mem", "let go of the code highlighter's tables (unused for {} s)", SYNTAX_KEEP.as_secs());
+            }
+            // The WSL distros' file lists (Ctrl+K), once this window hasn't searched for a while.
+            if ferret_core::search::wsl::forget_unused(wsl_index_keep()) {
+                log::info!(target: "ferret::mem", "let go of the WSL search index (no search for {} s)", wsl_index_keep().as_secs());
             }
         })
         .detach();

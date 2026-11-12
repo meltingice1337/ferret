@@ -19,6 +19,8 @@ const CHECK_EVERY: Duration = Duration::from_secs(60);
 
 #[derive(Default)]
 struct State {
+    /// When a search last asked for the distros (`refresh` is every search's first step).
+    last_asked: Option<Instant>,
     last_check: Option<Instant>,
     scanned: HashMap<String, Instant>,
     busy: HashSet<String>,
@@ -39,6 +41,7 @@ pub fn engine() -> &'static Arc<Engine> {
 pub fn refresh() {
     {
         let mut st = state().lock();
+        st.last_asked = Some(Instant::now());
         if st.last_check.is_some_and(|t| t.elapsed() < CHECK_EVERY) {
             return;
         }
@@ -74,6 +77,22 @@ pub fn refresh() {
             }
         }
     });
+}
+
+/// Lets go of the distros' listings once no search has asked for them in `idle`: a window left
+/// open kept them for good (67 MB for a distro of 750,000 files, measured, in each window that
+/// had searched once). The next search lists the running distros again, as the first one did.
+/// True when something was let go. Not while a listing is being made.
+pub fn forget_unused(idle: Duration) -> bool {
+    let mut st = state().lock();
+    if !st.busy.is_empty() || st.last_asked.is_none_or(|t| t.elapsed() < idle) || engine().volumes().is_empty() {
+        return false;
+    }
+    st.scanned.clear();
+    st.last_check = None;
+    st.last_asked = None;
+    engine().clear();
+    true
 }
 
 /// Where people keep their own files. System folders (/usr, /var…) would multiply the index

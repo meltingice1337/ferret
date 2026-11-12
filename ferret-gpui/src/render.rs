@@ -1549,8 +1549,9 @@ pub fn col_letter(mut n: u32) -> String {
 
 /// A slide, rebuilt from its shapes, scaled to `w`. With `sel`, its text is selectable (each
 /// paragraph, table cell and line of a turned shape is a segment; a blank line after the slide
-/// when copied).
-pub fn slide_view(deck: &ferret_core::office::Deck, s: &ferret_core::office::Slide, bg: Option<Arc<Image>>, drawn: &[Option<crate::slidedraw::Drawn>], w: f32, mut sel: Option<&mut Builder>) -> AnyElement {
+/// when copied). Without `pictures` (a slide far from the view), its pictures are left out: a
+/// picture drawn is a picture decoded, on screen or not, and a long deck had them all in memory.
+pub fn slide_view(deck: &ferret_core::office::Deck, s: &ferret_core::office::Slide, bg: Option<Arc<Image>>, drawn: &[Option<crate::slidedraw::Drawn>], w: f32, pictures: bool, mut sel: Option<&mut Builder>) -> AnyElement {
     let b = &mut sel;
     let k = w / deck.width.max(1) as f32;
     let h = deck.height as f32 * k;
@@ -1563,7 +1564,7 @@ pub fn slide_view(deck: &ferret_core::office::Deck, s: &ferret_core::office::Sli
         .rounded(px(4.))
         .bg(color(&s.background).unwrap_or(t::rgba(0xffffff, 1.)))
         .when(s.hidden, |d| d.opacity(0.55))
-        .children(bg.map(|b| img(b).absolute().size_full().object_fit(ObjectFit::Cover)))
+        .children(bg.filter(|_| pictures).map(|b| img(b).absolute().size_full().object_fit(ObjectFit::Cover)))
         .children(s.shapes.iter().enumerate().map(|(si, sh)| -> AnyElement {
             // Drawn ahead (turned or vertical): its picture, where the turned shape shows.
             if let Some(Some(d)) = drawn.get(si) {
@@ -1573,7 +1574,7 @@ pub fn slide_view(deck: &ferret_core::office::Deck, s: &ferret_core::office::Sli
                     (Some(b), Some(text)) => Some(b.layer(text.clone(), 0, &d.joins)),
                     _ => None,
                 };
-                return div().absolute().left(px(x)).top(px(y)).w(px(dw)).h(px(dh)).child(img(d.image.clone()).size_full().object_fit(ObjectFit::Fill)).children(layer).into_any_element();
+                return div().absolute().left(px(x)).top(px(y)).w(px(dw)).h(px(dh)).children(pictures.then(|| img(d.image.clone()).size_full().object_fit(ObjectFit::Fill))).children(layer).into_any_element();
             }
             let mut d = div()
                 .absolute()
@@ -1597,7 +1598,7 @@ pub fn slide_view(deck: &ferret_core::office::Deck, s: &ferret_core::office::Sli
             } else if sh.geom == "roundRect" {
                 d = d.rounded(px(8. * k * 9000.));
             }
-            if let Some(p) = &sh.image {
+            if let Some(p) = sh.image.as_ref().filter(|_| pictures) {
                 d = d.child(img(std::path::PathBuf::from(p)).size_full().object_fit(ObjectFit::Cover));
             }
             if let Some(table) = &sh.table {

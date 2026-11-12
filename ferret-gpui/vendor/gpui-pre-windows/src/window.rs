@@ -1078,6 +1078,9 @@ impl PlatformWindow for WindowsWindow {
             + scene.subpixel_sprites.len()
             + scene.polychrome_sprites.len();
         crate::ferret::add_stat(crate::ferret::STAT_PRIMITIVES, primitives as u64);
+        // Ferret patch: tests looking for flashes (FERRET_GPUI_HITCH_MS set) are told of a frame
+        // with far less in it than the one before: a window drawn all but empty for a frame.
+        crate::ferret::note_frame_size(primitives);
     }
 
     #[cfg(feature = "test-support")]

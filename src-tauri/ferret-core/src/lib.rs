@@ -33,6 +33,7 @@ pub mod search;
 pub mod shell;
 pub mod shellmenu;
 pub mod shellops;
+pub mod standby;
 pub mod vfs;
 pub mod watch;
 pub mod wsl;

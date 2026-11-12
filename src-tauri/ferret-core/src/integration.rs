@@ -118,9 +118,18 @@ struct Restore {
     maximized: bool,
 }
 
+/// A start handed to this process (standby.rs): its arguments stand in for this process's own.
+static HANDED: Mutex<Option<crate::standby::Launch>> = Mutex::new(None);
+
+pub fn hand_launch(launch: crate::standby::Launch) {
+    *HANDED.lock().unwrap() = Some(launch);
+}
+
 pub fn init_launch_targets() {
-    let args: Vec<String> = std::env::args().skip(1).collect();
-    let cwd = std::env::current_dir().map(|p| p.to_string_lossy().into_owned()).unwrap_or_default();
+    let (args, cwd) = match HANDED.lock().unwrap().take() {
+        Some(launch) => (launch.args, launch.cwd),
+        None => (std::env::args().skip(1).collect(), std::env::current_dir().map(|p| p.to_string_lossy().into_owned()).unwrap_or_default()),
+    };
     let (targets, placement) = from_args(args, &cwd);
     *LAUNCH.lock().unwrap() = Some(targets);
     *PLACEMENT.lock().unwrap() = placement;

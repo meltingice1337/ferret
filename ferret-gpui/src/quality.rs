@@ -128,6 +128,47 @@ pub fn verdict(score: f64) -> (Level, &'static str) {
     }
 }
 
+/// The window's own graphics device, for the check's readers to decode on (as the players do).
+///
+/// Windows' software decoder decodes far ahead of what's read and keeps every frame: the check,
+/// which reads a few seconds of the original and of the sample straight through, had some 250
+/// decoded frames in memory at once (770 MB at 1080p; opening the editor peaked at 1.1 GB for a
+/// moment, and four times that at 4K). The graphics card keeps its frames in its own memory, a
+/// handful at a time, and only the frames compared are copied out. What it decodes is the same
+/// picture, bit for bit (FERRET_GPUI_CHECK_BOTH=1 runs the check both ways and logs how far the
+/// scores are apart). Where it can't (a size or format the card doesn't decode, a device lost
+/// meanwhile), the check runs in software as before.
+pub struct Gpu(windows::Win32::Graphics::Direct3D11::ID3D11Device);
+
+// SAFETY: a Direct3D 11 device may be used from any thread, and GPUI's is made with multithread
+// protection on (Media Foundation already decodes the players' video on it from its own threads).
+unsafe impl Send for Gpu {}
+
+/// The window's device, for a video of `width` × `height` whose frames are worth decoding on it:
+/// bigger than 1080p. Up to there the processor is quicker (a 1080p check takes 0.5–0.8 s on it
+/// and 1.2 s on the card, measured) and what its decoder piles up passes in under a second; at
+/// 4K the card is as quick (1.5 s either way, 1.8 against 2.1 for HEVC at 60 fps) and the
+/// editor's open peaks 700–860 MB lower. On the UI thread only (GPUI's backend knows the device
+/// there); None before a window. Tests comparing the two: FERRET_GPUI_CHECK_SOFTWARE=1 never
+/// uses the card, FERRET_GPUI_CHECK_CARD=1 always.
+pub fn gpu_for(width: u32, height: u32) -> Option<Gpu> {
+    let set = |name: &str| std::env::var_os(name).is_some();
+    if set("FERRET_GPUI_CHECK_SOFTWARE") || (width as u64 * height as u64 <= 1920 * 1088 && !set("FERRET_GPUI_CHECK_CARD")) {
+        return None;
+    }
+    let (device, context) = gpui_windows::ferret::shared_device()?;
+    // SAFETY: each pointer carries a reference this now owns (`shared_device`).
+    unsafe {
+        drop(windows::Win32::Graphics::Direct3D11::ID3D11DeviceContext::from_raw(context));
+        Some(Gpu(windows::Win32::Graphics::Direct3D11::ID3D11Device::from_raw(device)))
+    }
+}
+
+/// "Not on the graphics card": the caller reads in software.
+fn not_this_way() -> windows::core::Error {
+    windows::core::Error::from_hresult(windows::core::HRESULT(0x80004005u32 as i32))
+}
+
 /// Reads frames of one video: decoded RGB, by time.
 struct Reader {
     reader: IMFSourceReader,
@@ -137,6 +178,9 @@ struct Reader {
     stride: i32,
     /// Diagnostics: the row spacing used for a plain buffer (0: its rows came through 2D access).
     path: std::cell::Cell<isize>,
+    /// Diagnostics: a frame came from the graphics card's memory (asked to decode there, Windows
+    /// may still decode in software: a size or format the card doesn't take).
+    on_card: std::cell::Cell<bool>,
     /// The picture inside the decoded frame (x, y, w, h): decoders round the frame up to their
     /// block size and say what's shown (a phone's 1206 × 2622 recording decodes as 1216 × 2624).
     /// Comparing the whole frame squeezed the original about 1% against a compressed copy made
@@ -173,19 +217,22 @@ fn aperture(t: &IMFMediaType, w: usize, h: usize) -> Option<(usize, usize, usize
 }
 
 impl Reader {
-    /// Frames as RGB (the filmstrip's pictures).
-    fn open(path: &str) -> windows::core::Result<Self> {
-        Self::open_as(path, false)
+    /// Frames as RGB (the filmstrip's pictures). With `gpu`, decoded by the graphics card and
+    /// turned into RGB here (`nv12_bgra`); an error then means "not this way".
+    fn open(path: &str, gpu: Option<&Gpu>) -> windows::core::Result<Self> {
+        Self::open_as(path, false, gpu)
     }
 
     /// Frames as brightness, read from the decoded picture by the file's own range (the check).
-    fn open_luma(path: &str) -> windows::core::Result<Self> {
-        Self::open_as(path, true)
+    /// With `gpu`, decoded by the graphics card (see `Gpu`); an error then means "not this way".
+    fn open_luma(path: &str, gpu: Option<&Gpu>) -> windows::core::Result<Self> {
+        Self::open_as(path, true, gpu)
     }
 
-    fn open_as(path: &str, raw: bool) -> windows::core::Result<Self> {
+    fn open_as(path: &str, raw: bool, gpu: Option<&Gpu>) -> windows::core::Result<Self> {
         use windows::Win32::Media::MediaFoundation::{
-            MF_LOW_LATENCY, MF_MT_VIDEO_NOMINAL_RANGE, MF_MT_YUV_MATRIX, MFVideoFormat_NV12, MFVideoTransferMatrix_BT601,
+            MF_LOW_LATENCY, MF_MT_VIDEO_NOMINAL_RANGE, MF_MT_YUV_MATRIX, MF_SOURCE_READER_D3D_MANAGER, MFCreateDXGIDeviceManager, MFVideoFormat_NV12,
+            MFVideoTransferMatrix_BT601,
         };
         let video = MF_SOURCE_READER_FIRST_VIDEO_STREAM.0 as u32;
         let open = |low_latency: bool| -> windows::core::Result<IMFSourceReader> {
@@ -193,8 +240,18 @@ impl Reader {
                 let mut attrs = None;
                 MFCreateAttributes(&mut attrs, 2)?;
                 let attrs = attrs.unwrap();
-                // Lets the reader convert to RGB (or to NV12 from another decoded format).
-                attrs.SetUINT32(&MF_SOURCE_READER_ENABLE_VIDEO_PROCESSING, 1)?;
+                match gpu {
+                    // The graphics card decodes, into its own memory (the reader keeps the manager).
+                    Some(gpu) => {
+                        let (mut token, mut manager) = (0u32, None);
+                        MFCreateDXGIDeviceManager(&mut token, &mut manager)?;
+                        let manager = manager.ok_or_else(not_this_way)?;
+                        manager.ResetDevice(&gpu.0, token)?;
+                        attrs.SetUnknown(&MF_SOURCE_READER_D3D_MANAGER, &manager)?;
+                    }
+                    // Lets the reader convert to RGB (or to NV12 from another decoded format).
+                    None => attrs.SetUINT32(&MF_SOURCE_READER_ENABLE_VIDEO_PROCESSING, 1)?,
+                }
                 if low_latency {
                     attrs.SetUINT32(&MF_LOW_LATENCY, 1)?;
                 }
@@ -205,26 +262,33 @@ impl Reader {
             }
         };
         unsafe {
-            let mut reader = open(false)?;
+            // The filmstrip's decoder works in low-latency mode: it hands over each frame as it's
+            // decoded. Otherwise Windows' decoder decodes far ahead of what's read and keeps it
+            // all: every seek waited for those frames (18 s instead of 0.4 for 22 tiles of a
+            // 103 s 60 fps recording) and they took some 400 MB for a moment at 1080p.
+            // Not the check's readers: they read a few seconds straight through, where that mode
+            // is up to 4.5 times slower (one thread decodes; measured 4.5 s against 1.0). What
+            // their decoder holds ahead (some 250 frames, 770 MB at 1080p) is why the check
+            // decodes on the graphics card when it can (`Gpu`).
+            let reader = open(!raw)?;
             // The range the file says it has (not the decoder's label: see `raw`). Unsaid is
             // 16–235, as video usually is.
             let native = reader.GetNativeMediaType(video, 0).ok();
             let full_range = native.as_ref().and_then(|n| n.GetUINT32(&MF_MT_VIDEO_NOMINAL_RANGE).ok()) == Some(1);
             // The filmstrip's pictures of a full-range video are read as NV12 too and turned into
             // RGB here (`nv12_bgra`): Windows' conversion trusts the decoder's label and crushed
-            // them (stored 0, 8, 16 all black, 28 as 14, 235 and 255 both white). Its decoder
-            // then works in low-latency mode: it takes one frame after each seek, and otherwise
-            // every seek waited for the frames decoded ahead (18 s instead of 0.4 for 22 tiles of
-            // a 103 s 60 fps recording).
-            if !raw && full_range {
-                reader = open(true)?;
-            }
-            let raw = raw || full_range;
+            // them (stored 0, 8, 16 all black, 28 as 14, 235 and 255 both white). The graphics
+            // card's frames come as NV12 anyway.
+            let raw = raw || full_range || gpu.is_some();
             let t: IMFMediaType = MFCreateMediaType()?;
             t.SetGUID(&MF_MT_MAJOR_TYPE, &MFMediaType_Video)?;
             t.SetGUID(&MF_MT_SUBTYPE, if raw { &MFVideoFormat_NV12 } else { &MFVideoFormat_RGB32 })?;
             // NV12 not on offer (rare): brightness from RGB as before.
             let raw = raw && reader.SetCurrentMediaType(video, None, &t).is_ok();
+            // The graphics card's frames are only read as they are: no conversion there.
+            if !raw && gpu.is_some() {
+                return Err(not_this_way());
+            }
             if !raw {
                 t.SetGUID(&MF_MT_SUBTYPE, &MFVideoFormat_RGB32)?;
                 reader.SetCurrentMediaType(video, None, &t)?;
@@ -242,52 +306,87 @@ impl Reader {
                 Some(1) => false,
                 _ => crop.2.max(crop.3) <= 1024 && crop.2.min(crop.3) <= 576,
             };
-            Ok(Self { reader, w, h, stride, path: std::cell::Cell::new(0), crop, raw, full_range, bt601 })
+            Ok(Self { reader, w, h, stride, path: std::cell::Cell::new(0), on_card: std::cell::Cell::new(false), crop, raw, full_range, bt601 })
         }
     }
 
     /// The frames showing at `times` (seconds, any order), as brightness scaled to `tw` × `th`.
     /// One seek, then a straight read: seeking for each frame would decode from a key frame
     /// every time.
+    ///
+    /// Reading only copies each wanted frame's brightness plane out; turning the copies into
+    /// scaled brightness (4 ms a frame at 1080p) is other threads' work, so this one keeps up
+    /// with the decoder. Done here between reads, the decoder ran far ahead meanwhile and kept
+    /// what it had decoded: some 250 frames at once, 770 MB at 1080p, for most of a second
+    /// (the editor's open peaked at 1.1 GB, measured).
     fn frames(&mut self, times: &[f64], tw: usize, th: usize) -> windows::core::Result<Vec<Luma>> {
         let mut order: Vec<usize> = (0..times.len()).collect();
         order.sort_by(|a, b| times[*a].total_cmp(&times[*b]));
-        let mut out: Vec<Option<Luma>> = (0..times.len()).map(|_| None).collect();
+        let out: std::sync::Mutex<Vec<Option<Luma>>> = std::sync::Mutex::new((0..times.len()).map(|_| None).collect());
         let video = MF_SOURCE_READER_FIRST_VIDEO_STREAM.0 as u32;
-        unsafe {
-            let first = times[order[0]].max(0.);
-            let mut pos: PROPVARIANT = std::mem::zeroed();
-            (*pos.Anonymous.Anonymous).vt = VT_I8;
-            (*pos.Anonymous.Anonymous).Anonymous.hVal = (first * 1e7) as i64;
-            self.reader.SetCurrentPosition(&GUID::zeroed(), &pos)?;
-            let mut next = 0;
-            let mut last: Option<windows::Win32::Media::MediaFoundation::IMFSample> = None;
-            // A seek lands on the key frame before: read on, keeping the frame showing at each
-            // time asked for (the last one starting before it, within about half a frame).
-            while next < order.len() {
-                let (mut flags, mut ts, mut sample) = (0u32, 0i64, None);
-                self.reader.ReadSample(video, 0, None, Some(&mut flags), Some(&mut ts), Some(&mut sample))?;
-                let ended = flags & MF_SOURCE_READERF_ENDOFSTREAM.0 as u32 != 0;
-                while next < order.len() && (ended || ts + 1 >= (times[order[next]] * 1e7) as i64 - 170_000) {
-                    if let Some(s) = sample.as_ref().filter(|_| !ended).or(last.as_ref()) {
-                        out[order[next]] = Some(self.luma(s, tw, th)?);
+        let (cw, ch, full) = (self.crop.2, self.crop.3, self.full_range);
+        let workers = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4).clamp(1, 8).min(times.len().max(1));
+        // A few copies may wait for a free thread, no more (8 MB each at 4K): reading waits then.
+        let (planes, copied) = std::sync::mpsc::sync_channel::<(usize, Vec<u8>)>(workers);
+        let copied = std::sync::Mutex::new(copied);
+        let read = std::thread::scope(|scope| -> windows::core::Result<()> {
+            for _ in 0..workers {
+                scope.spawn(|| {
+                    loop {
+                        // The lock is held only to take the next copy.
+                        let next = copied.lock().unwrap_or_else(|e| e.into_inner()).recv();
+                        let Ok((i, plane)) = next else { break };
+                        let luma = plane_luma(plane, cw, ch, full, tw, th);
+                        out.lock().unwrap_or_else(|e| e.into_inner())[i] = Some(luma);
                     }
-                    next += 1;
-                }
-                if ended {
-                    break;
-                }
-                if sample.is_some() {
-                    last = sample;
+                });
+            }
+            // Dropped when this returns, however it does: the workers finish what's queued and stop.
+            let planes = planes;
+            unsafe {
+                let first = times[order[0]].max(0.);
+                let mut pos: PROPVARIANT = std::mem::zeroed();
+                (*pos.Anonymous.Anonymous).vt = VT_I8;
+                (*pos.Anonymous.Anonymous).Anonymous.hVal = (first * 1e7) as i64;
+                self.reader.SetCurrentPosition(&GUID::zeroed(), &pos)?;
+                let mut next = 0;
+                let mut last: Option<windows::Win32::Media::MediaFoundation::IMFSample> = None;
+                // A seek lands on the key frame before: read on, keeping the frame showing at each
+                // time asked for (the last one starting before it, within about half a frame).
+                while next < order.len() {
+                    let (mut flags, mut ts, mut sample) = (0u32, 0i64, None);
+                    self.reader.ReadSample(video, 0, None, Some(&mut flags), Some(&mut ts), Some(&mut sample))?;
+                    let ended = flags & MF_SOURCE_READERF_ENDOFSTREAM.0 as u32 != 0;
+                    while next < order.len() && (ended || ts + 1 >= (times[order[next]] * 1e7) as i64 - 170_000) {
+                        if let Some(s) = sample.as_ref().filter(|_| !ended).or(last.as_ref()) {
+                            if self.raw {
+                                let _ = planes.send((order[next], self.raw_plane(s)?));
+                            } else {
+                                // Brightness from RGB (NV12 wasn't on offer: rare), as it comes.
+                                let luma = self.luma(s, tw, th)?;
+                                out.lock().unwrap_or_else(|e| e.into_inner())[order[next]] = Some(luma);
+                            }
+                        }
+                        next += 1;
+                    }
+                    if ended {
+                        break;
+                    }
+                    if sample.is_some() {
+                        last = sample;
+                    }
                 }
             }
-        }
+            Ok(())
+        });
+        read?;
+        let out = out.into_inner().unwrap_or_else(|e| e.into_inner());
         out.into_iter().map(|l| l.ok_or_else(|| windows::core::Error::from_hresult(windows::core::HRESULT(0x80004005u32 as i32)))).collect()
     }
 
     fn luma(&self, sample: &windows::Win32::Media::MediaFoundation::IMFSample, tw: usize, th: usize) -> windows::core::Result<Luma> {
         if self.raw {
-            return self.raw_luma(sample, tw, th);
+            return Ok(plane_luma(self.raw_plane(sample)?, self.crop.2, self.crop.3, self.full_range, tw, th));
         }
         unsafe {
             let (w, h) = (self.w, self.h);
@@ -335,24 +434,23 @@ impl Reader {
         }
     }
 
-    /// Brightness from an NV12 picture's first plane (one byte a pixel, top-down), turned into
-    /// 0–255 by the file's own range: 16–235 is stretched, 0–255 taken as it is.
-    fn raw_luma(&self, sample: &windows::Win32::Media::MediaFoundation::IMFSample, tw: usize, th: usize) -> windows::core::Result<Luma> {
+    /// The shown part of an NV12 picture's first plane (brightness as stored: one byte a pixel,
+    /// top-down), copied out. Quick: `plane_luma` does the rest, on another thread.
+    fn raw_plane(&self, sample: &windows::Win32::Media::MediaFoundation::IMFSample) -> windows::core::Result<Vec<u8>> {
         let (w, h) = (self.w, self.h);
         let (cx, cy, cw, ch) = self.crop;
-        let full = self.full_range;
-        let mut shown = vec![0f32; cw * ch];
+        let mut shown = vec![0u8; cw * ch];
         let mut read = |row0: *const u8, pitch: isize| unsafe {
             for y in 0..ch {
-                let line = row0.offset((y + cy) as isize * pitch);
-                for x in 0..cw {
-                    let v = *line.add(x + cx) as f32;
-                    shown[y * cw + x] = if full { v } else { ((v - 16.) * (255. / 219.)).clamp(0., 255.) };
-                }
+                let line = row0.offset((y + cy) as isize * pitch).add(cx);
+                std::ptr::copy_nonoverlapping(line, shown.as_mut_ptr().add(y * cw), cw);
             }
         };
         unsafe {
             let buffer = sample.GetBufferByIndex(0)?;
+            if buffer.cast::<windows::Win32::Media::MediaFoundation::IMFDXGIBuffer>().is_ok() {
+                self.on_card.set(true);
+            }
             if let Ok(two_d) = buffer.cast::<IMF2DBuffer>() {
                 let (mut row0, mut pitch) = (std::ptr::null_mut(), 0i32);
                 two_d.Lock2D(&mut row0, &mut pitch)?;
@@ -373,8 +471,36 @@ impl Reader {
                 buffer.Unlock()?;
             }
         }
-        Ok(resize(&Luma { y: shown, w: cw, h: ch }, tw, th))
+        Ok(shown)
     }
+}
+
+/// Brightness from a picture's stored brightness plane (`Reader::raw_plane`: `w` × `h`, a byte a
+/// pixel), turned into 0–255 by the file's own range (16–235 is stretched, 0–255 taken as it
+/// is) and scaled to `tw` × `th`.
+///
+/// `resize`'s sums, taken straight from the bytes (the same numbers in the same order, so the
+/// same result to the last bit) without the picture as floats in between: 33 MB a frame at 4K,
+/// in as many threads as convert at once.
+fn plane_luma(plane: Vec<u8>, w: usize, h: usize, full: bool, tw: usize, th: usize) -> Luma {
+    let levels: [f32; 256] = std::array::from_fn(|v| if full { v as f32 } else { ((v as f32 - 16.) * (255. / 219.)).clamp(0., 255.) });
+    let mut out = vec![0f32; tw * th];
+    let (sx, sy) = (w as f32 / tw as f32, h as f32 / th as f32);
+    for ty in 0..th {
+        let (y0, y1) = ((ty as f32 * sy) as usize, (((ty + 1) as f32 * sy).ceil() as usize).min(h).max(1));
+        for tx in 0..tw {
+            let (x0, x1) = ((tx as f32 * sx) as usize, (((tx + 1) as f32 * sx).ceil() as usize).min(w).max(1));
+            let (mut s, mut n) = (0f32, 0f32);
+            for y in y0..y1.max(y0 + 1) {
+                for x in x0..x1.max(x0 + 1) {
+                    s += levels[plane[y.min(h - 1) * w + x.min(w - 1)] as usize];
+                    n += 1.;
+                }
+            }
+            out[ty * tw + tx] = s / n;
+        }
+    }
+    Luma { y: out, w: tw, h: th }
 }
 
 impl Reader {
@@ -500,13 +626,26 @@ impl Reader {
 /// Frames along a video for the compress editor's timeline (`drawFilmstrip` in MediaEditor.tsx):
 /// tiles at the picture's own shape (turned upright) filling `w` × `h` px, each showing the moment
 /// at its middle. A PNG. Blocking: run it off the UI thread.
-pub fn filmstrip(path: &str, rotation: u32, dur: f64, w: usize, h: usize) -> Result<Vec<u8>, String> {
+///
+/// With `gpu` (a big picture: `gpu_for`), decoded on the graphics card: the processor's decoder
+/// keeps some 35 frames while it works, 435 MB at 4K. In software where the card can't.
+pub fn filmstrip(path: &str, rotation: u32, dur: f64, w: usize, h: usize, gpu: Option<Gpu>) -> Result<Vec<u8>, String> {
+    if let Some(gpu) = &gpu {
+        match strip(path, rotation, dur, w, h, Some(gpu)) {
+            Ok(png) => return Ok(png),
+            Err(why) => log::info!(target: "ferret::perf", "filmstrip: not on the graphics card ({why}), in software"),
+        }
+    }
+    strip(path, rotation, dur, w, h, None)
+}
+
+fn strip(path: &str, rotation: u32, dur: f64, w: usize, h: usize, gpu: Option<&Gpu>) -> Result<Vec<u8>, String> {
     let e = |e: windows::core::Error| e.to_string();
     unsafe {
         let _ = CoInitializeEx(None, COINIT_MULTITHREADED);
         MFStartup(MF_VERSION, MFSTARTUP_FULL).map_err(e)?;
     }
-    let mut r = Reader::open(path).map_err(e)?;
+    let mut r = Reader::open(path, gpu).map_err(e)?;
     let turned = rotation == 90 || rotation == 270;
     // The shown picture (the decoder may pad the frame).
     let (cx, cy, cw, ch) = r.crop;
@@ -625,8 +764,8 @@ pub struct FrameScore {
 
 /// The sample at `sample` (encoded from `at` seconds of `original`, `dur` long, `fps` frames a
 /// second) against the original. Blocking: run it off the UI thread.
-pub fn check(original: &str, rotation: u32, sample: &str, at: f64, dur: f64, fps: f64) -> Result<Check, String> {
-    let (scores, detail) = frame_scores(original, rotation, sample, at, dur, fps, SAMPLE_FRAMES)?;
+pub fn check(original: &str, rotation: u32, sample: &str, at: f64, dur: f64, fps: f64, gpu: Option<Gpu>) -> Result<Check, String> {
+    let (scores, detail) = frame_scores(original, rotation, sample, at, dur, fps, SAMPLE_FRAMES, gpu.as_ref())?;
     let mut worst = Check { score: 1., at, detail };
     for f in scores {
         if f.best < worst.score {
@@ -640,14 +779,46 @@ pub fn check(original: &str, rotation: u32, sample: &str, at: f64, dur: f64, fps
 /// `frames` frames spread over the sample, each scored against the original's frame at the same
 /// moment and against its neighbours (`FrameScore`). The whole sample is first lined up on its
 /// first frame (a sample can start a frame or two off); then each frame is matched on its own.
-pub fn frame_scores(original: &str, rotation: u32, sample: &str, at: f64, dur: f64, fps: f64, frames: usize) -> Result<(Vec<FrameScore>, String), String> {
+///
+/// Decoded on the graphics card when `gpu` is given and it can (see `Gpu`), else in software.
+#[allow(clippy::too_many_arguments)]
+pub fn frame_scores(original: &str, rotation: u32, sample: &str, at: f64, dur: f64, fps: f64, frames: usize, gpu: Option<&Gpu>) -> Result<(Vec<FrameScore>, String), String> {
+    let Some(gpu) = gpu else { return scored(original, rotation, sample, at, dur, fps, frames, None) };
+    let on_card = scored(original, rotation, sample, at, dur, fps, frames, Some(gpu));
+    // Tests: both ways, and how far apart they are.
+    if std::env::var_os("FERRET_GPUI_CHECK_BOTH").is_some() {
+        if let (Ok((card, _)), Ok((plain, _))) = (&on_card, scored(original, rotation, sample, at, dur, fps, frames, None)) {
+            let apart = card.iter().zip(&plain).map(|(a, b)| (a.best - b.best).abs()).fold(0f64, f64::max);
+            let moved = card.iter().zip(&plain).filter(|(a, b)| a.offset != b.offset).count();
+            log::info!(target: "ferret::perf", "quality check both ways: scores at most {apart:.6} apart, {moved} of {} frames matched another neighbour", card.len());
+        }
+    }
+    match on_card {
+        Ok(scored) => Ok(scored),
+        Err(why) => {
+            log::info!(target: "ferret::perf", "quality check: not on the graphics card ({why}), in software");
+            scored(original, rotation, sample, at, dur, fps, frames, None)
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn scored(original: &str, rotation: u32, sample: &str, at: f64, dur: f64, fps: f64, frames: usize, gpu: Option<&Gpu>) -> Result<(Vec<FrameScore>, String), String> {
     let e = |e: windows::core::Error| e.to_string();
     unsafe {
         let _ = CoInitializeEx(None, COINIT_MULTITHREADED);
         MFStartup(MF_VERSION, MFSTARTUP_FULL).map_err(e)?;
     }
-    let mut o = Reader::open_luma(original).map_err(e)?;
-    let mut s = Reader::open_luma(sample).map_err(e)?;
+    // Where the time goes, for the log line.
+    let mut lap = std::time::Instant::now();
+    let mut took = |what: &str, laps: &mut Vec<String>| {
+        laps.push(format!("{what} {} ms", lap.elapsed().as_millis()));
+        lap = std::time::Instant::now();
+    };
+    let mut laps = Vec::new();
+    let mut o = Reader::open_luma(original, gpu).map_err(e)?;
+    let mut s = Reader::open_luma(sample, gpu).map_err(e)?;
+    took("opening", &mut laps);
     // Compare at the sample's picture size, about 960 px wide.
     let (tw, th) = {
         let (sw, sh) = (s.crop.2, s.crop.3);
@@ -664,6 +835,7 @@ pub fn frame_scores(original: &str, rotation: u32, sample: &str, at: f64, dur: f
     let frame_at = |k: usize| ((((k as f64 + 0.5) / frames as f64) * dur * fps).floor() + 0.5) / fps;
     let sample_times: Vec<f64> = (0..frames).map(frame_at).collect();
     let samples = s.frames(&sample_times, tw, th).map_err(e)?;
+    took("the sample's frames", &mut laps);
     // Each frame against the original's frames around the same moment (one pass: the times are
     // read in order after one seek). The match is found at half size, which is quicker, then
     // scored at full size. No shift for the whole sample, found on its first frame: on a phone
@@ -671,6 +843,7 @@ pub fn frame_scores(original: &str, rotation: u32, sample: &str, at: f64, dur: f
     let span = 2 * NEAR as usize + 1;
     let wanted: Vec<f64> = sample_times.iter().flat_map(|t| (-NEAR..=NEAR).map(move |d| at + t + d as f64 * STEP / fps)).collect();
     let matching = originals(&mut o, &wanted)?;
+    took("the original's frames", &mut laps);
     let half = |l: &Luma| resize(l, (l.w / 2).max(8), (l.h / 2).max(8));
     let score = |a: &Luma, b: &Luma| ssim(a, &tone_matched(a, b));
     let mut scores = Vec::with_capacity(frames);
@@ -689,10 +862,21 @@ pub fn frame_scores(original: &str, rotation: u32, sample: &str, at: f64, dur: f
         let best = if pick.1 == NEAR as usize { expected } else { score(&near[pick.1], &samples[k]).max(expected) };
         scores.push(FrameScore { t: *t, best, offset: pick.1 as i32 - NEAR });
     }
+    took("scoring", &mut laps);
+    let by = |r: &Reader| if r.on_card.get() { "the graphics card" } else { "the processor" };
+    laps.push(format!("original decoded by {}, sample by {}", by(&o), by(&s)));
     let moved = scores.iter().filter(|f| f.offset != 0).count();
     let detail = format!(
-        "original {}x{} (shows {}x{}) rot {rotation} rows {}, sample {}x{} rows {}, compared {tw}x{th}, {moved} of {frames} frames matched a neighbour",
-        o.w, o.h, o.crop.2, o.crop.3, o.path.get(), s.w, s.h, s.path.get()
+        "original {}x{} (shows {}x{}) rot {rotation} rows {}, sample {}x{} rows {}, compared {tw}x{th}, {moved} of {frames} frames matched a neighbour; {}",
+        o.w,
+        o.h,
+        o.crop.2,
+        o.crop.3,
+        o.path.get(),
+        s.w,
+        s.h,
+        s.path.get(),
+        laps.join(", ")
     );
     Ok((scores, detail))
 }
@@ -700,6 +884,23 @@ pub fn frame_scores(original: &str, rotation: u32, sample: &str, at: f64, dur: f
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A frame's bytes scaled in one go give exactly what the two steps gave (floats first, then
+    /// `resize`): the check's scores must not move by a digit.
+    #[test]
+    fn a_plane_scales_to_the_same_brightness_as_its_floats_did() {
+        let (w, h) = (1206, 654);
+        let plane: Vec<u8> = (0..w * h).map(|i| ((i * 7919 + (i / w) * 31) % 256) as u8).collect();
+        for full in [false, true] {
+            let floats: Vec<f32> = plane.iter().map(|&v| if full { v as f32 } else { ((v as f32 - 16.) * (255. / 219.)).clamp(0., 255.) }).collect();
+            for (tw, th) in [(960, 520), (603, 327), (w, h), (8, 8)] {
+                let two_steps = resize(&Luma { y: floats.clone(), w, h }, tw, th);
+                let one = plane_luma(plane.clone(), w, h, full, tw, th);
+                assert_eq!((one.w, one.h), (tw, th));
+                assert!(one.y.iter().zip(&two_steps.y).all(|(a, b)| a.to_bits() == b.to_bits()), "{tw}x{th}, full range {full}");
+            }
+        }
+    }
 
     #[test]
     fn identical_pictures_score_one_and_noise_scores_lower() {

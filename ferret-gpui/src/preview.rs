@@ -114,15 +114,32 @@ pub enum Shown {
 }
 
 impl Loaded {
-    fn path(&self) -> &str {
+    pub(crate) fn path(&self) -> &str {
         self.key.split('|').next().unwrap_or("")
     }
 
-    /// Can be drawn again as it was while another item loads: not a player (its video or sound
-    /// is gone with the selection), a Word document (read by its own path) or a password box.
+    /// Can be drawn again as it was while another item loads: not a password box. A video and
+    /// a Word document aren't drawn from here (`kept` asks for the player and the document).
     fn holds(&self) -> bool {
-        !matches!(self.content, Content::Video(_) | Content::Audio(..) | Content::Word | Content::PdfLocked { .. })
+        !matches!(self.content, Content::Video(_) | Content::Word | Content::PdfLocked { .. })
     }
+}
+
+/// How far down a scrolled view is, for deciding what's near it. Kept inside what it can
+/// scroll: the handle's own offset can be past either end until GPUI lays the frame out (a
+/// long wheel or a fling at the end of a deck), and read as it was, everything counted as far
+/// away and was drawn without its pictures until the next scroll.
+fn scrolled_to(scroll: &gpui::ScrollHandle) -> f32 {
+    (-scroll.offset().y.as_f32()).clamp(0., scroll.max_offset().y.as_f32().max(0.))
+}
+
+/// A Word document the preview draws itself (read by `sync_word`, not `render::load`).
+pub(crate) fn is_word(ext: &str) -> bool {
+    matches!(ext, "docx" | "docm" | "dotx")
+}
+
+fn ext_of(path: &str) -> String {
+    path.rsplit_once('.').map(|(_, e)| e.to_lowercase()).unwrap_or_default()
 }
 
 impl Ferret {
@@ -482,18 +499,40 @@ impl Ferret {
                 let bytes: u64 = p.rows.iter().filter(|r| !r.e.is_dir).map(|r| r.e.size).sum();
                 let bin = p.is_bin();
                 let copied = self.just_copied();
+                let mut facts: Vec<(&'static str, SharedString)> = vec![("Contains", format!("{} files, {} folders", kinds::group_digits(files), kinds::group_digits(p.folders)).into())];
+                // With folders in it: everything together, by the folders' counted sizes ("+"
+                // while some aren't counted yet). The files alone said "0 B" for a folder of
+                // folders, which read as an empty folder. Not for a huge listing (a lookup per
+                // folder on every frame), nor with folder sizes off.
+                let whole = (p.folders > 0 && p.folders <= 5000 && !bin && self.settings.bool("folderSizes", true)).then(|| {
+                    let (mut all, mut uncounted) = (bytes, false);
+                    for r in p.rows.iter().filter(|r| r.e.is_dir) {
+                        match self.sizes.get(&ferret_core::paths::key(&r.e.path)) {
+                            Some(s) if s.done => all += s.bytes,
+                            Some(s) => (all, uncounted) = (all + s.bytes, true),
+                            None => uncounted = true,
+                        }
+                    }
+                    format!("{}{}", kinds::format_size(all), if uncounted { "+" } else { "" })
+                });
+                match whole {
+                    Some(all) => {
+                        facts.push(("Size", all.into()));
+                        if files > 0 {
+                            facts.push(("Size of files", kinds::format_size(bytes).into()));
+                        }
+                    }
+                    None if p.folders == 0 => facts.push(("Size", kinds::format_size(bytes).into())),
+                    None if files > 0 => facts.push(("Size of files", kinds::format_size(bytes).into())),
+                    None => {}
+                }
+                if p.hidden > 0 {
+                    facts.push(("Hidden", kinds::group_digits(p.hidden).into()));
+                }
+                facts.push(("Path", path.clone().into()));
                 pane.child(self.header(icon(if bin { "trash-2" } else { "folder-fill" }, 30., t::folder()).into_any_element(), util::folder_name(&path).into(), if bin { "Recycle Bin".into() } else { "Current folder".into() }, None, cx))
                     .child(div().flex_1().min_h_0().overflow_hidden().flex().flex_col().child(summary))
-                    .child(meta(
-                        vec![
-                            ("Contains", format!("{} files, {} folders", kinds::group_digits(files), kinds::group_digits(p.folders)).into()),
-                            ("Size of files", kinds::format_size(bytes).into()),
-                            ("Hidden", kinds::group_digits(p.hidden).into()),
-                            ("Path", path.into()),
-                        ],
-                        copied,
-                        cx,
-                    ))
+                    .child(meta(facts, copied, cx))
                     .into_any_element()
             }
         }
@@ -665,6 +704,10 @@ impl Ferret {
 
     /// The preview drew this now (the pane, or Quick Look).
     fn note_shown(&mut self, what: Shown, big: bool) {
+        // The document kept from the selection before is let go once something else is drawn.
+        if self.word_before.as_ref().is_some_and(|(p, _)| !matches!(&what, Shown::Item(shown, _) if shown == p)) {
+            self.word_before = None;
+        }
         self.preview_showing[big as usize] = Some((what, crate::imgmem::current_frame()));
     }
 
@@ -677,17 +720,21 @@ impl Ferret {
     /// What the frame before drew (something else than `path`'s content) that can be drawn
     /// again as it was: another item's content (still read: the one shown, or in the cache it
     /// goes to when the next is read), or a folder's summary.
-    fn kept(&self, path: &str, big: bool) -> Option<Shown> {
+    fn kept(&self, path: &str, big: bool, cx: &gpui::App) -> Option<Shown> {
         let (shown, frame) = self.preview_showing[big as usize].as_ref()?;
         if *frame + 1 < crate::imgmem::current_frame() {
             return None;
         }
-        match shown {
-            Shown::Folder(dir) if dir == path => None,
-            Shown::Folder(_) => Some(shown.clone()),
-            Shown::Item(old, _) if old == path => None,
-            Shown::Item(old, _) => self.preview_data.iter().chain(&self.preview_cache).any(|l| l.path() == old && l.holds()).then(|| shown.clone()),
-        }
+        let still = match shown {
+            Shown::Folder(dir) => dir != path,
+            Shown::Item(old, _) if old == path => false,
+            // A video: its player, which `sync_video` keeps (paused) while the next item is read.
+            Shown::Item(old, Kind::Video) => self.video.as_ref().is_some_and(|(v, _)| v.read(cx).path == *old),
+            // A Word document: the one read for the selection before (`sync_word` keeps it).
+            Shown::Item(old, _) if is_word(&ext_of(old)) => self.word_before.as_ref().is_some_and(|(p, _)| p == old),
+            Shown::Item(old, _) => self.preview_data.iter().chain(&self.preview_cache).any(|l| l.path() == old && l.holds()),
+        };
+        still.then(|| shown.clone())
     }
 
     /// Draws what `kept` found.
@@ -698,7 +745,7 @@ impl Ferret {
                 self.folder_summary_for(&dir, cx)
             }
             Shown::Item(old, kind) => {
-                let ext = old.rsplit_once('.').map(|(_, e)| e.to_lowercase()).unwrap_or_default();
+                let ext = ext_of(&old);
                 // From the cache: put where the drawing looks for it, for the time it's drawn.
                 let cached = self.preview_data.as_ref().is_none_or(|l| l.path() != old).then(|| self.preview_cache.iter().position(|l| l.path() == old)).flatten();
                 let Some(i) = cached else { return self.content_of(&old, &ext, kind, width, big, window, cx) };
@@ -731,7 +778,7 @@ impl Ferret {
             return self.content_of(path, ext, kind, width, big, window, cx);
         }
         // A Word document is read by its own path.
-        if matches!(ext, "docx" | "docm" | "dotx") {
+        if is_word(ext) {
             let reading = !self.word.as_ref().is_some_and(|(p, doc)| p == path && doc.is_some());
             if reading {
                 if let Some(el) = self.held(path, kind, since, width, big, window, cx) {
@@ -853,7 +900,7 @@ impl Ferret {
                 return Some(div().flex_1().min_h_0().px(px(14.)).pb(px(10.)).flex().flex_col().child(el).into_any_element());
             }
         }
-        if let Some(kept) = self.kept(path, big) {
+        if let Some(kept) = self.kept(path, big, cx) {
             crate::watchdog::trace("shows", || format!("{path}: what was there ({kept:?})"));
             return Some(self.draw_kept(kept, width, big, window, cx));
         }
@@ -888,10 +935,14 @@ impl Ferret {
                         });
                     }
                 }
+                self.held_pic[big as usize] = None;
+                self.note_shown(Shown::Item(path.to_string(), kind), big);
                 return div().flex_1().min_h_0().overflow_hidden().child(v).into_any_element();
             }
         }
-        if matches!(ext, "docx" | "docm" | "dotx") {
+        if is_word(ext) {
+            self.held_pic[big as usize] = None;
+            self.note_shown(Shown::Item(path.to_string(), kind), big);
             let word = self.word_selectable(path, width, big, cx);
             return frame(self.with_find_bar(word, big, window, cx));
         }
@@ -1034,12 +1085,20 @@ impl Ferret {
                 let sel = self.text_sel[big as usize].clone();
                 let mut b = Builder::new(&sel, &format!("{path}#deck"));
                 let scroll = b.scroller();
+                // Slides further than a couple of screens from the view are drawn without their
+                // pictures (as a PDF's far pages are blank sheets): each takes its height, its
+                // number under it and the gap.
+                let top = scrolled_to(&scroll);
+                let view_h = scroll.bounds().size.height.as_f32().max(400.);
+                let each = deck.height as f32 * (w / deck.width.max(1) as f32) + 30.;
                 let slides: Vec<AnyElement> = deck
                     .slides
                     .iter()
                     .enumerate()
                     .map(|(i, s)| {
-                        let slide = render::slide_view(&deck, s, bgs.get(i).cloned().flatten(), drawn.get(i).map(Vec::as_slice).unwrap_or(&[]), w, Some(&mut b));
+                        let y = i as f32 * each;
+                        let near = y < top + view_h * 2.5 && y + each > top - view_h * 1.5;
+                        let slide = render::slide_view(&deck, s, bgs.get(i).cloned().flatten(), drawn.get(i).map(Vec::as_slice).unwrap_or(&[]), w, near, Some(&mut b));
                         div()
                             .flex()
                             .flex_col()
@@ -1113,7 +1172,7 @@ impl Ferret {
                 sel.borrow_mut().scrolls_with(&scroll);
                 // Pages within about a screen of the view that aren't drawn yet: drawn next, a few at
                 // a time (one request at a time).
-                let top = -scroll.offset().y.as_f32();
+                let top = scrolled_to(&scroll);
                 let view_h = scroll.bounds().size.height.as_f32().max(400.);
                 let mut y = 0.;
                 let mut want = Vec::new();
@@ -1796,7 +1855,7 @@ impl Ferret {
     fn word_selectable(&mut self, path: &str, width: f32, big: bool, cx: &mut Context<Self>) -> AnyElement {
         let sel = self.text_sel[big as usize].clone();
         let mut b = Builder::new(&sel, &format!("{path}#word"));
-        let page = self.word_view(width, &mut b);
+        let page = self.word_view(path, width, &mut b);
         b.finish(cx.entity_id());
         let area = self.text_area(big, cx).flex_1().min_h_0().flex().flex_col().child(page).into_any_element();
         self.word_zoomable(area, cx)
@@ -1816,12 +1875,16 @@ impl Ferret {
         self.text_area(big, cx).size_full().child(view).into_any_element()
     }
 
-    pub fn word_view(&self, width: f32, b: &mut Builder) -> AnyElement {
-        let Some((_, state)) = &self.word else { return div().into_any_element() };
-        let doc = match state {
-            None => return message("Reading the document…"),
-            Some(Err(e)) => return message(&format!("Can't show this document: {e}")),
-            Some(Ok(doc)) => doc,
+    /// `path`'s document: the selection's, or the one before it while `held` keeps it on screen.
+    pub fn word_view(&self, path: &str, width: f32, b: &mut Builder) -> AnyElement {
+        let doc = match (&self.word, &self.word_before) {
+            (Some((p, state)), _) if p == path => match state {
+                None => return message("Reading the document…"),
+                Some(Err(e)) => return message(&format!("Can't show this document: {e}")),
+                Some(Ok(doc)) => doc,
+            },
+            (_, Some((p, doc))) if p == path => doc,
+            _ => return div().into_any_element(),
         };
         // Points to pixels: a little larger than print, so text reads at the pane's width; Ctrl+wheel
         // zooms 50–400 %.

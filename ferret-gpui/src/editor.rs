@@ -527,6 +527,20 @@ impl Editor {
         }
     }
 
+    /// The pictures its players drew into (and those replaced but not let go of yet), for the
+    /// window to drop from GPUI's cache as the editor closes: nothing else does, and each stayed
+    /// on the GPU for good (4 MB more with every open, measured).
+    pub fn pictures(&mut self) -> Vec<Arc<RenderImage>> {
+        let mut all: Vec<Arc<RenderImage>> = self.dropped.drain(..).collect();
+        if let Some(Ok(p)) = &self.original {
+            all.extend(p.image());
+        }
+        if let Some(s) = &self.sampled {
+            all.extend(s.player.image());
+        }
+        all
+    }
+
     fn pause_all(&mut self) {
         if let Some(Ok(p)) = self.original.as_mut() {
             p.pause();
@@ -728,7 +742,12 @@ impl Editor {
         self.progress = 0.;
         self.error = None;
         let job = VideoJob { trim_start_ms: None, trim_end_ms: None, ..job };
-        let task = cx.background_executor().spawn(async move { ferret_core::rt::block_on(media::video_sample(job, (at * 1000.) as u64, (len * 1000.) as u64)) });
+        let task = cx.background_executor().spawn(async move {
+            crate::watchdog::trace("editor sample", || format!("started ({generation})"));
+            let sample = ferret_core::rt::block_on(media::video_sample(job, (at * 1000.) as u64, (len * 1000.) as u64));
+            crate::watchdog::trace("editor sample", || format!("done ({generation})"));
+            sample
+        });
         cx.spawn(async move |this, cx| {
             let result = task.await;
             this.update(cx, |e, cx| {
@@ -808,12 +827,20 @@ impl Editor {
     fn start_check(&mut self, sample: &VideoSample, at: f64, generation: u64, cx: &mut Context<Self>) {
         let Some(info) = self.info() else { return };
         let (original, rotation, fps) = (self.paths[self.current].clone(), info.rotation, info.fps);
+        // The window's graphics device (known here, on the UI thread) for a big picture's check
+        // to decode on.
+        let gpu = quality::gpu_for(info.width, info.height);
         let plan_fps = self.plan_of(self.current).map(|p| p.fps).unwrap_or(0);
         let fps = if plan_fps > 0 { plan_fps as f64 } else { fps };
         let (sample_path, dur) = (sample.path.clone(), sample.duration_ms as f64 / 1000.);
         self.check = Some(Check::Running);
         let started = std::time::Instant::now();
-        let task = cx.background_executor().spawn(async move { quality::check(&original, rotation, &sample_path, at, dur, fps) });
+        let task = cx.background_executor().spawn(async move {
+            crate::watchdog::trace("editor check", || "started".into());
+            let checked = quality::check(&original, rotation, &sample_path, at, dur, fps, gpu);
+            crate::watchdog::trace("editor check", || "done".into());
+            checked
+        });
         cx.spawn(async move |this, cx| {
             let result = task.await;
             this.update(cx, |e, cx| {
@@ -1112,8 +1139,14 @@ impl Editor {
         let k = window.scale_factor();
         let (w, h) = ((b.size.width.as_f32() * k) as usize, (b.size.height.as_f32() * k) as usize);
         let (path, rotation, dur) = (self.paths[i].clone(), info.rotation, info.duration_ms as f64 / 1000.);
+        let gpu = quality::gpu_for(info.width, info.height);
         self.strip_busy = true;
-        let task = cx.background_executor().spawn(async move { quality::filmstrip(&path, rotation, dur, w, h) });
+        let task = cx.background_executor().spawn(async move {
+            crate::watchdog::trace("editor strip", || "started".into());
+            let strip = quality::filmstrip(&path, rotation, dur, w, h, gpu);
+            crate::watchdog::trace("editor strip", || "done".into());
+            strip
+        });
         cx.spawn(async move |this, cx| {
             let png = task.await;
             this.update(cx, |e, cx| {

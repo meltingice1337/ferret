@@ -184,9 +184,12 @@ impl Drop for PowerRequest {
 
 impl WindowsPlatform {
     pub fn new(headless: bool) -> Result<Self> {
+        // Ferret patch: start-up timing (ferret::mark), here and below.
+        crate::ferret::mark("platform: start");
         unsafe {
             OleInitialize(None).context("unable to initialize Windows OLE")?;
         }
+        crate::ferret::mark("platform: OLE");
         // A platform that can become windowed needs the real text system from the start: the app
         // keeps the one it's created with.
         let text_system: Arc<dyn PlatformTextSystem> = if !headless {
@@ -194,6 +197,7 @@ impl WindowsPlatform {
         } else {
             Arc::new(gpui::NoopTextSystem::new())
         };
+        crate::ferret::mark("platform: text");
 
         let (main_sender, main_receiver) = PriorityQueueReceiver::new();
         let validation_number = if usize::BITS == 64 {
@@ -268,6 +272,7 @@ impl WindowsPlatform {
         } else {
             HICON::default()
         };
+        crate::ferret::mark("platform: made");
 
         Ok(Self {
             inner,
@@ -412,7 +417,13 @@ impl WindowsPlatform {
 
     /// Creates the DirectX devices that windows draw with, and starts vsync.
     fn attach_gpu(&self) -> Result<()> {
-        let devices = DirectXDevices::new().context("Creating DirectX devices")?;
+        crate::ferret::mark("platform: run");
+        // Ferret patch: the devices the app had made early (ferret::make_devices_early), if any.
+        let devices = match crate::ferret::early_devices() {
+            Some(devices) => devices,
+            None => DirectXDevices::new().context("Creating DirectX devices")?,
+        };
+        crate::ferret::mark("platform: graphics device");
         *self.inner.state.directx_devices.borrow_mut() = Some(devices);
         self.begin_vsync_thread();
         Ok(())

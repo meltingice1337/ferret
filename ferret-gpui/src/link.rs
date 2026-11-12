@@ -29,9 +29,26 @@ pub fn connect() -> UnboundedReceiver<Msg> {
     let (tx, rx) = unbounded();
     let dir = crate::appdata::data_dir();
     let _ = std::fs::create_dir_all(&dir);
-    match ferret_core::db::open(&dir.join("ferret.db")) {
-        Ok(db) => ferret_core::app::init(Box::new(GpuiLink(tx)), db),
-        Err(e) => eprintln!("ferret-gpui: no database ({e}); jobs won't report progress"),
+    // Tried a few times: right after another Ferret was ended by force (an update's installer
+    // does that) the database can refuse to open for a moment ("disk I/O error", seen in a test
+    // that ended one window and started the next at once), and a window without it saves nothing.
+    let mut tries = 0;
+    let db = loop {
+        match ferret_core::db::open(&dir.join("ferret.db")) {
+            Ok(db) => break Some(db),
+            Err(e) if tries < 4 => {
+                tries += 1;
+                log::warn!("the database didn't open ({e}): trying again");
+                std::thread::sleep(std::time::Duration::from_millis(80));
+            }
+            Err(e) => {
+                log::error!("no database ({e}): settings, recents and jobs' progress aren't kept in this window");
+                break None;
+            }
+        }
+    };
+    if let Some(db) = db {
+        ferret_core::app::init(Box::new(GpuiLink(tx)), db);
     }
     rx
 }

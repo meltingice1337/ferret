@@ -110,3 +110,33 @@ pub fn ms_since_process_start() -> f64 {
     let ticks = |f: FILETIME| ((f.dwHighDateTime as u64) << 32 | f.dwLowDateTime as u64) as f64;
     (ticks(now) - ticks(created)) / 10_000.
 }
+
+/// Start-up, timed: `mark` notes a step (ms after Windows created the process), and once the
+/// window's first frame is on screen and its first folder is listed they all go to the log in
+/// one line (target `ferret::start`), so a slow start says where it went.
+static MARKS: std::sync::Mutex<Vec<(&'static str, f64)>> = std::sync::Mutex::new(Vec::new());
+const SHOWN: &str = "first frame shown";
+pub const LISTED: &str = "first folder listed";
+
+pub fn mark(step: &'static str) {
+    let Ok(mut marks) = MARKS.lock() else { return };
+    if marks.len() >= 24 || marks.iter().any(|(s, _)| *s == step) {
+        return;
+    }
+    marks.push((step, ms_since_process_start()));
+    let has = |step: &str| marks.iter().any(|(s, _)| *s == step);
+    if (step == SHOWN || step == LISTED) && has(SHOWN) && has(LISTED) {
+        let line: Vec<String> = marks.iter().map(|(s, ms)| format!("{s} {ms:.0}")).collect();
+        log::info!(target: "ferret::start", "ms after the process began: {}", line.join(", "));
+    }
+}
+
+/// Called by each draw of the window: the first one books the log line for when it's shown.
+pub fn first_frame(window: &mut gpui::Window) {
+    static SEEN: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+    if SEEN.swap(true, Ordering::Relaxed) {
+        return;
+    }
+    mark("first draw");
+    window.on_next_frame(|_, _| mark(SHOWN));
+}

@@ -13,6 +13,65 @@ use windows::core::Interface;
 
 use crate::directx_atlas::DirectXAtlas;
 
+/// Start-up timing: the app says where a step of the platform's start is noted (its log), and
+/// the platform calls `mark` at each.
+static MARK: std::sync::OnceLock<fn(&'static str)> = std::sync::OnceLock::new();
+
+pub fn on_mark(note: fn(&'static str)) {
+    let _ = MARK.set(note);
+}
+
+/// See its call in window.rs.
+pub(crate) fn note_frame_size(primitives: usize) {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    if !*ON.get_or_init(|| std::env::var_os("FERRET_GPUI_HITCH_MS").is_some()) {
+        return;
+    }
+    thread_local! {
+        static LAST: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    }
+    let last = LAST.with(|l| l.replace(primitives));
+    if last > 200 && primitives * 4 < last {
+        log::info!(target: "ferret::trace", "thin frame: {primitives} things drawn, after a frame with {last}");
+    }
+}
+
+pub(crate) fn mark(step: &'static str) {
+    if let Some(note) = MARK.get() {
+        note(step);
+    }
+}
+
+/// Start-up: making the graphics device takes over half of it (some 130 ms of 220, measured),
+/// and nothing else needs it until the first window. So the app has it made on a thread of its
+/// own from the first line of `main`, while the rest of the start goes on, and the platform
+/// takes it when it attaches (`attach_gpu`), waiting only for what's left of it.
+static EARLY_DEVICES: std::sync::Mutex<Option<std::thread::JoinHandle<anyhow::Result<crate::directx_devices::DirectXDevices>>>> = std::sync::Mutex::new(None);
+
+pub fn make_devices_early() {
+    if let Ok(mut early) = EARLY_DEVICES.lock() {
+        if early.is_none() {
+            *early = std::thread::Builder::new().name("ferret-early-device".into()).spawn(crate::directx_devices::DirectXDevices::new).ok();
+        }
+    }
+}
+
+/// The devices made early, once (None: not asked for, or it failed and they're made as usual).
+pub(crate) fn early_devices() -> Option<crate::directx_devices::DirectXDevices> {
+    let made = EARLY_DEVICES.lock().ok()?.take()?.join().ok()?;
+    match made {
+        Ok(devices) => {
+            // Made on another thread: this one, where video decoders are made, knows them too.
+            note_device(&devices.device, &devices.device_context);
+            Some(devices)
+        }
+        Err(e) => {
+            log::warn!("the graphics device made early failed ({e:#}): making it again");
+            None
+        }
+    }
+}
+
 thread_local! {
     static DEVICE: RefCell<Option<(ID3D11Device, ID3D11DeviceContext)>> = const { RefCell::new(None) };
     static ATLAS: RefCell<Option<Weak<DirectXAtlas>>> = const { RefCell::new(None) };

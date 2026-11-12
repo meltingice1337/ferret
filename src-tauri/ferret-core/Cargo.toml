@@ -104,6 +104,8 @@ windows = { version = "0.62", features = [
     "Win32_System_Ioctl",
     "Win32_System_Pipes",
     "Win32_System_Threading",
+    # standby.rs (the pipe's name carries the sign-in session)
+    "Win32_System_RemoteDesktop",
     # shellops.rs (IFileOperation, Recycle Bin displaced properties)
     "Win32_Storage_EnhancedStorage",
     "Win32_System_Com_StructuredStorage",

@@ -187,8 +187,9 @@ pub fn run() {
         SetTimer(None, 0, 5_000, None);
         let mut msg = MSG::default();
         while GetMessageW(&mut msg, None, 0, 0).as_bool() {
-            if msg.message == WM_TIMER && crate::integration::default_target().is_none() {
-                break;
+            if msg.message == WM_TIMER {
+                let Some(ferret) = crate::integration::default_target() else { break };
+                keep_one_ready(&ferret);
             }
             let _ = TranslateMessage(&msg);
             DispatchMessageW(&msg);
@@ -373,11 +374,73 @@ fn read_and_open(veil: Veil, seen: Instant) {
     }
 }
 
+/// A Ferret that has done its start-up waits, without a window, to be handed the next launch
+/// (standby.rs): one is kept while the setting is on (it is unless turned off), and sent away
+/// when it's off. Called on the timer, so the one a launch used up is replaced within seconds.
+#[cfg(windows)]
+fn keep_one_ready(ferret: &str) {
+    static SAID: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+    if !crate::standby::wanted() {
+        crate::standby::dismiss(ferret);
+    } else if !crate::standby::waiting(ferret) {
+        if !SAID.swap(true, std::sync::atomic::Ordering::Relaxed) {
+            say("keeping a Ferret ready for the next window");
+        }
+        crate::standby::ensure(ferret);
+    }
+}
+
+/// Whether the redirect runs in this sign-in session (the Ferret kept ready exits when not).
+#[cfg(windows)]
+pub fn running() -> bool {
+    use windows::core::PCWSTR;
+    use windows::Win32::Foundation::CloseHandle;
+    use windows::Win32::System::Threading::{OpenMutexW, SYNCHRONIZATION_SYNCHRONIZE};
+    let name: Vec<u16> = MUTEX.encode_utf16().chain(Some(0)).collect();
+    // SAFETY: a NUL-terminated name; the handle is closed at once.
+    match unsafe { OpenMutexW(SYNCHRONIZATION_SYNCHRONIZE, false, PCWSTR(name.as_ptr())) } {
+        Ok(h) => {
+            let _ = unsafe { CloseHandle(h) };
+            true
+        }
+        Err(_) => false,
+    }
+}
+
+#[cfg(not(windows))]
+pub fn running() -> bool {
+    false
+}
+
+/// The process a window was opened in: started for it, or the one kept ready, which took it.
+#[cfg(windows)]
+enum Window {
+    Started(std::process::Child),
+    Ready(u32),
+}
+
+#[cfg(windows)]
+impl Window {
+    fn id(&self) -> u32 {
+        match self {
+            Window::Started(child) => child.id(),
+            Window::Ready(pid) => *pid,
+        }
+    }
+
+    fn still_open(&mut self) -> bool {
+        match self {
+            Window::Started(child) => matches!(child.try_wait(), Ok(None)),
+            Window::Ready(pid) => crate::standby::alive(*pid),
+        }
+    }
+}
+
 /// The last window opened, so pressing "Show in folder" again doesn't stack up windows.
 #[cfg(windows)]
 struct Opened {
     args: Vec<String>,
-    window: std::process::Child,
+    window: Window,
     at: Instant,
 }
 
@@ -389,24 +452,92 @@ static LAST_OPENED: std::sync::Mutex<Option<Opened>> = std::sync::Mutex::new(Non
 fn open_or_raise(ferret: &str, args: &[String]) -> std::io::Result<bool> {
     let mut last = LAST_OPENED.lock().unwrap_or_else(|e| e.into_inner());
     if let Some(o) = last.as_mut() {
-        let still_open = matches!(o.window.try_wait(), Ok(None));
+        let still_open = o.window.still_open();
         if is_repeat(&o.args, o.at.elapsed(), still_open, args) {
             raise_window(o.window.id());
             return Ok(false);
         }
     }
-    let window = std::process::Command::new(ferret).args(args).spawn()?;
+    // The Ferret kept ready takes it when there is one: its window is there in a fraction of
+    // the time a start takes. Else a start, as ever.
+    let launch = crate::standby::Launch { args: args.to_vec(), cwd: String::new() };
+    let window = match crate::standby::hand_over(ferret, &launch) {
+        Some(pid) => {
+            say("handed to the Ferret kept ready");
+            let ferret = ferret.to_string();
+            std::thread::spawn(move || {
+                front_once_shown(pid);
+                // The next one, once this window has had a moment to itself (the timer would
+                // take up to five seconds, and a second press may come sooner).
+                std::thread::sleep(Duration::from_millis(1200));
+                keep_one_ready(&ferret);
+            });
+            Window::Ready(pid)
+        }
+        None => Window::Started(std::process::Command::new(ferret).args(args).spawn()?),
+    };
     *last = Some(Opened { args: args.to_vec(), window, at: Instant::now() });
     Ok(true)
+}
+
+/// A process started for a window may take the front; one that was waiting in the background
+/// may not, and this helper can't always give it leave. So once its window is there and isn't
+/// in front, it's brought there (`raise_window` knows how). Gives up after two seconds.
+#[cfg(windows)]
+fn front_once_shown(pid: u32) {
+    use windows::Win32::UI::WindowsAndMessaging::{GetForegroundWindow, GetWindowThreadProcessId};
+    let since = Instant::now();
+    while since.elapsed() < Duration::from_secs(2) {
+        std::thread::sleep(Duration::from_millis(25));
+        if window_of(pid).is_none() {
+            continue;
+        }
+        let mut front = 0;
+        // SAFETY: plain calls with an out-parameter.
+        unsafe { GetWindowThreadProcessId(GetForegroundWindow(), Some(&mut front)) };
+        if front != pid {
+            // A moment for it to take the front itself, as it does when it may.
+            std::thread::sleep(Duration::from_millis(60));
+            unsafe { GetWindowThreadProcessId(GetForegroundWindow(), Some(&mut front)) };
+            if front != pid {
+                say("its window wasn't in front: brought there");
+                raise_window(pid);
+            }
+        }
+        return;
+    }
 }
 
 /// Brings a process's window to the front: clicking the app that asked again may have covered
 /// it. With no window yet there's nothing to do, it takes the front itself when it appears.
 #[cfg(windows)]
 fn raise_window(pid: u32) {
+    use windows::Win32::UI::Input::KeyboardAndMouse::*;
+    use windows::Win32::UI::WindowsAndMessaging::*;
+    let Some(hwnd) = window_of(pid) else { return };
+    unsafe {
+        if IsIconic(hwnd).as_bool() {
+            let _ = ShowWindow(hwnd, SW_RESTORE);
+        }
+        if SetForegroundWindow(hwnd).as_bool() {
+            return;
+        }
+        // Windows only lets the app used last hand out the front, and a key press makes this
+        // one that app. Alt does nothing on its own (the window library does the same).
+        let key = |flags| INPUT {
+            r#type: INPUT_KEYBOARD,
+            Anonymous: INPUT_0 { ki: KEYBDINPUT { wVk: VK_LMENU, wScan: 0, dwFlags: flags, time: 0, dwExtraInfo: 0 } },
+        };
+        SendInput(&[key(KEYBD_EVENT_FLAGS(0)), key(KEYEVENTF_KEYUP)], std::mem::size_of::<INPUT>() as i32);
+        let _ = SetForegroundWindow(hwnd);
+    }
+}
+
+/// A process's window: shown, with a title.
+#[cfg(windows)]
+fn window_of(pid: u32) -> Option<windows::Win32::Foundation::HWND> {
     use windows::core::BOOL;
     use windows::Win32::Foundation::{FALSE, HWND, LPARAM, TRUE};
-    use windows::Win32::UI::Input::KeyboardAndMouse::*;
     use windows::Win32::UI::WindowsAndMessaging::*;
     struct Search {
         pid: u32,
@@ -425,23 +556,7 @@ fn raise_window(pid: u32) {
     let mut search = Search { pid, found: None };
     // Err only says the search stopped early, which is finding it.
     let _ = unsafe { EnumWindows(Some(look), LPARAM(&mut search as *mut Search as isize)) };
-    let Some(hwnd) = search.found else { return };
-    unsafe {
-        if IsIconic(hwnd).as_bool() {
-            let _ = ShowWindow(hwnd, SW_RESTORE);
-        }
-        if SetForegroundWindow(hwnd).as_bool() {
-            return;
-        }
-        // Windows only lets the app used last hand out the front, and a key press makes this
-        // one that app. Alt does nothing on its own (the window library does the same).
-        let key = |flags| INPUT {
-            r#type: INPUT_KEYBOARD,
-            Anonymous: INPUT_0 { ki: KEYBDINPUT { wVk: VK_LMENU, wScan: 0, dwFlags: flags, time: 0, dwExtraInfo: 0 } },
-        };
-        SendInput(&[key(KEYBD_EVENT_FLAGS(0)), key(KEYEVENTF_KEYUP)], std::mem::size_of::<INPUT>() as i32);
-        let _ = SetForegroundWindow(hwnd);
-    }
+    search.found
 }
 
 /// Makes a window fully transparent and keeps it off the taskbar (a tool window gets no

@@ -247,8 +247,13 @@ pub struct Ferret {
     pub video: Option<(Entity<VideoView>, Subscription)>,
     /// The video waited for (its poster being made) while the last one stays, and since when.
     pub video_wait: Option<(String, Instant)>,
+    /// The item selected after a video while it isn't read yet, and since when: the video stays
+    /// (paused) that long, `preview::HOLD` at most, so the pane isn't empty in between.
+    pub video_left: Option<(String, Instant)>,
     /// The selected Word document: its path, and the document once read (off the UI thread).
     pub word: Option<(String, Option<Result<Arc<docx::Doc>, String>>)>,
+    /// The document of the selection before, kept while the next item is read (preview.rs `held`).
+    pub word_before: Option<(String, Arc<docx::Doc>)>,
     pub palette: Option<(Entity<Palette>, Subscription)>,
     pub palette_actions: Vec<Action>,
     pub preview_open: bool,
@@ -537,7 +542,9 @@ impl Ferret {
             update: Default::default(),
             video: None,
             video_wait: None,
+            video_left: None,
             word: None,
+            word_before: None,
             palette: None,
             palette_actions: Vec::new(),
             preview_open: true,
@@ -1099,6 +1106,7 @@ impl Ferret {
         cx: &mut Context<Self>,
     ) {
         let bench_dir = self.bench.as_ref().and_then(|b| b.dir.clone());
+        bench::mark(bench::LISTED);
         // A network folder whose server wants a user name and password: asked in Ferret's own box.
         let requested_copy = requested.clone();
         let wants_login = moving && matches!(&res, Err(e) if e.starts_with(ferret_core::network::LOGIN_PREFIX));
@@ -2785,7 +2793,10 @@ impl Ferret {
         }
         let out = self.bench.as_ref().map(|b| b.out.clone());
         let editor = cx.new(|cx| Editor::new(paths, out, window, cx));
-        let sub = cx.subscribe_in(&editor, window, |this, _, event: &EditorEvent, window, cx| {
+        let sub = cx.subscribe_in(&editor, window, |this, editor, event: &EditorEvent, window, cx| {
+            for picture in editor.update(cx, |e, _| e.pictures()) {
+                let _ = window.drop_image(picture);
+            }
             this.editor = None;
             // The samples it made are deleted with it.
             ferret_core::media::media_release();
@@ -2898,9 +2909,13 @@ impl Ferret {
     /// Reads the selected .docx in the background (once per selection).
     fn sync_word(&mut self, cx: &mut Context<Self>) {
         let p = self.pane();
-        let want = p.selected.filter(|_| p.marked.len() <= 1).and_then(|i| p.rows.get(i)).filter(|r| r.e.ext == "docx").map(|r| r.e.path.clone());
+        let want = p.selected.filter(|_| p.marked.len() <= 1).and_then(|i| p.rows.get(i)).filter(|r| crate::preview::is_word(&r.e.ext)).map(|r| r.e.path.clone());
         if self.word.as_ref().map(|(p, _)| p) == want.as_ref() {
             return;
+        }
+        // The one shown stays on screen while the next item is read (`held`): kept until then.
+        if let Some((old, Some(Ok(doc)))) = self.word.take() {
+            self.word_before = Some((old, doc));
         }
         self.word = want.clone().map(|p| (p, None));
         let Some(path) = want else { return };
@@ -2941,6 +2956,10 @@ impl Ferret {
         if current == want {
             return;
         }
+        if want.is_none() && self.video_lingers(cx) {
+            return;
+        }
+        self.video_left = None;
         // The next video's poster (its thumbnail) is what shows until its first frame. Not made
         // yet: the last video stays a moment (300 ms at most) instead of an empty box flashing in
         // between (2026-11-11). The ones either side are asked for now, so arrowing on has them.
@@ -3008,6 +3027,43 @@ impl Ferret {
         }
     }
 
+    /// Leaving a video for a file that isn't read yet: the video stays, paused, until it is
+    /// (`preview::HOLD` at most), and the preview keeps drawing it meanwhile. Without it the
+    /// pane was empty for as long as the next file took to read (some 50 ms before a song).
+    fn video_lingers(&mut self, cx: &mut Context<Self>) -> bool {
+        if !self.preview_open && !self.quicklook {
+            return false;
+        }
+        let p = self.pane();
+        let Some(next) = p.cursor_row().filter(|r| p.marked.len() <= 1 && !r.e.is_dir).map(|r| (r.e.path.clone(), r.e.ext.clone())) else { return false };
+        let (path, ext) = next;
+        let ready = if crate::preview::is_word(&ext) {
+            self.word.as_ref().is_some_and(|(p, doc)| *p == path && doc.is_some())
+        } else {
+            self.preview_data.as_ref().is_some_and(|l| l.path() == path)
+        };
+        if ready {
+            return false;
+        }
+        let since = match &self.video_left {
+            Some((p, at)) if *p == path => *at,
+            _ => {
+                let now = Instant::now();
+                self.video_left = Some((path, now));
+                if let Some((v, _)) = &self.video {
+                    v.update(cx, |v, _| v.pause());
+                }
+                cx.spawn(async move |this, cx| {
+                    cx.background_executor().timer(crate::preview::HOLD + Duration::from_millis(8)).await;
+                    this.update(cx, |_, cx| cx.notify()).ok();
+                })
+                .detach();
+                now
+            }
+        };
+        since.elapsed() < crate::preview::HOLD
+    }
+
     fn sync_title(&mut self, window: &mut Window) {
         let p = self.pane();
         let mut title = format!("{} - Ferret", util::folder_name(&p.path));
@@ -3069,6 +3125,7 @@ impl Render for Ferret {
             });
         }
         self.bench_frame(window, cx);
+        bench::first_frame(window);
         self.sync_video(window, cx);
         self.sync_word(cx);
         self.sync_pdf_unlock(window, cx);

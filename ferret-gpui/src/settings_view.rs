@@ -460,12 +460,33 @@ impl Ferret {
             }))
             .into_any_element(),
         };
+        // A Ferret kept ready (ferret-core's standby.rs): only while this copy is the default
+        // file manager, whose background helper keeps it.
+        let ready = (enabled && other.is_none()).then(|| {
+            toggle("Keep a window ready", "keep-ready", ferret_core::standby::wanted(), cx, std::rc::Rc::new(|f, v, cx| match ferret_core::standby::set_wanted(v) {
+                Ok(()) => {
+                    // Off: the one waiting leaves now. On: the helper starts one within seconds.
+                    if let (false, Ok(exe)) = (v, std::env::current_exe()) {
+                        ferret_core::standby::dismiss(&exe.to_string_lossy());
+                    }
+                    cx.notify();
+                }
+                Err(e) => f.toast_error(e, cx),
+            }))
+        });
         let integration = card("Windows integration", None)
             .child(field(
                 "Use Ferret instead of File Explorer",
                 Some("Win+E, folders opened from the desktop and other apps open in Ferret. Turning it off puts Explorer back exactly as it was."),
                 control,
             ))
+            .when_some(ready, |d, ready| {
+                d.child(field(
+                    "Keep a window ready",
+                    Some("A copy of Ferret waits in the background, so a new window opens about four times faster. It uses no processor time and hands its memory back to Windows while it waits."),
+                    ready.into_any_element(),
+                ))
+            })
             .when_some(other, |d, target| {
                 d.child(ui::note("fm-other", format!("Folders open in another copy of Ferret ({target}). Change this setting there.")).text_size(px(12.)).text_color(t::fg3()))
             })
