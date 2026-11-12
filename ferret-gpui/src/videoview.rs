@@ -11,7 +11,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use gpui::{
-    Bounds, ClickEvent, Context, EventEmitter, MouseButton, MouseDownEvent, MouseMoveEvent, Pixels, Point,
+    AnimationExt, Bounds, ClickEvent, Context, EventEmitter, MouseButton, MouseDownEvent, MouseMoveEvent, Pixels, Point,
     RenderImage, Window, canvas, div, prelude::*, px, relative,
 };
 
@@ -26,6 +26,36 @@ use crate::ui::icon;
 pub enum VideoEvent {
     /// The compress button.
     Compress,
+}
+
+/// How long a poster takes to fade out over the first frame that arrived under it.
+const POSTER_OUT: Duration = Duration::from_millis(170);
+
+/// What a video showed last, as a still picture: the preview keeps it on screen while what
+/// comes next is on its way, then fades it out under that.
+#[derive(Clone)]
+pub enum Still {
+    /// Its last frame (the player's image, which stays on the GPU until it's dropped).
+    Frame(Arc<RenderImage>),
+    /// Its poster: no frame had arrived.
+    Poster(Arc<gpui::Image>),
+}
+
+impl Still {
+    pub fn element(&self) -> gpui::Img {
+        match self {
+            Still::Frame(image) => img(image.clone()),
+            Still::Poster(image) => img(image.clone()).object_fit(gpui::ObjectFit::Contain),
+        }
+    }
+
+    /// The player's image, to drop from GPUI's cache once the still isn't drawn any more.
+    pub fn frame(&self) -> Option<Arc<RenderImage>> {
+        match self {
+            Still::Frame(image) => Some(image.clone()),
+            Still::Poster(_) => None,
+        }
+    }
 }
 
 pub struct VideoView {
@@ -57,6 +87,19 @@ pub struct VideoView {
     generation: u64,
     /// The video's thumbnail, shown until its first frame is ready (the preview sets it).
     pub poster: Option<std::sync::Arc<gpui::Image>>,
+    /// The preview is keeping what it showed before on screen while this video's first frame is
+    /// on its way (`content_view`): the view is drawn over that, showing nothing itself yet. A
+    /// poster shown at once was a third picture between two videos: the last video, the next
+    /// one's thumbnail (Windows takes it from further into the video), then its first frame.
+    pub quiet: bool,
+    /// Where the picture is drawn in the window, as of the last frame.
+    screen: Rc<Cell<Bounds<Pixels>>>,
+    opened: Instant,
+    /// The poster was drawn (the first frame took longer than the preview waits for it).
+    poster_shown: bool,
+    /// When the first frame arrived under a poster that was showing: the poster fades out over
+    /// it instead of being cut to it.
+    poster_out: Option<Instant>,
 }
 
 impl EventEmitter<VideoEvent> for VideoView {}
@@ -89,11 +132,39 @@ impl VideoView {
             trace,
             generation,
             poster: None,
+            quiet: false,
+            screen: Rc::default(),
+            opened: Instant::now(),
+            poster_shown: false,
+            poster_out: None,
         }
     }
 
     pub fn is_ok(&self) -> bool {
         self.player.is_ok()
+    }
+
+    /// Its first frame is on screen, or there never will be one (it can't be played).
+    pub fn settled(&self) -> bool {
+        match &self.player {
+            Ok(p) => p.frames > 0 || p.error().is_some(),
+            Err(_) => true,
+        }
+    }
+
+    /// What it shows now as a still, and where in the space it has. None while it shows
+    /// nothing of its own (no frame yet, and no poster drawn).
+    pub fn still(&self) -> Option<(Still, Bounds<Pixels>)> {
+        let (screen, area) = (self.screen.get(), self.area.get());
+        if screen.size.width <= px(0.) || screen.size.height <= px(0.) {
+            return None;
+        }
+        let still = match self.player.as_ref().ok() {
+            Some(p) if p.frames > 0 => Still::Frame(p.image()?),
+            _ if self.poster_shown => Still::Poster(self.poster.clone()?),
+            _ => return None,
+        };
+        Some((still, Bounds::new(screen.origin - area.origin, screen.size)))
     }
 
     /// The image GPUI holds for the current frame, to drop from its cache when this view goes.
@@ -215,6 +286,10 @@ impl VideoView {
         let before = p.frames;
         let had_image = p.image().is_some();
         let began = Instant::now();
+        // Tests of what shows while a video's first frame is slow to come: FERRET_GPUI_SLOW_VIDEO=<ms>.
+        if before == 0 && slow_video().is_some_and(|ms| self.opened.elapsed() < ms) {
+            return Show::Nothing;
+        }
         let replaced = p.update(dw, dh);
         if let (Some(trace), Some((since, ..))) = (self.trace.as_mut(), self.counted) {
             let at = began.duration_since(since).as_secs_f64() * 1000.;
@@ -222,6 +297,10 @@ impl VideoView {
         }
         let playing = p.playing();
         let new_frame = p.frames != before;
+        if before == 0 && new_frame {
+            let (path, took, quiet) = (&self.path, self.opened.elapsed().as_millis(), self.quiet);
+            crate::watchdog::trace("video", || format!("{path}: first frame {took} ms after it was opened{}", if quiet { ", what was there kept until now" } else { "" }));
+        }
         // The controls move along with the frames, so they're checked when one arrives. The clock
         // is drawn when its second changes, the seek bar's fill at most 4 times a second (as a
         // browser's player does, on `timeupdate`).
@@ -230,7 +309,9 @@ impl VideoView {
             (now.position, now.duration) != (self.shown.position, self.shown.duration)
                 || (now.filled_px != self.shown.filled_px && self.drawn_at.elapsed() >= Duration::from_millis(250))
         };
+        // (The first frame: the preview stops keeping what it showed before, and a poster goes.)
         let redraw = replaced.is_some()
+            || (before == 0 && p.frames > 0)
             || had_image != p.image().is_some()
             || sized != (self.size.0 > 0.)
             || playing != std::mem::replace(&mut self.was_playing, playing)
@@ -319,6 +400,11 @@ impl VideoView {
     }
 }
 
+fn slow_video() -> Option<Duration> {
+    static SLOW: std::sync::OnceLock<Option<Duration>> = std::sync::OnceLock::new();
+    *SLOW.get_or_init(|| std::env::var("FERRET_GPUI_SLOW_VIDEO").ok().and_then(|v| v.parse().ok()).map(Duration::from_millis))
+}
+
 /// What a check for a new frame needs shown.
 enum Show {
     Nothing,
@@ -392,29 +478,53 @@ impl Render for VideoView {
         let frac = progress(position, duration);
         self.shown = Controls::at(position, duration, self.bar.get(), window.scale_factor());
         self.drawn_at = Instant::now();
-        let screen = match p.image() {
-            Some(image) if p.frames > 0 || self.poster.is_none() => img(image).w(px(w)).h(px(h)).rounded(px(8.)).into_any_element(),
+        let has_frame = p.frames > 0;
+        // Quiet: nothing of its own shows until the first frame (the preview draws what it
+        // showed before underneath). The frame's picture is still drawn: it's empty until then,
+        // and has to be drawn once to get its place on the GPU.
+        let quiet = self.quiet && !has_frame && p.error().is_none();
+        if has_frame && self.poster_shown && self.poster_out.is_none() {
+            self.poster_out = Some(Instant::now());
+        }
+        let poster_fading = t::animate() && self.poster_out.is_some_and(|at| at.elapsed() < POSTER_OUT);
+        let screen = match (p.image(), self.poster.clone().filter(|_| !quiet)) {
+            (Some(image), None) => img(image).w(px(w)).h(px(h)).rounded(px(8.)).into_any_element(),
+            (Some(image), Some(_)) if has_frame && !poster_fading => img(image).w(px(w)).h(px(h)).rounded(px(8.)).into_any_element(),
             // The frame's picture exists before a frame is in it (it has to be drawn once to get
             // its place on the GPU, which the frames are then copied into): the poster covers it
-            // until the first one is there, or it showed empty for a frame or two (2026-11-11).
-            Some(image) => div()
-                .relative()
-                .w(px(w))
-                .h(px(h))
-                .child(img(image).absolute().top_0().left_0().w(px(w)).h(px(h)).rounded(px(8.)))
-                .child(img(self.poster.clone().unwrap()).absolute().top_0().left_0().w(px(w)).h(px(h)).rounded(px(8.)).object_fit(gpui::ObjectFit::Contain))
-                .into_any_element(),
+            // until the first one is there, or it showed empty for a frame or two (2026-11-11);
+            // then it fades out over that frame.
+            (Some(image), Some(poster)) => {
+                self.poster_shown = true;
+                let over = img(poster).absolute().top_0().left_0().w(px(w)).h(px(h)).rounded(px(8.)).object_fit(gpui::ObjectFit::Contain);
+                div()
+                    .relative()
+                    .w(px(w))
+                    .h(px(h))
+                    .child(img(image).absolute().top_0().left_0().w(px(w)).h(px(h)).rounded(px(8.)))
+                    .child(if has_frame {
+                        over.with_animation("poster-out", gpui::Animation::new(POSTER_OUT), |d, k| d.opacity(1. - k)).into_any_element()
+                    } else {
+                        over.into_any_element()
+                    })
+                    .into_any_element()
+            }
             // Until the first frame: the video's thumbnail (the app's poster), not an empty
             // stage with a play button floating on it.
-            None if self.poster.is_some() => img(self.poster.clone().unwrap()).w(px(w)).h(px(h)).rounded(px(8.)).object_fit(gpui::ObjectFit::Contain).into_any_element(),
+            (None, Some(poster)) => {
+                self.poster_shown = true;
+                img(poster).w(px(w)).h(px(h)).rounded(px(8.)).object_fit(gpui::ObjectFit::Contain).into_any_element()
+            }
+            (None, None) if quiet => div().w(px(w)).h(px(h)).into_any_element(),
             // Nothing to show yet: the picture's place, breathing, with a turning spinner (the
             // loader icon stood still).
-            None => crate::ui::skeleton("video-loading", crate::ui::Skeleton::Picture { w, h }),
+            (None, None) => crate::ui::skeleton("video-loading", crate::ui::Skeleton::Picture { w, h }),
         };
         // The play button follows the picture: a quarter of its height, 36 to 50 px.
         let play = (h * 0.26).clamp(36., 50.);
         let bar = self.bar.clone();
         let area = self.area.clone();
+        let screen_at = self.screen.clone();
         let me = cx.entity_id();
         div()
             .size_full()
@@ -436,6 +546,10 @@ impl Render for VideoView {
                     |_, _, _, _| {},
                 )
                 .absolute()
+                // From the view's own corner (without, it starts after the padding, and a still
+                // placed from it was 14 px to the left of where the picture had been).
+                .top_0()
+                .left_0()
                 .size_full(),
             )
             .child(
@@ -449,8 +563,9 @@ impl Render for VideoView {
                     .h(px(h))
                     .on_click(cx.listener(|v, _: &ClickEvent, _, cx| v.toggle_play(cx)))
                     .when(!ready, |d| d.opacity(0.))
+                    .child(canvas(move |b, _, _| screen_at.set(b), |_, _, _, _| {}).absolute().top_0().left_0().size_full())
                     .child(screen)
-                    .when(!playing && ready, |d| {
+                    .when(!playing && ready && !quiet, |d| {
                         d.child(
                             // The app's play button (.pv-play): the theme's accent, a filled
                             // triangle nudged right to look centred, a soft shadow; fuller on hover.
@@ -486,6 +601,7 @@ impl Render for VideoView {
                     .flex()
                     .items_center()
                     .gap(px(8.))
+                    .when(quiet, |d| d.invisible())
                     .child(button("play-pause", if playing { "pause" } else { "play" }).on_click(cx.listener(|v, _: &ClickEvent, _, cx| v.toggle_play(cx))))
                     .child(
                         div()

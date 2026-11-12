@@ -53,15 +53,57 @@ pub struct Loaded {
 /// read: a flash at every step through a folder). A slower one shows the loading shape after it.
 pub const HOLD: Duration = Duration::from_millis(180);
 
+/// How long a video's first frame is waited for with what was there before still on screen.
+/// Most arrive in less, and the pane goes from one picture straight to the next; after it, the
+/// video's poster stands in.
+const VIDEO_HOLD: Duration = Duration::from_millis(260);
+
 /// How long another item's content takes to fade in.
 const FADE: Duration = Duration::from_millis(170);
 
-/// A fade under way: the item fading in, the picture fading out under it, since when.
+/// A fade under way: the item fading in, what fades out under it, since when.
 pub struct Fade {
     path: String,
-    from: Option<(Arc<gpui::Image>, (u32, u32))>,
+    from: Option<Before>,
     at: Instant,
     id: usize,
+}
+
+impl Fade {
+    /// Stops drawing a video's frame that is about to be dropped from the GPU.
+    pub fn forget_frame(&mut self, frame: &Arc<gpui::RenderImage>) {
+        if matches!(&self.from, Some(Before::Still(crate::videoview::Still::Frame(f), _)) if Arc::ptr_eq(f, frame)) {
+            self.from = None;
+        }
+    }
+}
+
+/// What the preview showed before, that fades out under the content fading in.
+#[derive(Clone)]
+pub enum Before {
+    /// A picture, where `picture_view` drew it.
+    Picture(Arc<gpui::Image>, (u32, u32)),
+    /// A video's last frame (or its poster), where its player drew it.
+    Still(crate::videoview::Still, gpui::Bounds<gpui::Pixels>),
+}
+
+/// The video the preview showed last, as a still: kept on screen while what was selected after
+/// it is on its way, then faded out under that. (Its player is gone by then; the still is the
+/// player's last frame, left on the GPU until `FerretView::release_still`.)
+pub struct VideoStill {
+    pub still: crate::videoview::Still,
+    /// Where it was, from the corner of the preview's content.
+    pub at: gpui::Bounds<gpui::Pixels>,
+    /// In Quick Look (else in the pane).
+    pub big: bool,
+    /// The frame it was last on screen: made then, or drawn again.
+    pub frame: u64,
+    pub since: Instant,
+}
+
+/// A video's still, where the player had it.
+fn still_view(still: &crate::videoview::Still, at: gpui::Bounds<gpui::Pixels>) -> Div {
+    div().absolute().left(at.origin.x).top(at.origin.y).w(at.size.width).h(at.size.height).child(still.element().size_full().rounded(px(8.)))
 }
 
 /// What a selected folder's summary and details show of its listing.
@@ -492,8 +534,11 @@ impl Ferret {
             }
             None => {
                 let path = p.path.clone();
+                let before = self.before(false);
                 self.note_shown(Shown::Folder(path.clone()), false);
                 let summary = self.folder_summary_for(&path, cx);
+                // Another folder's summary (or this one's, after a selected item) fades in too.
+                let summary = self.fade_in(&path, false, before, true, summary);
                 let p = self.pane();
                 let files = p.rows.len() - p.folders;
                 let bytes: u64 = p.rows.iter().filter(|r| !r.e.is_dir).map(|r| r.e.size).sum();
@@ -717,10 +762,31 @@ impl Ferret {
         (*frame + 1 >= crate::imgmem::current_frame()).then(|| (image.clone(), *size))
     }
 
+    /// The still of the video that was on screen the frame before, if any. `drawn`: it's drawn
+    /// again now, so it counts as on screen for the next frame too.
+    fn kept_still(&mut self, big: bool, drawn: bool) -> Option<(crate::videoview::Still, gpui::Bounds<gpui::Pixels>)> {
+        let now = crate::imgmem::current_frame();
+        let s = self.video_still.as_mut().filter(|s| s.big == big && s.frame + 1 >= now)?;
+        if drawn {
+            s.frame = now;
+            s.since = Instant::now();
+        }
+        Some((s.still.clone(), s.at))
+    }
+
+    /// What the frame before showed that can fade out under what's drawn now: a picture, or a
+    /// video's still.
+    fn before(&mut self, big: bool) -> Option<Before> {
+        if let Some((image, size)) = self.kept_picture(big) {
+            return Some(Before::Picture(image, size));
+        }
+        self.kept_still(big, false).map(|(still, at)| Before::Still(still, at))
+    }
+
     /// What the frame before drew (something else than `path`'s content) that can be drawn
     /// again as it was: another item's content (still read: the one shown, or in the cache it
     /// goes to when the next is read), or a folder's summary.
-    fn kept(&self, path: &str, big: bool, cx: &gpui::App) -> Option<Shown> {
+    fn kept(&self, path: &str, big: bool) -> Option<Shown> {
         let (shown, frame) = self.preview_showing[big as usize].as_ref()?;
         if *frame + 1 < crate::imgmem::current_frame() {
             return None;
@@ -728,8 +794,8 @@ impl Ferret {
         let still = match shown {
             Shown::Folder(dir) => dir != path,
             Shown::Item(old, _) if old == path => false,
-            // A video: its player, which `sync_video` keeps (paused) while the next item is read.
-            Shown::Item(old, Kind::Video) => self.video.as_ref().is_some_and(|(v, _)| v.read(cx).path == *old),
+            // A video: its player is gone; its still stands in (`kept_still`).
+            Shown::Item(_, Kind::Video) => false,
             // A Word document: the one read for the selection before (`sync_word` keeps it).
             Shown::Item(old, _) if is_word(&ext_of(old)) => self.word_before.as_ref().is_some_and(|(p, _)| p == old),
             Shown::Item(old, _) => self.preview_data.iter().chain(&self.preview_cache).any(|l| l.path() == old && l.holds()),
@@ -774,20 +840,37 @@ impl Ferret {
                 crate::imgmem::decoded(&t, window, cx);
             }
         }
-        if kind == Kind::Video && self.video.is_some() {
-            return self.content_of(path, ext, kind, width, big, window, cx);
+        if kind == Kind::Video {
+            if let Some(v) = self.video.as_ref().map(|(v, _)| v.clone()) {
+                // Its first frame is on its way: what was there stays meanwhile, with the player
+                // over it showing nothing yet (it has to be drawn to get its frames). Its poster
+                // shown at once was a third picture between two videos (user, 2026-11-12).
+                let under = if v.read(cx).settled() { None } else { self.held(path, kind, since, VIDEO_HOLD, width, big, window, cx) };
+                let quiet = under.is_some();
+                if v.read(cx).quiet != quiet {
+                    v.update(cx, |v, _| v.quiet = quiet);
+                }
+                if let Some(under) = under {
+                    return div().flex_1().min_h_0().relative().flex().flex_col().child(under).child(div().absolute().top_0().left_0().size_full().child(v)).into_any_element();
+                }
+                let before = self.before(big);
+                let el = self.content_of(path, ext, kind, width, big, window, cx);
+                // No lift: a few pixels less room would size the video again at every step.
+                return self.fade_in(path, big, before, false, el);
+            }
         }
         // A Word document is read by its own path.
         if is_word(ext) {
             let reading = !self.word.as_ref().is_some_and(|(p, doc)| p == path && doc.is_some());
             if reading {
-                if let Some(el) = self.held(path, kind, since, width, big, window, cx) {
+                if let Some(el) = self.held(path, kind, since, HOLD, width, big, window, cx) {
                     return el;
                 }
                 return self.content_of(path, ext, kind, width, big, window, cx);
             }
+            let before = self.before(big);
             let el = self.content_of(path, ext, kind, width, big, window, cx);
-            return self.fade_in(path, big, None, el);
+            return self.fade_in(path, big, before, true, el);
         }
         let own = self.preview_data.as_ref().filter(|l| l.path() == path);
         let read = own.is_some();
@@ -801,20 +884,21 @@ impl Ferret {
         });
         let decoded = picture.is_none_or(|image| crate::imgmem::decoded(&image, window, cx));
         crate::watchdog::trace("preview", || format!("{path}: {}", if !read { "not read yet" } else if !decoded { "read, not decoded" } else { "ready" }));
-        // The picture the frame before showed (another item's), to fade out under this one.
-        let before = self.kept_picture(big);
+        // What the frame before showed (another item's picture, a video's last frame), to fade
+        // out under this one.
+        let before = self.before(big);
         if read && decoded {
             let el = self.content_of(path, ext, kind, width, big, window, cx);
-            return self.fade_in(path, big, before, el);
+            return self.fade_in(path, big, before, true, el);
         }
         let frame = |el: AnyElement| div().flex_1().min_h_0().px(px(14.)).pb(px(10.)).flex().flex_col().child(el).into_any_element();
         let stand_in = self.picture_stand_in(path, kind, big, window, cx);
         if let Some((thumb, size)) = stand_in.clone().filter(|(t, _)| crate::imgmem::decoded(t, window, cx)) {
             crate::watchdog::trace("shows", || format!("{path}: its thumbnail"));
             let el = frame(self.picture_view(thumb, size, big, cx));
-            return self.fade_in(path, big, before, el);
+            return self.fade_in(path, big, before, true, el);
         }
-        if let Some(el) = self.held(path, kind, since, width, big, window, cx) {
+        if let Some(el) = self.held(path, kind, since, HOLD, width, big, window, cx) {
             return el;
         }
         if let Some((thumb, size)) = stand_in {
@@ -829,7 +913,9 @@ impl Ferret {
     /// picture shown before, which fades out under it (one picture turns into the next), else
     /// from faint, rising a few pixels. The swap alone, with nothing between two items, read as
     /// a flash (user, 2026-11-12). Not with animations off.
-    fn fade_in(&mut self, path: &str, big: bool, before: Option<(Arc<gpui::Image>, (u32, u32))>, el: AnyElement) -> AnyElement {
+    /// `lift`: without a picture under it, it also rises those few pixels (not a video, which
+    /// would be sized again for the room it has at every step).
+    fn fade_in(&mut self, path: &str, big: bool, before: Option<Before>, lift: bool, el: AnyElement) -> AnyElement {
         if !t::animate() {
             return el;
         }
@@ -841,23 +927,34 @@ impl Ferret {
         let Some(fade) = self.preview_fade[slot].as_ref().filter(|f| f.at.elapsed() < FADE) else { return el };
         let (id, from) = (fade.id, fade.from.clone());
         let over_picture = from.is_some();
-        let under = from.map(|(image, size)| {
-            let bounds = self.picture_bounds[slot].get().size;
-            let (aw, ah, pw, ph) = (bounds.width.as_f32(), bounds.height.as_f32(), size.0 as f32, size.1 as f32);
-            let fit = if aw > 0. && ah > 0. && pw > 0. && ph > 0. { (aw / pw).min(ah / ph).min(if big { 1. } else { f32::MAX }) } else { 0. };
-            let (w, h) = (pw * fit, ph * fit);
-            // Where `picture_view` drew it: centred in the picture's area, inside the frame.
-            div()
-                .absolute()
-                .top_0()
-                .left(px(14.))
-                .w(px(aw))
-                .h(px(ah))
-                .child(div().absolute().left(px((aw - w) / 2.)).top(px((ah - h) / 2.)).w(px(w)).h(px(h)).child(img(image).size_full().object_fit(ObjectFit::Contain)))
-                .with_animation(("pv-fade-out", id), gpui::Animation::new(FADE), |d, k| d.opacity(1. - k))
+        let under = from.map(|from| {
+            let under = match from {
+                Before::Picture(image, size) => {
+                    let bounds = self.picture_bounds[slot].get().size;
+                    let (aw, ah, pw, ph) = (bounds.width.as_f32(), bounds.height.as_f32(), size.0 as f32, size.1 as f32);
+                    let fit = if aw > 0. && ah > 0. && pw > 0. && ph > 0. { (aw / pw).min(ah / ph).min(if big { 1. } else { f32::MAX }) } else { 0. };
+                    let (w, h) = (pw * fit, ph * fit);
+                    // Where `picture_view` drew it: centred in the picture's area, inside the frame.
+                    div()
+                        .absolute()
+                        .top_0()
+                        .left(px(14.))
+                        .w(px(aw))
+                        .h(px(ah))
+                        .child(div().absolute().left(px((aw - w) / 2.)).top(px((ah - h) / 2.)).w(px(w)).h(px(h)).child(img(image).size_full().object_fit(ObjectFit::Contain)))
+                }
+                Before::Still(still, at) => still_view(&still, at),
+            };
+            under.with_animation(("pv-fade-out", id), gpui::Animation::new(FADE), |d, k| d.opacity(1. - k))
         });
         let over = div().flex_1().min_h_0().flex().flex_col().child(el).with_animation(("pv-fade-in", id), gpui::Animation::new(FADE).with_easing(gpui::ease_out_quint()), move |d, k| {
-            if over_picture { d.opacity(k) } else { d.opacity(0.15 + 0.85 * k).mt(px((1. - k) * 4.)) }
+            if over_picture {
+                d.opacity(k)
+            } else if lift {
+                d.opacity(0.15 + 0.85 * k).mt(px((1. - k) * 4.))
+            } else {
+                d.opacity(0.15 + 0.85 * k)
+            }
         });
         div().flex_1().min_h_0().relative().flex().flex_col().children(under).child(over).into_any_element()
     }
@@ -874,19 +971,19 @@ impl Ferret {
         }
     }
 
-    /// While `path` isn't ready and `HOLD` isn't over: what the pane showed the frame before
-    /// (the picture before, for a picture; else the item or folder summary as it was), or
-    /// nothing at all where there was nothing to keep (the loading shape shown at once blinked
-    /// for a frame or two before most files). None once the time is up.
+    /// While `path` isn't ready and `limit` (`HOLD`) isn't over: what the pane showed the frame
+    /// before (the picture before, for a picture; a video's last frame; else the item or folder
+    /// summary as it was), or nothing at all where there was nothing to keep (the loading shape
+    /// shown at once blinked for a frame or two before most files). None once the time is up.
     #[allow(clippy::too_many_arguments)]
-    fn held(&mut self, path: &str, kind: Kind, since: Instant, width: f32, big: bool, window: &mut Window, cx: &mut Context<Self>) -> Option<AnyElement> {
-        if since.elapsed() >= HOLD {
+    fn held(&mut self, path: &str, kind: Kind, since: Instant, limit: Duration, width: f32, big: bool, window: &mut Window, cx: &mut Context<Self>) -> Option<AnyElement> {
+        if since.elapsed() >= limit {
             return None;
         }
         // Drawn again when the time is up (nothing else may ask for it).
         if self.preview_hold_wake.as_deref() != Some(path) {
             self.preview_hold_wake = Some(path.to_string());
-            let left = HOLD.saturating_sub(since.elapsed()) + Duration::from_millis(8);
+            let left = limit.saturating_sub(since.elapsed()) + Duration::from_millis(8);
             cx.spawn(async move |this, cx| {
                 cx.background_executor().timer(left).await;
                 this.update(cx, |_, cx| cx.notify()).ok();
@@ -900,7 +997,11 @@ impl Ferret {
                 return Some(div().flex_1().min_h_0().px(px(14.)).pb(px(10.)).flex().flex_col().child(el).into_any_element());
             }
         }
-        if let Some(kept) = self.kept(path, big, cx) {
+        if let Some((still, at)) = self.kept_still(big, true) {
+            crate::watchdog::trace("shows", || format!("{path}: the video before, as a still"));
+            return Some(div().flex_1().min_h_0().relative().child(still_view(&still, at)).into_any_element());
+        }
+        if let Some(kept) = self.kept(path, big) {
             crate::watchdog::trace("shows", || format!("{path}: what was there ({kept:?})"));
             return Some(self.draw_kept(kept, width, big, window, cx));
         }
@@ -913,12 +1014,15 @@ impl Ferret {
         let since = self.previewed_since(path);
         let el = self.folder_summary_for(path, cx);
         if self.summary_pending {
-            if let Some(held) = self.held(path, Kind::Folder, since, width, big, window, cx) {
+            if let Some(held) = self.held(path, Kind::Folder, since, HOLD, width, big, window, cx) {
                 return held;
             }
+            self.note_shown(Shown::Folder(path.to_string()), big);
+            return el;
         }
+        let before = self.before(big);
         self.note_shown(Shown::Folder(path.to_string()), big);
-        el
+        self.fade_in(path, big, before, true, el)
     }
 
     /// The item's content as its kind is drawn (the loading shape while it isn't read).

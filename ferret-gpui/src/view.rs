@@ -245,11 +245,10 @@ pub struct Ferret {
     pub update: crate::updateview::UpdateState,
     /// The selected video's player (its own view).
     pub video: Option<(Entity<VideoView>, Subscription)>,
-    /// The video waited for (its poster being made) while the last one stays, and since when.
-    pub video_wait: Option<(String, Instant)>,
-    /// The item selected after a video while it isn't read yet, and since when: the video stays
-    /// (paused) that long, `preview::HOLD` at most, so the pane isn't empty in between.
-    pub video_left: Option<(String, Instant)>,
+    /// The video shown last, as a still: on screen while what comes next is on its way, then
+    /// fading out under it (`preview::VideoStill`); and whether a task is watching to let it go.
+    pub video_still: Option<crate::preview::VideoStill>,
+    still_watched: bool,
     /// The selected Word document: its path, and the document once read (off the UI thread).
     pub word: Option<(String, Option<Result<Arc<docx::Doc>, String>>)>,
     /// The document of the selection before, kept while the next item is read (preview.rs `held`).
@@ -541,8 +540,8 @@ impl Ferret {
             meta_copied: None,
             update: Default::default(),
             video: None,
-            video_wait: None,
-            video_left: None,
+            video_still: None,
+            still_watched: false,
             word: None,
             word_before: None,
             palette: None,
@@ -2956,13 +2955,12 @@ impl Ferret {
         if current == want {
             return;
         }
-        if want.is_none() && self.video_lingers(cx) {
-            return;
-        }
-        self.video_left = None;
-        // The next video's poster (its thumbnail) is what shows until its first frame. Not made
-        // yet: the last video stays a moment (300 ms at most) instead of an empty box flashing in
-        // between (2026-11-11). The ones either side are asked for now, so arrowing on has them.
+        // (Leaving a video for something that isn't read yet, its player used to stay, paused,
+        // so the pane wasn't empty meanwhile. Its still does that now, where the picture was:
+        // the player was centred again in the room the next item's details left it, a jump.)
+        // The next video's poster (its thumbnail) stands in when its first frame is slow to
+        // come; until then the last video's picture stays (`VideoStill`). The ones either side
+        // are asked for now, so arrowing on has them.
         let mut poster = None;
         if let Some(path) = want.clone() {
             poster = self.thumb(&path, 512, false, None, cx);
@@ -2980,35 +2978,27 @@ impl Ferret {
             for near in around {
                 let _ = self.thumb(&near, 512, false, None, cx);
             }
-            // Made and decoded too: GPUI decodes a picture the first time it's drawn, in the
-            // background, and draws nothing meanwhile (an empty box for a frame).
-            let poster_ready = poster.as_ref().is_some_and(|p| p.clone().get_render_image(window, cx).is_some());
-            if !poster_ready && self.video.is_some() {
-                let since = match &self.video_wait {
-                    Some((p, t)) if *p == path => *t,
-                    _ => {
-                        let t = Instant::now();
-                        self.video_wait = Some((path.clone(), t));
-                        cx.spawn(async move |this, cx| {
-                            cx.background_executor().timer(Duration::from_millis(310)).await;
-                            this.update(cx, |_, cx| cx.notify()).ok();
-                        })
-                        .detach();
-                        t
-                    }
-                };
-                if since.elapsed() < Duration::from_millis(300) {
-                    return;
-                }
-            }
         }
-        self.video_wait = None;
         // The space the last video had: the next one in the same pane starts from it.
         let mut area = None;
         if let Some((old, _)) = self.video.take() {
-            area = Some(old.read(cx).area());
-            if let Some(image) = old.read(cx).image() {
+            let (still, image) = {
+                let v = old.read(cx);
+                area = Some(v.area());
+                (v.still(), v.image())
+            };
+            // What it showed stays as a still; a picture of its own that isn't that still goes.
+            let kept = still.as_ref().and_then(|(s, _)| s.frame());
+            if let Some(image) = image.filter(|i| !kept.as_ref().is_some_and(|k| Arc::ptr_eq(k, i))) {
                 let _ = window.drop_image(image);
+            }
+            // (One that showed nothing of its own yet leaves the still before it as it is: that
+            // was what was on screen.)
+            if let Some((still, at)) = still {
+                crate::watchdog::trace("video", || format!("its still is kept, at {:.0},{:.0} {:.0}x{:.0} of the preview", at.origin.x.as_f32(), at.origin.y.as_f32(), at.size.width.as_f32(), at.size.height.as_f32()));
+                self.release_still(window);
+                self.video_still = Some(crate::preview::VideoStill { still, at, big: self.quicklook, frame: crate::imgmem::current_frame(), since: Instant::now() });
+                self.watch_still(window, cx);
             }
         }
         if let Some(path) = want {
@@ -3027,41 +3017,38 @@ impl Ferret {
         }
     }
 
-    /// Leaving a video for a file that isn't read yet: the video stays, paused, until it is
-    /// (`preview::HOLD` at most), and the preview keeps drawing it meanwhile. Without it the
-    /// pane was empty for as long as the next file took to read (some 50 ms before a song).
-    fn video_lingers(&mut self, cx: &mut Context<Self>) -> bool {
-        if !self.preview_open && !self.quicklook {
-            return false;
+    /// Lets go of the last video's still: nothing draws it any more, and its frame leaves the GPU.
+    fn release_still(&mut self, window: &mut Window) {
+        let Some(frame) = self.video_still.take().and_then(|s| s.still.frame()) else { return };
+        crate::watchdog::trace("video", || "a still's frame is let go".to_string());
+        for fade in self.preview_fade.iter_mut().flatten() {
+            fade.forget_frame(&frame);
         }
-        let p = self.pane();
-        let Some(next) = p.cursor_row().filter(|r| p.marked.len() <= 1 && !r.e.is_dir).map(|r| (r.e.path.clone(), r.e.ext.clone())) else { return false };
-        let (path, ext) = next;
-        let ready = if crate::preview::is_word(&ext) {
-            self.word.as_ref().is_some_and(|(p, doc)| *p == path && doc.is_some())
-        } else {
-            self.preview_data.as_ref().is_some_and(|l| l.path() == path)
-        };
-        if ready {
-            return false;
+        let _ = window.drop_image(frame);
+    }
+
+    /// A still goes once it hasn't been on screen for a while (the fade it's part of is long
+    /// over by then). Checked by a task, since nothing may draw the window again by itself.
+    fn watch_still(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if std::mem::replace(&mut self.still_watched, true) {
+            return;
         }
-        let since = match &self.video_left {
-            Some((p, at)) if *p == path => *at,
-            _ => {
-                let now = Instant::now();
-                self.video_left = Some((path, now));
-                if let Some((v, _)) = &self.video {
-                    v.update(cx, |v, _| v.pause());
+        cx.spawn_in(window, async move |this, cx| {
+            loop {
+                cx.background_executor().timer(Duration::from_millis(400)).await;
+                let more = this.update_in(cx, |f, window, _| {
+                    if f.video_still.as_ref().is_some_and(|s| s.since.elapsed() >= Duration::from_millis(900)) {
+                        f.release_still(window);
+                    }
+                    f.still_watched = f.video_still.is_some();
+                    f.still_watched
+                });
+                if !matches!(more, Ok(true)) {
+                    break;
                 }
-                cx.spawn(async move |this, cx| {
-                    cx.background_executor().timer(crate::preview::HOLD + Duration::from_millis(8)).await;
-                    this.update(cx, |_, cx| cx.notify()).ok();
-                })
-                .detach();
-                now
             }
-        };
-        since.elapsed() < crate::preview::HOLD
+        })
+        .detach();
     }
 
     fn sync_title(&mut self, window: &mut Window) {
