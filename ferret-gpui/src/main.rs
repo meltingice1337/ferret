@@ -17,6 +17,7 @@ mod docx;
 mod editor;
 mod files;
 mod filter;
+mod heapstat;
 mod imgedit;
 mod imgmem;
 mod input;

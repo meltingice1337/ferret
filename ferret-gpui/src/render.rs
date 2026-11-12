@@ -133,9 +133,30 @@ pub fn spoken_text(content: &Content) -> Option<String> {
     }
     Some(out)
 }
-fn syntaxes() -> &'static (syntect::parsing::SyntaxSet, syntect::highlighting::ThemeSet) {
-    static S: OnceLock<(syntect::parsing::SyntaxSet, syntect::highlighting::ThemeSet)> = OnceLock::new();
-    S.get_or_init(|| (syntect::parsing::SyntaxSet::load_defaults_newlines(), syntect::highlighting::ThemeSet::load_defaults()))
+/// The highlighter's language tables, and when they were last used.
+static SYNTAXES: std::sync::Mutex<Option<(Arc<syntect::parsing::SyntaxSet>, std::time::Instant)>> = std::sync::Mutex::new(None);
+
+/// The highlighter's language tables: loaded when a code or text file is first previewed (tens
+/// of ms, off the UI thread), and let go again once unused for a while (`forget_syntaxes`).
+/// Kept for good, they were the biggest thing a window still held after a session: about 40 MB
+/// in some 120,000 small blocks (each language's patterns are built as it's first used), for
+/// the rest of the window's life after one look at a few code files.
+fn syntaxes() -> Arc<syntect::parsing::SyntaxSet> {
+    let mut s = SYNTAXES.lock().unwrap_or_else(|e| e.into_inner());
+    let (set, used) = s.get_or_insert_with(|| (Arc::new(syntect::parsing::SyntaxSet::load_defaults_newlines()), std::time::Instant::now()));
+    *used = std::time::Instant::now();
+    set.clone()
+}
+
+/// Lets go of the highlighter's tables when no preview used them for `idle`. True if it did.
+pub fn forget_syntaxes(idle: std::time::Duration) -> bool {
+    let mut s = SYNTAXES.lock().unwrap_or_else(|e| e.into_inner());
+    // Not while a preview is being highlighted (it holds them).
+    if s.as_ref().is_some_and(|(set, used)| used.elapsed() >= idle && Arc::strong_count(set) == 1) {
+        *s = None;
+        return true;
+    }
+    false
 }
 
 pub fn language(ext: &str, name: &str) -> &'static str {
@@ -190,7 +211,8 @@ pub fn language(ext: &str, name: &str) -> &'static str {
 pub fn highlight(text: &str, ext: &str, name: &str) -> Vec<Line> {
     use syntect::easy::HighlightLines;
     use syntect::highlighting::FontStyle as Fs;
-    let (ss, ts) = syntaxes();
+    let ss = syntaxes();
+    let ss = &*ss;
     let syntax = ss
         .find_syntax_by_extension(ext)
         .or_else(|| ss.find_syntax_by_extension(match ext {
@@ -208,7 +230,6 @@ pub fn highlight(text: &str, ext: &str, name: &str) -> Vec<Line> {
     // The app's colours: GitHub's dark / light themes (as its shiki highlighter).
     static GITHUB: OnceLock<[syntect::highlighting::Theme; 2]> = OnceLock::new();
     let themes = GITHUB.get_or_init(|| [crate::codetheme::github(true), crate::codetheme::github(false)]);
-    let _ = ts;
     let theme = &themes[if t::is_dark() { 0 } else { 1 }];
     let mut h = HighlightLines::new(syntax, theme);
     let started = std::time::Instant::now();
@@ -664,8 +685,10 @@ fn font_family(bytes: &[u8]) -> Option<String> {
         .find_map(|n| n.to_string())
 }
 
-/// Pages rendered when a PDF is first shown; the rest follow as they scroll near.
-pub const PDF_FIRST: usize = 8;
+/// Pages rendered when a PDF is first shown; the rest follow as they scroll near. Two: what
+/// the pane shows of a PDF at first (it was eight: each a decoded picture kept for a minute, so
+/// stepping past a few PDFs cost hundreds of MB, and each took four times as long to show).
+pub const PDF_FIRST: usize = 2;
 
 /// Why a PDF didn't open.
 pub enum PdfError {
@@ -693,26 +716,57 @@ fn pdf_load(file: &windows::Storage::StorageFile, password: Option<&str>) -> win
     }
 }
 
-/// Opens a PDF: with the password that opened it before this session, else none, else each
-/// password typed this session (one that works is kept for this file).
-fn pdf_open(path: &str) -> Result<windows::Data::Pdf::PdfDocument, PdfError> {
-    let file = pdf_file(path)?;
+/// The passwords to try on a PDF, in order: the one that opened it before this session, none,
+/// then each password typed this session. And how many of them are passwords (for "tried n").
+fn pdf_tries(path: &str) -> (Vec<Option<String>>, usize) {
     let own = crate::pdftext::password_for(path);
     let others: Vec<String> = crate::pdftext::typed_passwords().into_iter().filter(|p| Some(p) != own.as_ref()).collect();
-    let tries = own.iter().map(|p| Some(p.as_str())).chain([None]).chain(others.iter().map(|p| Some(p.as_str())));
-    for password in tries {
-        match pdf_load(&file, password) {
-            Ok(doc) => {
-                if let Some(p) = password.filter(|p| Some(*p) != own.as_deref()) {
-                    crate::pdftext::remember(path, p);
-                }
-                return Ok(doc);
-            }
+    let typed = others.len() + own.is_some() as usize;
+    (own.into_iter().map(Some).chain([None]).chain(others.into_iter().map(Some)).collect(), typed)
+}
+
+/// Opens a PDF with the first of `tries` that works: which one, and the document. None: it's
+/// locked and none of them opens it.
+fn pdf_open_here(path: &str, tries: &[Option<String>]) -> Result<Option<(usize, windows::Data::Pdf::PdfDocument)>, String> {
+    let file = pdf_file(path).map_err(|e| match e {
+        PdfError::Locked(_) => "it needs its password".to_string(),
+        PdfError::Other(e) => e,
+    })?;
+    for (i, password) in tries.iter().enumerate() {
+        match pdf_load(&file, password.as_deref()) {
+            Ok(doc) => return Ok(Some((i, doc))),
             Err(e) if wrong_password(&e) => continue,
-            Err(e) => return Err(PdfError::Other(e.message().to_string())),
+            Err(e) => return Err(e.message().to_string()),
         }
     }
-    Err(PdfError::Locked(others.len() + own.is_some() as usize))
+    Ok(None)
+}
+
+/// A PDF's page count, every page's shape (up to `max`) and its first `first` pages drawn `px`
+/// wide (PNG), opened with the first of `tries` that works (which one comes back too). None:
+/// locked. This is the work itself, with Windows' PDF renderer: done in the helper
+/// (`ocrhelper.rs`), which is where the renderer then stays loaded; in Ferret only when the
+/// helper can't be reached.
+#[allow(clippy::type_complexity)]
+pub(crate) fn pdf_pages_here(path: &str, tries: &[Option<String>], px: u32, first: u32, max: u32) -> Result<Option<(usize, u32, Vec<f32>, Vec<(u32, Vec<u8>)>)>, String> {
+    let err = |e: windows::core::Error| e.message().to_string();
+    let Some((with, doc)) = pdf_open_here(path, tries)? else { return Ok(None) };
+    let count = doc.PageCount().map_err(err)?;
+    let (mut shapes, mut drawn) = (Vec::new(), Vec::new());
+    for i in 0..count.min(max) {
+        let size = doc.GetPage(i).and_then(|p| p.Size()).map_err(err)?;
+        shapes.push(size.Height / size.Width.max(1.));
+        if i < first {
+            drawn.push((i, pdf_render(&doc, i, px)?));
+        }
+    }
+    Ok(Some((with, count, shapes, drawn)))
+}
+
+/// More of a PDF's pages drawn (see `pdf_pages_here`).
+pub(crate) fn pdf_more_here(path: &str, password: Option<&str>, which: &[u32], px: u32) -> Result<Vec<(u32, Vec<u8>)>, String> {
+    let doc = pdf_open_with(path, password)?;
+    Ok(which.iter().filter_map(|&i| pdf_render(&doc, i, px).ok().map(|png| (i, png))).collect())
 }
 
 /// Opens a PDF with this password (or none): the OCR helper's way in (`ocrhelper.rs`), which
@@ -728,22 +782,24 @@ pub(crate) fn pdf_open_with(path: &str, password: Option<&str>) -> Result<window
 /// Tries a typed password on a PDF; kept for the session if it opens it. Err(None): wrong
 /// password; Err(Some(why)): it couldn't be opened for another reason.
 pub fn pdf_unlock(path: &str, password: &str) -> Result<(), Option<String>> {
-    let file = pdf_file(path).map_err(|e| match e {
-        PdfError::Other(e) => Some(e),
-        PdfError::Locked(_) => None,
-    })?;
-    match pdf_load(&file, Some(password)) {
-        Ok(_) => {
-            crate::pdftext::remember(path, password);
-            Ok(())
+    use crate::ocrhelper::Failed;
+    let opened = match crate::ocrhelper::unlock(path, password) {
+        Ok(opened) => opened,
+        Err(Failed::Pdf(e)) => return Err(Some(e)),
+        Err(Failed::Helper(e)) => {
+            log::warn!(target: "ferret::ocr", "trying a PDF's password in Ferret itself: {e}");
+            pdf_pages_here(path, &[Some(password.to_string())], 0, 0, 0).map_err(Some)?.is_some()
         }
-        Err(e) if wrong_password(&e) => Err(None),
-        Err(e) => Err(Some(e.message().to_string())),
+    };
+    if !opened {
+        return Err(None);
     }
+    crate::pdftext::remember(path, password);
+    Ok(())
 }
 
-/// One page as a picture `px` wide (Windows.Data.Pdf).
-fn pdf_render(doc: &windows::Data::Pdf::PdfDocument, i: u32, px: u32) -> Result<Arc<Image>, String> {
+/// One page as a picture `px` wide, a PNG (Windows.Data.Pdf).
+fn pdf_render(doc: &windows::Data::Pdf::PdfDocument, i: u32, px: u32) -> Result<Vec<u8>, String> {
     use windows::Data::Pdf::PdfPageRenderOptions;
     use windows::Storage::Streams::{DataReader, InMemoryRandomAccessStream};
     let err = |e: windows::core::Error| e.message().to_string();
@@ -762,28 +818,49 @@ fn pdf_render(doc: &windows::Data::Pdf::PdfDocument, i: u32, px: u32) -> Result<
     reader.LoadAsync(n).map_err(err)?.join().map_err(err)?;
     let mut bytes = vec![0u8; n as usize];
     reader.ReadBytes(&mut bytes).map_err(err)?;
-    Ok(Arc::new(Image::from_bytes(ImageFormat::Png, bytes)))
+    Ok(bytes)
 }
 
-/// Renders a PDF's pages to pictures with Windows' own PDF renderer: every page's shape (up to
-/// `max`), the first few rendered.
+fn page_image(png: Vec<u8>) -> Arc<Image> {
+    Arc::new(Image::from_bytes(ImageFormat::Png, png))
+}
+
+/// A PDF's pages as pictures: every page's shape (up to `max`), the first few drawn. Drawn in
+/// the helper process; the password that opened it is kept for this file.
 fn pdf_pages(path: &str, max: u32, px: u32) -> Result<(Vec<(Option<Arc<Image>>, f32)>, u32), PdfError> {
-    let err = |e: windows::core::Error| PdfError::Other(e.message().to_string());
-    let doc = pdf_open(path)?;
-    let count = doc.PageCount().map_err(err)?;
-    let mut pages = Vec::new();
-    for i in 0..count.min(max) {
-        let size = doc.GetPage(i).and_then(|p| p.Size()).map_err(err)?;
-        let image = if (i as usize) < PDF_FIRST { Some(pdf_render(&doc, i, px).map_err(PdfError::Other)?) } else { None };
-        pages.push((image, size.Height / size.Width.max(1.)));
+    use crate::ocrhelper::{Failed, Pages};
+    let (tries, typed) = pdf_tries(path);
+    let found = match crate::ocrhelper::pages(path, &tries, px, PDF_FIRST as u32, max) {
+        Ok(Pages::Locked) => None,
+        Ok(Pages::Opened { with, count, shapes, drawn }) => Some((with, count, shapes, drawn)),
+        Err(Failed::Pdf(e)) => return Err(PdfError::Other(e)),
+        Err(Failed::Helper(e)) => {
+            log::warn!(target: "ferret::ocr", "drawing a PDF in Ferret itself: {e}");
+            pdf_pages_here(path, &tries, px, PDF_FIRST as u32, max).map_err(PdfError::Other)?
+        }
+    };
+    let Some((with, count, shapes, drawn)) = found else { return Err(PdfError::Locked(typed)) };
+    // A typed password that opened another file opens this one too: kept for it.
+    if let Some(Some(p)) = tries.get(with).filter(|_| with > 0 || crate::pdftext::password_for(path).is_none()) {
+        crate::pdftext::remember(path, p);
     }
+    let mut drawn: std::collections::HashMap<u32, Vec<u8>> = drawn.into_iter().collect();
+    let pages = shapes.into_iter().enumerate().map(|(i, shape)| (drawn.remove(&(i as u32)).map(page_image), shape)).collect();
     Ok((pages, count))
 }
 
 /// More pages of a PDF (`which`), `px` wide, as they scroll near.
 pub fn pdf_more(path: &str, which: Vec<u32>, px: u32) -> Vec<(u32, Arc<Image>)> {
-    let Ok(doc) = pdf_open(path) else { return Vec::new() };
-    which.into_iter().filter_map(|i| pdf_render(&doc, i, px).ok().map(|img| (i, img))).collect()
+    let password = crate::pdftext::password_for(path);
+    let drawn = match crate::ocrhelper::more(path, password.as_deref(), &which, px) {
+        Ok(drawn) => drawn,
+        Err(crate::ocrhelper::Failed::Pdf(_)) => Vec::new(),
+        Err(crate::ocrhelper::Failed::Helper(e)) => {
+            log::warn!(target: "ferret::ocr", "drawing a PDF's pages in Ferret itself: {e}");
+            pdf_more_here(path, password.as_deref(), &which, px).unwrap_or_default()
+        }
+    };
+    drawn.into_iter().map(|(i, png)| (i, page_image(png))).collect()
 }
 
 // ───────────────────────────── drawing ─────────────────────────────

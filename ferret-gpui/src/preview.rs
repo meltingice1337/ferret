@@ -1126,13 +1126,16 @@ impl Ferret {
                     });
                     o.run.near.store(shown_page.unwrap_or(0) as u32, std::sync::atomic::Ordering::Relaxed);
                 }
+                // Pages further than that from the view are drawn as blank sheets, their pictures
+                // too: a picture drawn is a picture decoded (width × height × 4 bytes, and as much
+                // again on the GPU: 14 MB a page on a big screen), on screen or not. With every
+                // page drawn, a look at a few PDFs took the window to 900 MB.
+                let mut near = vec![false; pages.len()];
                 for (i, (page, aspect)) in pages.iter().enumerate() {
                     let h = pw * aspect + 27.;
-                    if page.is_none() && y < top + view_h * 2. && y + h > top - view_h {
+                    near[i] = y < top + view_h * 2.5 && y + h > top - view_h * 1.5;
+                    if page.is_none() && y < top + view_h * 2. && y + h > top - view_h && want.len() < 4 {
                         want.push(i as u32);
-                        if want.len() == 4 {
-                            break;
-                        }
                     }
                     y += h;
                 }
@@ -1152,7 +1155,8 @@ impl Ferret {
                     .children(pages.iter().enumerate().map(|(i, (page, aspect))| {
                         // Sized from the page's own shape (a picture with no height draws nothing).
                         let page_el = match page {
-                            Some(p) => img(p.clone()).w(px(pw)).h(px(pw * aspect)).object_fit(ObjectFit::Contain).rounded(px(3.)).into_any_element(),
+                            Some(p) if near[i] => img(p.clone()).w(px(pw)).h(px(pw * aspect)).object_fit(ObjectFit::Contain).rounded(px(3.)).into_any_element(),
+                            Some(_) => div().w(px(pw)).h(px(pw * aspect)).rounded(px(3.)).bg(t::rgba(0xffffff, 0.92)).into_any_element(),
                             None => div()
                                 .w(px(pw))
                                 .h(px(pw * aspect))

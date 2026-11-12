@@ -48,6 +48,8 @@ const THUMBS_MAX: u64 = 64 << 20;
 /// A cached preview (not the one shown) is let go after this long, or while the cache is bigger
 /// than `PREVIEWS_MAX`, oldest first.
 const PREVIEW_KEEP: Duration = Duration::from_secs(120);
+/// The code highlighter's tables are let go after this long without a code or text preview.
+const SYNTAX_KEEP: Duration = Duration::from_secs(120);
 const PREVIEWS_MAX: u64 = 96 << 20;
 /// A sweep that let go of this much asks the GPU driver to give memory back (`trim_gpu`), at
 /// most this often (a trim makes the driver allocate again for what comes next).
@@ -242,6 +244,15 @@ pub fn frame(f: &Ferret, window: &mut Window, cx: &mut Context<Ferret>) {
 /// that frame didn't draw is let go of (`finish`).
 /// Err when the window is gone.
 async fn sweep(this: &WeakEntity<Ferret>, cx: &mut AsyncWindowContext) -> Result<(), ()> {
+    // The code highlighter's tables, unused for a while (freed off the UI thread: some 120,000
+    // small blocks).
+    cx.background_executor()
+        .spawn(async {
+            if crate::render::forget_syntaxes(SYNTAX_KEEP) {
+                log::info!(target: "ferret::mem", "let go of the code highlighter's tables (unused for {} s)", SYNTAX_KEEP.as_secs());
+            }
+        })
+        .detach();
     if REG.with_borrow(|r| r.sweeping) {
         return Ok(());
     }

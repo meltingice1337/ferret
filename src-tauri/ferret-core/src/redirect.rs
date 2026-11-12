@@ -545,6 +545,11 @@ fn read_window(app: &windows::Win32::UI::Shell::IWebBrowserApp, timeout: Duratio
                     say(&format!("Explorer window shows {path}"));
                     return Some(Found::Keep);
                 }
+                // Home (Win+E) has no item to wait for: Ferret starts at once (the wait for a
+                // selection made Win+E a third of a second slower than it need be).
+                if matches!(classify(&path, None), Found::Start) {
+                    return Some(Found::Start);
+                }
                 let since = folder.get_or_insert_with(|| (path.clone(), Instant::now())).1;
                 if let Some(sel) = first_selected(&view) {
                     return Some(classify(&path, Some(sel)));

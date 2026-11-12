@@ -40,6 +40,8 @@ windows = { version = "0.62", features = [
     "Win32_Graphics_Dxgi_Common",
     "Win32_Media_MediaFoundation",
     "Win32_System_Com",
+    # heapstat.rs: what the heaps hold (memory tests)
+    "Win32_System_Memory",
     # quality.rs: seeking the source reader (a PROPVARIANT time)
     "Win32_System_Com_StructuredStorage",
     "Win32_System_Variant",
@@ -97,6 +99,8 @@ futures = "0.3"
 # Sorting: names compare without accents ("sensitivity: base"), as the app's collator does.
 unicode-normalization = "0.1"
 serde = { version = "1", features = ["derive"] }
+# ocrhelper.rs: PDF pages (PNG) sent back from the helper in its JSON lines.
+base64 = "0.22"
 # Batch rename's find and replace.
 regex = "1"
 # Previews: highlighted code (GitHub-like themes), Markdown, font names.
