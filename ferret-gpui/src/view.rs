@@ -300,6 +300,9 @@ pub struct Ferret {
     /// `preview::HOLD`), and the item a redraw at the end of that time is booked for.
     pub preview_since: Option<(String, Instant)>,
     pub preview_hold_wake: Option<String>,
+    /// The fade bringing another item's content in (the pane's, Quick Look's).
+    pub preview_fade: [Option<crate::preview::Fade>; 2],
+    pub fade_seq: usize,
     /// The folder summary just drawn is a spinner: its listing is still being read.
     pub summary_pending: bool,
     /// The picture the preview last drew (the pane's, Quick Look's) and at which frame, kept on
@@ -569,6 +572,8 @@ impl Ferret {
             preview_data: None,
             preview_since: None,
             preview_hold_wake: None,
+            preview_fade: Default::default(),
+            fade_seq: 0,
             summary_pending: false,
             held_pic: Default::default(),
             preview_showing: Default::default(),

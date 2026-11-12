@@ -53,6 +53,17 @@ pub struct Loaded {
 /// read: a flash at every step through a folder). A slower one shows the loading shape after it.
 pub const HOLD: Duration = Duration::from_millis(180);
 
+/// How long another item's content takes to fade in.
+const FADE: Duration = Duration::from_millis(170);
+
+/// A fade under way: the item fading in, the picture fading out under it, since when.
+pub struct Fade {
+    path: String,
+    from: Option<(Arc<gpui::Image>, (u32, u32))>,
+    at: Instant,
+    id: usize,
+}
+
 /// What a selected folder's summary and details show of its listing.
 pub struct Peek {
     /// As listed with hidden items shown or not (the summary is read again when that changes).
@@ -278,8 +289,9 @@ impl Ferret {
                         f.pdf_scroll = [gpui::ScrollHandle::new(), gpui::ScrollHandle::new()];
                     }
                     // It lifts in onto an empty pane only: not over what was kept on screen for it.
-                    let kept = f.keeps_for(&path) || (kind == Kind::Image && !path.to_lowercase().ends_with(".svg"));
-                    if let Some(old) = f.preview_data.replace(Loaded { key, content, at: Instant::now(), lift: !same && !kept }) {
+                    // (`fade_in` brings another item's content in; the lift this had is its.)
+                    let _ = kind;
+                    if let Some(old) = f.preview_data.replace(Loaded { key, content, at: Instant::now(), lift: false }) {
                         f.preview_cache.push(old);
                         if f.preview_cache.len() > 6 {
                             f.preview_cache.remove(0);
@@ -651,13 +663,6 @@ impl Ferret {
             .into_any_element()
     }
 
-    /// Something is on screen for `path` while it's read: what the pane showed before (within
-    /// `HOLD`), so what's read then swaps in instead of lifting in.
-    fn keeps_for(&self, path: &str) -> bool {
-        let recent = self.preview_since.as_ref().is_some_and(|(p, at)| p == path && at.elapsed() < HOLD);
-        recent && (0..2).any(|big| self.kept_picture(big == 1).is_some() || self.kept(path, big == 1).is_some())
-    }
-
     /// The preview drew this now (the pane, or Quick Look).
     fn note_shown(&mut self, what: Shown, big: bool) {
         self.preview_showing[big as usize] = Some((what, crate::imgmem::current_frame()));
@@ -732,8 +737,10 @@ impl Ferret {
                 if let Some(el) = self.held(path, kind, since, width, big, window, cx) {
                     return el;
                 }
+                return self.content_of(path, ext, kind, width, big, window, cx);
             }
-            return self.content_of(path, ext, kind, width, big, window, cx);
+            let el = self.content_of(path, ext, kind, width, big, window, cx);
+            return self.fade_in(path, big, None, el);
         }
         let own = self.preview_data.as_ref().filter(|l| l.path() == path);
         let read = own.is_some();
@@ -747,14 +754,18 @@ impl Ferret {
         });
         let decoded = picture.is_none_or(|image| crate::imgmem::decoded(&image, window, cx));
         crate::watchdog::trace("preview", || format!("{path}: {}", if !read { "not read yet" } else if !decoded { "read, not decoded" } else { "ready" }));
+        // The picture the frame before showed (another item's), to fade out under this one.
+        let before = self.kept_picture(big);
         if read && decoded {
-            return self.content_of(path, ext, kind, width, big, window, cx);
+            let el = self.content_of(path, ext, kind, width, big, window, cx);
+            return self.fade_in(path, big, before, el);
         }
         let frame = |el: AnyElement| div().flex_1().min_h_0().px(px(14.)).pb(px(10.)).flex().flex_col().child(el).into_any_element();
         let stand_in = self.picture_stand_in(path, kind, big, window, cx);
         if let Some((thumb, size)) = stand_in.clone().filter(|(t, _)| crate::imgmem::decoded(t, window, cx)) {
             crate::watchdog::trace("shows", || format!("{path}: its thumbnail"));
-            return frame(self.picture_view(thumb, size, big, cx));
+            let el = frame(self.picture_view(thumb, size, big, cx));
+            return self.fade_in(path, big, before, el);
         }
         if let Some(el) = self.held(path, kind, since, width, big, window, cx) {
             return el;
@@ -765,6 +776,43 @@ impl Ferret {
         }
         crate::watchdog::trace("shows", || format!("{path}: {}", if read { "the picture, not decoded yet" } else { "the loading shape" }));
         self.content_of(path, ext, kind, width, big, window, cx)
+    }
+
+    /// Another item's content fades in (`FADE`), from the first frame that draws it: over the
+    /// picture shown before, which fades out under it (one picture turns into the next), else
+    /// from faint, rising a few pixels. The swap alone, with nothing between two items, read as
+    /// a flash (user, 2026-11-12). Not with animations off.
+    fn fade_in(&mut self, path: &str, big: bool, before: Option<(Arc<gpui::Image>, (u32, u32))>, el: AnyElement) -> AnyElement {
+        if !t::animate() {
+            return el;
+        }
+        let slot = big as usize;
+        if self.preview_fade[slot].as_ref().is_none_or(|f| f.path != path) {
+            self.fade_seq += 1;
+            self.preview_fade[slot] = Some(Fade { path: path.to_string(), from: before, at: Instant::now(), id: self.fade_seq });
+        }
+        let Some(fade) = self.preview_fade[slot].as_ref().filter(|f| f.at.elapsed() < FADE) else { return el };
+        let (id, from) = (fade.id, fade.from.clone());
+        let over_picture = from.is_some();
+        let under = from.map(|(image, size)| {
+            let bounds = self.picture_bounds[slot].get().size;
+            let (aw, ah, pw, ph) = (bounds.width.as_f32(), bounds.height.as_f32(), size.0 as f32, size.1 as f32);
+            let fit = if aw > 0. && ah > 0. && pw > 0. && ph > 0. { (aw / pw).min(ah / ph).min(if big { 1. } else { f32::MAX }) } else { 0. };
+            let (w, h) = (pw * fit, ph * fit);
+            // Where `picture_view` drew it: centred in the picture's area, inside the frame.
+            div()
+                .absolute()
+                .top_0()
+                .left(px(14.))
+                .w(px(aw))
+                .h(px(ah))
+                .child(div().absolute().left(px((aw - w) / 2.)).top(px((ah - h) / 2.)).w(px(w)).h(px(h)).child(img(image).size_full().object_fit(ObjectFit::Contain)))
+                .with_animation(("pv-fade-out", id), gpui::Animation::new(FADE), |d, k| d.opacity(1. - k))
+        });
+        let over = div().flex_1().min_h_0().flex().flex_col().child(el).with_animation(("pv-fade-in", id), gpui::Animation::new(FADE).with_easing(gpui::ease_out_quint()), move |d, k| {
+            if over_picture { d.opacity(k) } else { d.opacity(0.15 + 0.85 * k).mt(px((1. - k) * 4.)) }
+        });
+        div().flex_1().min_h_0().relative().flex().flex_col().children(under).child(over).into_any_element()
     }
 
     /// Since when the preview is for `path` (now, when it was for something else).
