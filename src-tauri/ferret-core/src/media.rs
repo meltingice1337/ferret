@@ -1435,7 +1435,10 @@ mod tests {
         let Some((src, out)) = fullrange("fullrange-ramp-hevc.mp4") else { return };
         let info = probe_video(&src).unwrap();
         for hevc in [false, true] {
-            let dest = out.join(if hevc { "test-kept-hevc.mp4" } else { "test-kept-h264.mp4" });
+            // A file of this run's own: two runs at once (a release's checks and another
+            // `cargo test`) wrote the same one, and one of them failed with "Windows couldn't
+            // convert this video".
+            let dest = out.join(format!("test-kept-{}-{}.mp4", if hevc { "hevc" } else { "h264" }, std::process::id()));
             let mut j = job(&src, &info, info.width, info.height);
             (j.hevc, j.audio_bitrate) = (hevc, 0);
             let file = open_file(&src).unwrap();
@@ -1443,7 +1446,9 @@ mod tests {
             transcode(&j, &info, &dest, true, &mut |_| true).unwrap();
             // Studio range said in the stream (it said nothing before: players took the
             // unconverted 0–255 values as 16–235).
-            assert_eq!(video_full_range(&dest.to_string_lossy()), Some(false), "hevc {hevc}");
+            let range = video_full_range(&dest.to_string_lossy());
+            let _ = std::fs::remove_file(&dest);
+            assert_eq!(range, Some(false), "hevc {hevc}");
         }
         // Scaled, the transcoder's own processor converts: nothing added.
         let j = job(&src, &info, 640, 360);
