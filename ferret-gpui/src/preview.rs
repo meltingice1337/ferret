@@ -41,8 +41,77 @@ pub struct Loaded {
     pub key: String,
     pub content: Content,
     pub at: Instant,
-    /// Another item than before: it lifts in. The same one again (drawn for another size) just swaps.
+    /// It lifts in: another item than before, onto a pane that showed nothing of it yet. The
+    /// same one again (drawn for another size), or one that replaces what was kept on screen
+    /// for it (the item before, a picture's thumbnail), just swaps.
     pub lift: bool,
+}
+
+/// How long the preview keeps showing what it had after another item is selected, while that
+/// one is read. Most files are read in less: the pane goes from one to the next with nothing in
+/// between (it went empty at every step, for the 140 ms it then waited before reading plus the
+/// read: a flash at every step through a folder). A slower one shows the loading shape after it.
+pub const HOLD: Duration = Duration::from_millis(180);
+
+/// What a selected folder's summary and details show of its listing.
+pub struct Peek {
+    /// As listed with hidden items shown or not (the summary is read again when that changes).
+    pub show_hidden: bool,
+    pub files: usize,
+    pub folders: usize,
+    /// The files' sizes added up.
+    pub bytes: u64,
+    pub hidden: usize,
+    /// Its first pictures and videos (path, modified), for the mosaic.
+    pub pics: Vec<(String, Option<i64>)>,
+    /// What changed last: path, name, kind, date.
+    pub recent: Vec<(String, String, Kind, String)>,
+}
+
+impl Peek {
+    fn of(entries: &[ferret_core::listing::Entry], show_hidden: bool) -> Self {
+        let shown: Vec<&ferret_core::listing::Entry> = entries.iter().filter(|e| show_hidden || !e.hidden).collect();
+        let files = shown.iter().filter(|e| !e.is_dir).count();
+        let mut by_date = shown.clone();
+        by_date.sort_by_key(|e| std::cmp::Reverse(e.modified.unwrap_or(0)));
+        Peek {
+            show_hidden,
+            files,
+            folders: shown.len() - files,
+            bytes: shown.iter().filter(|e| !e.is_dir).map(|e| e.size).sum(),
+            hidden: entries.iter().filter(|e| e.hidden).count(),
+            pics: shown
+                .iter()
+                .filter(|e| !e.is_dir && !e.in_archive && matches!(kinds::kind_of(false, &e.ext), Kind::Image | Kind::Video))
+                .take(4)
+                .map(|e| (e.path.clone(), e.modified))
+                .collect(),
+            recent: by_date
+                .into_iter()
+                .take(8)
+                .map(|e| (e.path.clone(), e.name.clone(), kinds::kind_of(e.is_dir, &e.ext), kinds::format_date(e.modified).get(..10).unwrap_or("").to_string()))
+                .collect(),
+        }
+    }
+}
+
+/// What the preview drew: an item's content, or a folder's summary.
+#[derive(Clone, Debug)]
+pub enum Shown {
+    Item(String, Kind),
+    Folder(String),
+}
+
+impl Loaded {
+    fn path(&self) -> &str {
+        self.key.split('|').next().unwrap_or("")
+    }
+
+    /// Can be drawn again as it was while another item loads: not a player (its video or sound
+    /// is gone with the selection), a Word document (read by its own path) or a password box.
+    fn holds(&self) -> bool {
+        !matches!(self.content, Content::Video(_) | Content::Audio(..) | Content::Word | Content::PdfLocked { .. })
+    }
 }
 
 impl Ferret {
@@ -111,9 +180,10 @@ impl Ferret {
                 _ => Vec::new(),
             }
         };
-        for n in near {
-            let _ = self.thumb(&n, 512, false, None, cx);
+        for n in &near {
+            let _ = self.thumb(n, 512, false, None, cx);
         }
+        self.preview_near = near;
         let p = self.pane();
         let Some(r) = p.cursor_row().filter(|_| p.marked.len() <= 1) else {
             self.preview_want = None;
@@ -149,12 +219,18 @@ impl Ferret {
         }
         let (path, ext, kind, size, inside) = (r.e.path.clone(), r.e.ext.clone(), r.kind, r.e.size, r.e.in_archive || ferret_core::paths::is_remote(&r.e.path));
         self.preview_want = Some((key.clone(), Instant::now()));
-        let delay = if self.quicklook { 0 } else { 140 };
+        // Read at once when the cursor was still before this step: a single step shows its file
+        // as soon as it's read (it waited 140 ms first, every time, with the pane empty). Steps
+        // in quick succession (an arrow key held) wait for the cursor to settle, as before.
+        let stepping = self.preview_stepped.replace(Instant::now()).is_some_and(|at| at.elapsed() < Duration::from_millis(140));
+        let delay = if self.quicklook || !stepping { 0 } else { 140 };
         cx.spawn(async move |this, cx| {
-            cx.background_executor().timer(Duration::from_millis(delay)).await;
-            let still = this.update(cx, |f, _| f.preview_want.as_ref().is_some_and(|(k, _)| *k == key)).unwrap_or(false);
-            if !still {
-                return;
+            if delay > 0 {
+                cx.background_executor().timer(Duration::from_millis(delay)).await;
+                let still = this.update(cx, |f, _| f.preview_want.as_ref().is_some_and(|(k, _)| *k == key)).unwrap_or(false);
+                if !still {
+                    return;
+                }
             }
             crate::watchdog::act(format!("preview {path} ({kind:?}, {size} bytes)"));
             let read_at = Instant::now();
@@ -201,7 +277,9 @@ impl Ferret {
                         f.preview_view.wrap = matches!(content, Content::Json { .. } | Content::BadJson { .. } | Content::Markdown { .. });
                         f.pdf_scroll = [gpui::ScrollHandle::new(), gpui::ScrollHandle::new()];
                     }
-                    if let Some(old) = f.preview_data.replace(Loaded { key, content, at: Instant::now(), lift: !same }) {
+                    // It lifts in onto an empty pane only: not over what was kept on screen for it.
+                    let kept = f.keeps_for(&path) || (kind == Kind::Image && !path.to_lowercase().ends_with(".svg"));
+                    if let Some(old) = f.preview_data.replace(Loaded { key, content, at: Instant::now(), lift: !same && !kept }) {
                         f.preview_cache.push(old);
                         if f.preview_cache.len() > 6 {
                             f.preview_cache.remove(0);
@@ -326,17 +404,14 @@ impl Ferret {
                 let (date, created) = (r.date.clone(), kinds::format_date(r.e.created));
                 let name = r.name.clone();
                 let ty = r.ty.clone();
-                let header_icon = self.thumb_or_icon(&path, kind, is_dir, r.e.modified, cx);
+                let header_icon = self.thumb_or_icon(&path, kind, is_dir, r.e.modified, window, cx);
                 let header = self.header(header_icon, name, ty, Some(path.clone()), cx);
                 let body: AnyElement = if is_dir {
-                    let body = self.folder_summary_for(&path, cx);
+                    let body = self.folder_view(&path, w - 28., false, window, cx);
                     // What's in it, as the app's FolderView adds to the details.
-                    if let Some((_, Some(Ok(entries)))) = self.folder_peek.as_ref().filter(|(p, _)| util::same(p, &path)) {
-                        let shown: Vec<_> = entries.iter().filter(|e| crate::pane::show_hidden() || !e.hidden).collect();
-                        let files = shown.iter().filter(|e| !e.is_dir).count();
-                        let bytes: u64 = shown.iter().filter(|e| !e.is_dir).map(|e| e.size).sum();
-                        let hidden = entries.iter().filter(|e| e.hidden).count();
-                        facts.push(("Contains", format!("{}, {}", crate::files::plural(files, "file"), crate::files::plural(shown.len() - files, "folder")).into()));
+                    if let Some((_, Some(Ok(peek)))) = self.folder_peek.as_ref().filter(|(p, _)| util::same(p, &path)) {
+                        let (files, bytes, hidden) = (peek.files, peek.bytes, peek.hidden);
+                        facts.push(("Contains", format!("{}, {}", crate::files::plural(files, "file"), crate::files::plural(peek.folders, "folder")).into()));
                         if files > 0 {
                             facts.push(("Size of files", kinds::format_size(bytes).into()));
                         }
@@ -388,6 +463,7 @@ impl Ferret {
             }
             None => {
                 let path = p.path.clone();
+                self.note_shown(Shown::Folder(path.clone()), false);
                 let summary = self.folder_summary_for(&path, cx);
                 let p = self.pane();
                 let files = p.rows.len() - p.folders;
@@ -411,9 +487,14 @@ impl Ferret {
         }
     }
 
-    fn thumb_or_icon(&mut self, path: &str, kind: Kind, is_dir: bool, modified: Option<i64>, cx: &mut Context<Self>) -> AnyElement {
+    fn thumb_or_icon(&mut self, path: &str, kind: Kind, is_dir: bool, modified: Option<i64>, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         if !is_dir && matches!(kind, Kind::Image | Kind::Video | Kind::Exe) && !ferret_core::paths::is_remote(path) {
-            if let Some(i) = self.thumb(path, 64, kind == Kind::Exe, modified, cx) {
+            // The small thumbnail, or the sharp one the preview keeps ready for the pictures
+            // next to the one shown; and only once it's decoded (drawn before, it's an empty
+            // box for a frame: the kind's icon, a gap, then the thumbnail).
+            let small = self.thumb(path, 64, kind == Kind::Exe, modified, cx);
+            let sharp = if kind == Kind::Exe { None } else { self.thumb_ready(path, 512, false, None) };
+            if let Some(i) = small.into_iter().chain(sharp).find(|i| crate::imgmem::decoded(i, window, cx)) {
                 return img(i).max_w(px(36.)).max_h(px(36.)).rounded(px(4.)).into_any_element();
             }
         }
@@ -422,20 +503,36 @@ impl Ferret {
 
     /// The selected folder's own listing (read in the background, kept until something in it
     /// changes). `None` while it's being read.
-    fn peek_folder(&mut self, path: &str, cx: &mut Context<Self>) -> Option<Result<std::rc::Rc<Vec<ferret_core::listing::Entry>>, String>> {
+    ///
+    /// What the summary shows of it (`Peek`) is worked out with the listing, off the UI thread:
+    /// the listing itself was kept, and filtered, counted and sorted by date at every frame the
+    /// preview drew, on the UI thread (a folder of 100,000 files: 150 to 450 ms a frame, and
+    /// as long again to free it). The folder selected before stays too (`folder_peek_before`),
+    /// for the moment its summary is kept on screen while this one is read.
+    fn peek_folder(&mut self, path: &str, cx: &mut Context<Self>) -> Option<Result<std::rc::Rc<Peek>, String>> {
+        let hidden = crate::pane::show_hidden();
+        let fits = |r: &Option<Result<std::rc::Rc<Peek>, String>>| !matches!(r, Some(Ok(p)) if p.show_hidden != hidden);
         if let Some((p, r)) = &self.folder_peek {
-            if util::same(p, path) {
+            if util::same(p, path) && fits(r) {
                 return r.clone();
             }
         }
+        if let Some((p, r)) = &self.folder_peek_before {
+            if util::same(p, path) && fits(r) {
+                return r.clone();
+            }
+        }
+        if let Some(read) = self.folder_peek.take().filter(|(_, r)| r.is_some()) {
+            self.folder_peek_before = Some(read);
+        }
         self.folder_peek = Some((path.to_string(), None));
         let (p2, key) = (path.to_string(), path.to_string());
-        let task = cx.background_executor().spawn(async move { ferret_core::rt::block_on(ferret_core::browse::list_dir(p2)).map(|l| l.entries) });
+        let task = cx.background_executor().spawn(async move { ferret_core::rt::block_on(ferret_core::browse::list_dir(p2)).map(|l| Peek::of(&l.entries, hidden)) });
         cx.spawn(async move |this, cx| {
             let r = task.await;
             this.update(cx, |f, cx| {
                 if f.folder_peek.as_ref().is_some_and(|(p, _)| util::same(p, &key)) {
-                    f.folder_peek = Some((key.clone(), Some(r.map(std::rc::Rc::new).map_err(|e| e.to_string()))));
+                    f.folder_peek = Some((key.clone(), Some(r.map(std::rc::Rc::new))));
                     cx.notify();
                 }
             })
@@ -450,6 +547,7 @@ impl Ferret {
     /// folder, from its own listing (it showed the folder around it instead: the parent's pictures
     /// and files, for an empty folder too), as the app's FolderView.
     fn folder_summary_for(&mut self, path: &str, cx: &mut Context<Self>) -> AnyElement {
+        self.summary_pending = false;
         let p = self.pane();
         let bin = p.is_bin();
         let here = util::same(path, &p.path);
@@ -473,30 +571,21 @@ impl Ferret {
                 return div().when(!note.is_empty(), |d| d.child(div().px(px(16.)).pt(px(8.)).child(ui::heading(note)))).into_any_element();
             }
             match self.peek_folder(path, cx) {
-                None => return div().flex_1().flex().items_center().justify_center().child(ui::spinner(18., t::fg3())).into_any_element(),
+                None => {
+                    self.summary_pending = true;
+                    return div().flex_1().flex().items_center().justify_center().child(ui::spinner(18., t::fg3())).into_any_element();
+                }
                 Some(Err(e)) => {
                     return ui::note("peek-error", crate::ops::plain_error(&e)).px(px(16.)).pt(px(8.)).text_size(px(12.)).text_color(t::fg3()).into_any_element();
                 }
-                Some(Ok(entries)) => {
-                    let shown: Vec<&ferret_core::listing::Entry> = entries.iter().filter(|e| crate::pane::show_hidden() || !e.hidden).collect();
-                    let pics = shown
+                Some(Ok(peek)) => {
+                    let recent = peek
+                        .recent
                         .iter()
-                        .filter(|e| !e.is_dir && !e.in_archive && matches!(kinds::kind_of(false, &e.ext), Kind::Image | Kind::Video))
-                        .take(4)
-                        .map(|e| (e.path.clone(), e.modified))
-                        .collect();
-                    let mut by_date = shown.clone();
-                    by_date.sort_by_key(|e| std::cmp::Reverse(e.modified.unwrap_or(0)));
-                    let recent = by_date
-                        .into_iter()
-                        .take(8)
                         .enumerate()
-                        .map(|(i, e)| {
-                            let date = kinds::format_date(e.modified);
-                            (1_000_000 + i, e.path.clone(), SharedString::from(e.name.clone()), kinds::kind_of(e.is_dir, &e.ext), SharedString::from(date.get(..10).unwrap_or("").to_string()), None)
-                        })
+                        .map(|(i, (path, name, kind, date))| (1_000_000 + i, path.clone(), SharedString::from(name.clone()), *kind, SharedString::from(date.clone()), None))
                         .collect();
-                    (pics, recent)
+                    (peek.pics.clone(), recent)
                 }
             }
         };
@@ -562,8 +651,183 @@ impl Ferret {
             .into_any_element()
     }
 
-    /// The item's content, as its kind is drawn (the pane, or Quick Look when `big`).
+    /// Something is on screen for `path` while it's read: what the pane showed before (within
+    /// `HOLD`), so what's read then swaps in instead of lifting in.
+    fn keeps_for(&self, path: &str) -> bool {
+        let recent = self.preview_since.as_ref().is_some_and(|(p, at)| p == path && at.elapsed() < HOLD);
+        recent && (0..2).any(|big| self.kept_picture(big == 1).is_some() || self.kept(path, big == 1).is_some())
+    }
+
+    /// The preview drew this now (the pane, or Quick Look).
+    fn note_shown(&mut self, what: Shown, big: bool) {
+        self.preview_showing[big as usize] = Some((what, crate::imgmem::current_frame()));
+    }
+
+    /// The picture the frame before drew, if any.
+    fn kept_picture(&self, big: bool) -> Option<(Arc<gpui::Image>, (u32, u32))> {
+        let (image, size, frame) = self.held_pic[big as usize].as_ref()?;
+        (*frame + 1 >= crate::imgmem::current_frame()).then(|| (image.clone(), *size))
+    }
+
+    /// What the frame before drew (something else than `path`'s content) that can be drawn
+    /// again as it was: another item's content (still read: the one shown, or in the cache it
+    /// goes to when the next is read), or a folder's summary.
+    fn kept(&self, path: &str, big: bool) -> Option<Shown> {
+        let (shown, frame) = self.preview_showing[big as usize].as_ref()?;
+        if *frame + 1 < crate::imgmem::current_frame() {
+            return None;
+        }
+        match shown {
+            Shown::Folder(dir) if dir == path => None,
+            Shown::Folder(_) => Some(shown.clone()),
+            Shown::Item(old, _) if old == path => None,
+            Shown::Item(old, _) => self.preview_data.iter().chain(&self.preview_cache).any(|l| l.path() == old && l.holds()).then(|| shown.clone()),
+        }
+    }
+
+    /// Draws what `kept` found.
+    fn draw_kept(&mut self, kept: Shown, width: f32, big: bool, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+        match kept {
+            Shown::Folder(dir) => {
+                self.note_shown(Shown::Folder(dir.clone()), big);
+                self.folder_summary_for(&dir, cx)
+            }
+            Shown::Item(old, kind) => {
+                let ext = old.rsplit_once('.').map(|(_, e)| e.to_lowercase()).unwrap_or_default();
+                // From the cache: put where the drawing looks for it, for the time it's drawn.
+                let cached = self.preview_data.as_ref().is_none_or(|l| l.path() != old).then(|| self.preview_cache.iter().position(|l| l.path() == old)).flatten();
+                let Some(i) = cached else { return self.content_of(&old, &ext, kind, width, big, window, cx) };
+                let current = self.preview_data.replace(self.preview_cache.remove(i));
+                let el = self.content_of(&old, &ext, kind, width, big, window, cx);
+                if let Some(back) = std::mem::replace(&mut self.preview_data, current) {
+                    self.preview_cache.insert(i.min(self.preview_cache.len()), back);
+                }
+                el
+            }
+        }
+    }
+
+    /// The item's content (the pane's, or Quick Look's when `big`), or, while it isn't ready,
+    /// what stands in for it so the pane never goes empty between two items:
+    /// - a picture: its thumbnail, where and as big as the picture will be (once decoded: GPUI
+    ///   decodes a picture in the background the first time it's asked for and draws nothing
+    ///   meanwhile, so a thumbnail drawn the moment it arrived was an empty frame);
+    /// - else what the pane showed before, for up to `HOLD`;
+    /// - after that, the loading shape.
     fn content_view(&mut self, path: &str, ext: &str, kind: Kind, width: f32, big: bool, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+        let since = self.previewed_since(path);
+        // The neighbours' thumbnails decoded ahead, so each is there as a stand-in at once.
+        for n in self.preview_near.clone() {
+            if let Some(t) = self.thumb(&n, 512, false, None, cx) {
+                crate::imgmem::decoded(&t, window, cx);
+            }
+        }
+        if kind == Kind::Video && self.video.is_some() {
+            return self.content_of(path, ext, kind, width, big, window, cx);
+        }
+        // A Word document is read by its own path.
+        if matches!(ext, "docx" | "docm" | "dotx") {
+            let reading = !self.word.as_ref().is_some_and(|(p, doc)| p == path && doc.is_some());
+            if reading {
+                if let Some(el) = self.held(path, kind, since, width, big, window, cx) {
+                    return el;
+                }
+            }
+            return self.content_of(path, ext, kind, width, big, window, cx);
+        }
+        let own = self.preview_data.as_ref().filter(|l| l.path() == path);
+        let read = own.is_some();
+        // Read but not decoded yet (the picture, a PDF's or a deck's first page): what stands
+        // in stays until it is.
+        let picture = own.and_then(|l| match &l.content {
+            Content::Picture { image, .. } | Content::Shell(image) => Some(image.clone()),
+            Content::Pdf { pages, .. } => pages.first().and_then(|(image, _)| image.clone()),
+            Content::Deck(_, slides, _) => slides.first().cloned().flatten(),
+            _ => None,
+        });
+        let decoded = picture.is_none_or(|image| crate::imgmem::decoded(&image, window, cx));
+        crate::watchdog::trace("preview", || format!("{path}: {}", if !read { "not read yet" } else if !decoded { "read, not decoded" } else { "ready" }));
+        if read && decoded {
+            return self.content_of(path, ext, kind, width, big, window, cx);
+        }
+        let frame = |el: AnyElement| div().flex_1().min_h_0().px(px(14.)).pb(px(10.)).flex().flex_col().child(el).into_any_element();
+        let stand_in = self.picture_stand_in(path, kind, big, window, cx);
+        if let Some((thumb, size)) = stand_in.clone().filter(|(t, _)| crate::imgmem::decoded(t, window, cx)) {
+            crate::watchdog::trace("shows", || format!("{path}: its thumbnail"));
+            return frame(self.picture_view(thumb, size, big, cx));
+        }
+        if let Some(el) = self.held(path, kind, since, width, big, window, cx) {
+            return el;
+        }
+        if let Some((thumb, size)) = stand_in {
+            crate::watchdog::trace("shows", || format!("{path}: its thumbnail, not decoded yet"));
+            return frame(self.picture_view(thumb, size, big, cx));
+        }
+        crate::watchdog::trace("shows", || format!("{path}: {}", if read { "the picture, not decoded yet" } else { "the loading shape" }));
+        self.content_of(path, ext, kind, width, big, window, cx)
+    }
+
+    /// Since when the preview is for `path` (now, when it was for something else).
+    fn previewed_since(&mut self, path: &str) -> Instant {
+        match &self.preview_since {
+            Some((p, at)) if p == path => *at,
+            _ => {
+                let now = Instant::now();
+                self.preview_since = Some((path.to_string(), now));
+                now
+            }
+        }
+    }
+
+    /// While `path` isn't ready and `HOLD` isn't over: what the pane showed the frame before
+    /// (the picture before, for a picture; else the item or folder summary as it was), or
+    /// nothing at all where there was nothing to keep (the loading shape shown at once blinked
+    /// for a frame or two before most files). None once the time is up.
+    #[allow(clippy::too_many_arguments)]
+    fn held(&mut self, path: &str, kind: Kind, since: Instant, width: f32, big: bool, window: &mut Window, cx: &mut Context<Self>) -> Option<AnyElement> {
+        if since.elapsed() >= HOLD {
+            return None;
+        }
+        // Drawn again when the time is up (nothing else may ask for it).
+        if self.preview_hold_wake.as_deref() != Some(path) {
+            self.preview_hold_wake = Some(path.to_string());
+            let left = HOLD.saturating_sub(since.elapsed()) + Duration::from_millis(8);
+            cx.spawn(async move |this, cx| {
+                cx.background_executor().timer(left).await;
+                this.update(cx, |_, cx| cx.notify()).ok();
+            })
+            .detach();
+        }
+        if kind == Kind::Image {
+            if let Some((image, size)) = self.kept_picture(big) {
+                crate::watchdog::trace("shows", || format!("{path}: the picture before"));
+                let el = self.picture_view(image, size, big, cx);
+                return Some(div().flex_1().min_h_0().px(px(14.)).pb(px(10.)).flex().flex_col().child(el).into_any_element());
+            }
+        }
+        if let Some(kept) = self.kept(path, big) {
+            crate::watchdog::trace("shows", || format!("{path}: what was there ({kept:?})"));
+            return Some(self.draw_kept(kept, width, big, window, cx));
+        }
+        crate::watchdog::trace("shows", || format!("{path}: nothing yet"));
+        Some(div().flex_1().min_h_0().into_any_element())
+    }
+
+    /// A selected folder's summary, or (while its listing is read) what `held` keeps on screen.
+    fn folder_view(&mut self, path: &str, width: f32, big: bool, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+        let since = self.previewed_since(path);
+        let el = self.folder_summary_for(path, cx);
+        if self.summary_pending {
+            if let Some(held) = self.held(path, Kind::Folder, since, width, big, window, cx) {
+                return held;
+            }
+        }
+        self.note_shown(Shown::Folder(path.to_string()), big);
+        el
+    }
+
+    /// The item's content as its kind is drawn (the loading shape while it isn't read).
+    fn content_of(&mut self, path: &str, ext: &str, kind: Kind, width: f32, big: bool, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let frame = |el: AnyElement| div().flex_1().min_h_0().px(px(14.)).pb(px(10.)).flex().flex_col().child(el).into_any_element();
         if kind == Kind::Video {
             if let Some(v) = self.video.as_ref().map(|(v, _)| v.clone()) {
@@ -583,29 +847,14 @@ impl Ferret {
             let word = self.word_selectable(path, width, big, cx);
             return frame(self.with_find_bar(word, big, window, cx));
         }
-        // Still loading: a picture shows its thumbnail meanwhile, where and as big as it will be
-        // (a spinner on an empty pane flashed on every switch between pictures, 2026-11-11).
-        let loading = self.preview_data.as_ref().filter(|l| l.key.starts_with(&format!("{path}|"))).is_none();
-        // Read but not decoded yet (GPUI decodes a picture the first time it's drawn, in the
-        // background, drawing nothing meanwhile): the stand-in stays until it is.
-        let undecoded = self
-            .preview_data
-            .as_ref()
-            .filter(|l| l.key.starts_with(&format!("{path}|")))
-            .and_then(|l| match &l.content {
-                Content::Picture { image, .. } => Some(image.clone()),
-                _ => None,
-            })
-            .is_some_and(|image| image.get_render_image(window, cx).is_none());
-        let loading = loading || undecoded;
-        if loading {
-            if let Some(stand_in) = self.picture_stand_in(path, kind, big, cx) {
-                return frame(stand_in);
-            }
-        }
         let Some(loaded) = self.preview_data.as_ref().filter(|l| l.key.starts_with(&format!("{path}|"))) else {
             return frame(loading_view(kind, ext, width, big));
         };
+        if !matches!(loaded.content, Content::Picture { .. }) {
+            self.held_pic[big as usize] = None;
+        }
+        self.note_shown(Shown::Item(path.to_string(), kind), big);
+        let loaded = self.preview_data.as_ref().unwrap();
         let fresh = loaded.lift && loaded.at.elapsed() < Duration::from_millis(180) && t::animate();
         let wrap = self.preview_view.wrap;
         let source = self.preview_view.source;
@@ -1140,6 +1389,7 @@ impl Ferret {
     /// A picture: click zooms in where you clicked (and it follows the mouse); the wheel zooms
     /// up to 16× around the pointer.
     fn picture_view(&mut self, image: Arc<gpui::Image>, size: (u32, u32), big: bool, cx: &mut Context<Self>) -> AnyElement {
+        self.held_pic[big as usize] = Some((image.clone(), size, crate::imgmem::current_frame()));
         let zoom = self.preview_view.zoom.max(1.);
         let (zx, zy) = self.preview_view.zoom_at;
         let bounds = self.picture_bounds[big as usize].clone();
@@ -1579,7 +1829,11 @@ impl Ferret {
         let vw = window.viewport_size();
         let w = (vw.width.as_f32() - 120.).max(300.);
         // The width inside the card: its padding (10 a side), border, and the content frame's 14 a side.
-        let content = if r.e.is_dir { self.folder_summary_for(&path, cx) } else { self.content_view(&path, &ext, kind, w - 50., true, window, cx) };
+        let content = if r.e.is_dir {
+            self.folder_view(&path, w - 50., true, window, cx)
+        } else {
+            self.content_view(&path, &ext, kind, w - 50., true, window, cx)
+        };
         let dims = match self.preview_data.as_ref().filter(|l| l.key.starts_with(&format!("{path}|"))).map(|l| &l.content) {
             Some(Content::Picture { w, h, .. }) if *w > 0 => Some((*w, *h)),
             _ => None,
@@ -2511,7 +2765,7 @@ impl Ferret {
     /// A picture still loading: its thumbnail (the sharp one when made, else the small one the
     /// header has), laid out as the picture will be, so switching between pictures doesn't flash
     /// an empty pane with a spinner.
-    fn picture_stand_in(&mut self, path: &str, kind: Kind, big: bool, cx: &mut Context<Self>) -> Option<AnyElement> {
+    fn picture_stand_in(&mut self, path: &str, kind: Kind, big: bool, _window: &mut Window, cx: &mut Context<Self>) -> Option<(Arc<gpui::Image>, (u32, u32))> {
         if kind != Kind::Image || path.to_lowercase().ends_with(".svg") {
             return None;
         }
@@ -2519,6 +2773,6 @@ impl Ferret {
         let (w, h) = crate::files::png_size(thumb.bytes())?;
         // Quick Look doesn't blow small pictures up: there the thumbnail stands for a big one.
         let k = if big { 8 } else { 1 };
-        Some(self.picture_view(thumb, (w * k, h * k), big, cx))
+        Some((thumb, (w * k, h * k)))
     }
 }

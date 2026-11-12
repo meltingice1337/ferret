@@ -175,6 +175,8 @@ async fn run(step: &str, this: &WeakEntity<Ferret>, cx: &mut AsyncWindowContext)
             out(&format!("shot {rest}"));
             cx.background_executor().timer(Duration::from_millis(700)).await;
         }
+        // A named point in the run, for a harness filming the window (film.ps1) to line up with.
+        "mark" => out(&format!("mark {rest}")),
         "state" => {
             let s = this.update(cx, |f, cx| f.state_json(cx)).unwrap_or_default();
             out(&format!("state {rest} {s}"));

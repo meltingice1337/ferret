@@ -11,9 +11,14 @@ fn err<E: std::fmt::Display>(e: E) -> String {
     e.to_string()
 }
 
+#[track_caller]
 fn with_db<T>(f: impl FnOnce(&mut Connection) -> rusqlite::Result<T>) -> Res<T> {
-    let mut conn = crate::app::try_state()?.db.lock().map_err(err)?;
-    f(&mut conn).map_err(err)
+    crate::app::with_db(f).ok_or("Ferret hasn't started yet")?.map_err(err)
+}
+
+/// The recent folders to show: read, then (the database let go) the ones still there.
+fn recents_now() -> Res<Vec<db::Recent>> {
+    Ok(db::recents_present(with_db(|c| db::recents(c, db::RECENTS_KEPT))?, 12))
 }
 
 // ---------- bootstrap ----------
@@ -31,17 +36,9 @@ pub struct Bootstrap {
 
 pub async fn bootstrap() -> Res<Bootstrap> {
     let places = crate::rt::spawn_blocking(places::all).await.map_err(err)?;
-    let connections = crate::remote::connections();
-    with_db(|c| {
-        Ok(Bootstrap {
-            settings: db::load_settings(c),
-            session: db::kv_get(c, "session"),
-            places,
-            favorites: db::favorites(c)?,
-            recents: db::recents_present(c, 12)?,
-            connections,
-        })
-    })
+    let connections = crate::remote::connections_reread();
+    let recents = recents_now()?;
+    with_db(|c| Ok(Bootstrap { settings: db::load_settings(c), session: db::kv_get(c, "session"), places, favorites: db::favorites(c)?, recents, connections }))
 }
 
 #[derive(Serialize)]
@@ -55,8 +52,9 @@ pub struct SharedState {
 
 /// What other Ferret windows may have changed (re-read when a window gets focus).
 pub fn shared_state() -> Res<SharedState> {
-    let connections = crate::remote::connections();
-    with_db(|c| Ok(SharedState { settings: db::load_settings(c), favorites: db::favorites(c)?, recents: db::recents_present(c, 12)?, connections }))
+    let connections = crate::remote::connections_reread();
+    let recents = recents_now()?;
+    with_db(|c| Ok(SharedState { settings: db::load_settings(c), favorites: db::favorites(c)?, recents, connections }))
 }
 
 pub async fn get_places() -> Res<places::Places> {
@@ -252,7 +250,9 @@ pub fn save_settings(settings: Value) -> Res<()> {
 }
 
 pub fn save_session(session: Value) -> Res<()> {
-    with_db(|c| db::kv_set(c, "session", &session))
+    with_db(|c| db::kv_set(c, "session", &session))?;
+    crate::app::tidy_db();
+    Ok(())
 }
 
 pub fn set_folder_view(path: String, view: Value, recursive: bool) -> Res<()> {
@@ -302,17 +302,13 @@ pub fn reorder_favorites(paths: Vec<String>) -> Res<Vec<db::Favorite>> {
 }
 
 pub fn push_recent(path: String) -> Res<Vec<db::Recent>> {
-    with_db(|c| {
-        db::push_recent(c, &path)?;
-        db::recents_present(c, 12)
-    })
+    with_db(|c| db::push_recent(c, &path))?;
+    recents_now()
 }
 
 pub fn remove_recent(path: String) -> Res<Vec<db::Recent>> {
-    with_db(|c| {
-        db::remove_recent(c, &path)?;
-        db::recents_present(c, 12)
-    })
+    with_db(|c| db::remove_recent(c, &path))?;
+    recents_now()
 }
 
 pub fn clear_recents() -> Res<Vec<db::Recent>> {

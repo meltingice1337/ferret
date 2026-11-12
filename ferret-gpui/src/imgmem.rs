@@ -113,7 +113,8 @@ thread_local! {
     static REG: RefCell<Reg> = RefCell::new(Reg::default());
 }
 
-fn current_frame() -> u64 {
+/// The count of frames drawn (the root view's renders).
+pub fn current_frame() -> u64 {
     REG.with_borrow(|r| r.frame)
 }
 
@@ -134,6 +135,16 @@ pub fn img(source: impl Into<ImageSource>) -> Img {
         _ => {}
     }
     gpui::img(source)
+}
+
+/// Whether GPUI has `image` decoded, so that drawing it shows it. GPUI decodes a picture the
+/// first time it's asked for, in the background, and `img` draws nothing meanwhile: a picture
+/// swapped in before it's decoded is an empty frame or two (a flash). Not decoded yet, it's
+/// asked for here and the view being drawn is drawn again once it is; the caller draws what it
+/// had meanwhile. Noted like a drawn picture, so a sweep lets go of it when it's no longer used.
+pub fn decoded(image: &Arc<Image>, window: &mut Window, cx: &mut gpui::App) -> bool {
+    note(Key::Image(image.id), Some(image));
+    image.clone().use_render_image(window, cx).is_some()
 }
 
 fn note(key: Key, image: Option<&Arc<Image>>) {

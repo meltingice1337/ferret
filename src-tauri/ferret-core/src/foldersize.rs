@@ -169,7 +169,7 @@ fn sizes() -> &'static Sizes {
 }
 
 fn with_db<T>(f: impl FnOnce(&rusqlite::Connection) -> rusqlite::Result<T>) -> Option<T> {
-    crate::app::with_db(|c| f(c).ok()).flatten()
+    crate::app::with_sizes_db(|c| f(c).ok()).flatten()
 }
 
 fn from_saved(v: db::SavedSize) -> FolderSize {

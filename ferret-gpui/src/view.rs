@@ -15,7 +15,7 @@ use ferret_core::places::Places;
 use ferret_core::{browse, db, paths};
 use gpui::AnimationExt;
 use gpui::{
-    AnyElement, App, Context, Entity, FocusHandle, Image, ImageFormat, KeyDownEvent, ObjectFit, SharedString, StyleRefinement,
+    AnyElement, App, AsyncApp, Context, Entity, FocusHandle, Image, ImageFormat, KeyDownEvent, ObjectFit, SharedString, StyleRefinement,
     Subscription, WeakEntity, Window, div, prelude::*, px,
 };
 
@@ -41,6 +41,11 @@ pub type Action = Rc<dyn Fn(&mut Ferret, &mut Window, &mut Context<Ferret>)>;
 /// The session (tabs, panes) written off the UI thread, the latest one only. It's saved at every
 /// folder opened, and the database is shared with folder-size counting, whose work can hold it
 /// for a while: the window doesn't wait for that.
+/// The same recent folders in the same order (what the sidebar shows of them).
+fn same_recents(a: &[db::Recent], b: &[db::Recent]) -> bool {
+    a.len() == b.len() && a.iter().zip(b).all(|(a, b)| a.path == b.path)
+}
+
 fn save_session_soon(session: serde_json::Value) {
     static PENDING: std::sync::Mutex<Option<serde_json::Value>> = std::sync::Mutex::new(None);
     let start = {
@@ -275,7 +280,9 @@ pub struct Ferret {
     pub editor: Option<(Entity<Editor>, Subscription)>,
     /// The selected folder's own listing, for its preview (pictures, recently changed, counts);
     /// `None` inside while it's being read.
-    pub folder_peek: Option<(String, Option<Result<Rc<Vec<ferret_core::listing::Entry>>, String>>)>,
+    pub folder_peek: Option<(String, Option<Result<Rc<crate::preview::Peek>, String>>)>,
+    /// The folder selected before that one, once read (see `peek_folder`).
+    pub folder_peek_before: Option<(String, Option<Result<Rc<crate::preview::Peek>, String>>)>,
     /// FERRET_GPUI_EDITOR: open the editor once the selected video is ready (tests).
     editor_on_start: bool,
     /// The folders being watched (changes reload them).
@@ -289,6 +296,22 @@ pub struct Ferret {
     /// The preview: what it waits to read (after 140 ms), what it read, and its options.
     pub preview_want: Option<(String, Instant)>,
     pub preview_data: Option<crate::preview::Loaded>,
+    /// The item the preview is for, and since when (what it showed before stays that long: see
+    /// `preview::HOLD`), and the item a redraw at the end of that time is booked for.
+    pub preview_since: Option<(String, Instant)>,
+    pub preview_hold_wake: Option<String>,
+    /// The folder summary just drawn is a spinner: its listing is still being read.
+    pub summary_pending: bool,
+    /// The picture the preview last drew (the pane's, Quick Look's) and at which frame, kept on
+    /// screen while the next one's stand-in or decoded copy isn't there yet; and the item whose
+    /// content it last drew. Only what the frame before showed is kept on (not something from
+    /// before the pane was closed or showed a folder).
+    pub held_pic: [Option<(Arc<Image>, (u32, u32), u64)>; 2],
+    pub preview_showing: [Option<(crate::preview::Shown, u64)>; 2],
+    /// The pictures next to the one previewed: their thumbnails are decoded ahead.
+    pub preview_near: Vec<String>,
+    /// When the preview last started waiting for another item (stepping fast reads none on the way).
+    pub preview_stepped: Option<Instant>,
     /// Pictures Quick Look is reading ahead (their preview keys).
     pub warming: std::collections::HashSet<String>,
     /// Files being dragged over the window: what, where the pointer is, and the drop target
@@ -480,7 +503,7 @@ impl Ferret {
         let mut this = Self {
             places: Places { home: home.clone(), known: Vec::new(), drives: Vec::new(), wsl: Vec::new() },
             favorites: ferret_core::app::with_db(|c| db::favorites(c).unwrap_or_default()).unwrap_or_default(),
-            recents: ferret_core::app::with_db(|c| db::recents_present(c, 12).unwrap_or_default()).unwrap_or_default(),
+            recents: db::recents_present(ferret_core::app::with_db(|c| db::recents(c, db::RECENTS_KEPT).unwrap_or_default()).unwrap_or_default(), 12),
             bin: None,
             tabs: Vec::new(),
             active: 0,
@@ -536,6 +559,7 @@ impl Ferret {
             last_click: None,
             editor: None,
             folder_peek: None,
+            folder_peek_before: None,
             editor_on_start: std::env::var_os("FERRET_GPUI_EDITOR").is_some(),
             watched: Vec::new(),
             title: String::new(),
@@ -543,6 +567,13 @@ impl Ferret {
             shelf_press: None,
             preview_want: None,
             preview_data: None,
+            preview_since: None,
+            preview_hold_wake: None,
+            summary_pending: false,
+            held_pic: Default::default(),
+            preview_showing: Default::default(),
+            preview_near: Vec::new(),
+            preview_stepped: None,
             warming: Default::default(),
             drag_hint: None,
             own_drag: false,
@@ -1331,6 +1362,7 @@ impl Ferret {
 
     pub fn reload_all(&mut self, cx: &mut Context<Self>) {
         self.folder_peek = None;
+        self.folder_peek_before = None;
         let ids: Vec<(u64, String)> =
             self.tabs.iter().flat_map(|t| std::iter::once(&t.main).chain(t.split.as_ref())).map(|p| (p.id, p.path.clone())).collect();
         for (id, path) in ids {
@@ -1397,19 +1429,14 @@ impl Ferret {
                     browse::open_path(real)
                 })
                 .await;
-            this.update(cx, |f, cx| {
-                match res {
-                    Err(e) => f.toast_error(format!("Couldn't open it: {e}"), cx),
-                    Ok(()) => {
-                        // A folder counts as recent once you open a file in it.
-                        if !dir.is_empty() {
-                            f.recents = browse::push_recent(dir).unwrap_or_else(|_| f.recents.clone());
-                        }
-                    }
+            match res {
+                Err(e) => {
+                    this.update(cx, |f, cx| f.toast_error(format!("Couldn't open it: {e}"), cx)).ok();
                 }
-                cx.notify();
-            })
-            .ok();
+                // A folder counts as recent once you open a file in it.
+                Ok(()) if !dir.is_empty() => Self::push_recent(&this, dir, cx).await,
+                Ok(()) => {}
+            }
         })
         .detach();
     }
@@ -1891,6 +1918,9 @@ impl Ferret {
                             f.reload_dir(d, cx);
                         }
                         // The selected folder's preview is read again when it changed.
+                        if f.folder_peek_before.as_ref().is_some_and(|(p, _)| dirs.iter().any(|d| same(d, p))) {
+                            f.folder_peek_before = None;
+                        }
                         if f.folder_peek.as_ref().is_some_and(|(p, _)| dirs.iter().any(|d| same(d, p))) {
                             f.folder_peek = None;
                             cx.notify();
@@ -1982,17 +2012,27 @@ impl Ferret {
         }
         cx.spawn(async move |this, cx| {
             cx.background_executor().timer(Duration::from_secs(3)).await;
+            let still_there = this.update(cx, |f, _| f.pane_ref(id).is_some_and(|p| same(&p.path, &path))).unwrap_or(false);
+            if still_there {
+                Self::push_recent(&this, path, cx).await;
+            }
+        })
+        .detach();
+    }
+
+    /// `dir` becomes the most recent folder: saved, and the list read again, off the UI thread
+    /// (it writes to the database and looks which recent folders are still on the disk).
+    async fn push_recent(this: &WeakEntity<Self>, dir: String, cx: &mut AsyncApp) {
+        let list = cx.background_executor().spawn(async move { browse::push_recent(dir) }).await;
+        if let Ok(list) = list {
             this.update(cx, |f, cx| {
-                if f.pane_ref(id).is_some_and(|p| same(&p.path, &path)) {
-                    if let Ok(r) = browse::push_recent(path) {
-                        f.recents = r;
-                        cx.notify();
-                    }
+                if !same_recents(&f.recents, &list) {
+                    f.recents = list;
+                    cx.notify();
                 }
             })
             .ok();
-        })
-        .detach();
+        }
     }
 
     /// Asks for the pane's folder sizes (counted in the background; they arrive as events).

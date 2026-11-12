@@ -40,6 +40,25 @@ pub fn act(what: impl Into<String>) {
     }
 }
 
+/// What a part of the window is drawing, for tests looking for flashes (FERRET_GPUI_HITCH_MS
+/// set; nothing otherwise): a log line with the ms since start each time `what` changes for
+/// `part`, so a film of the window can be read against what was drawn and why.
+pub fn trace(part: &'static str, what: impl FnOnce() -> String) {
+    static ON: OnceLock<bool> = OnceLock::new();
+    if !*ON.get_or_init(|| std::env::var_os("FERRET_GPUI_HITCH_MS").is_some()) {
+        return;
+    }
+    static LAST: Mutex<Vec<(&'static str, String)>> = Mutex::new(Vec::new());
+    let what = what();
+    let Ok(mut last) = LAST.lock() else { return };
+    match last.iter_mut().find(|(p, _)| *p == part) {
+        Some((_, w)) if *w == what => return,
+        Some((_, w)) => *w = what.clone(),
+        None => last.push((part, what.clone())),
+    }
+    log::info!(target: "ferret::trace", "{} ms {part}: {what}", now_ms());
+}
+
 /// Starts the heartbeat and the watchdog (on the UI thread, once).
 pub fn start(cx: &mut gpui::App) {
     static STARTED: std::sync::Once = std::sync::Once::new();
@@ -49,14 +68,41 @@ pub fn start(cx: &mut gpui::App) {
     STARTED.call_once(|| {});
     BEAT.store(now_ms(), Ordering::Relaxed);
     let ui = stack::UiThread::current();
+    let pace = Pace::from_env();
     cx.spawn(async move |cx| {
         loop {
-            cx.background_executor().timer(Duration::from_millis(100)).await;
+            cx.background_executor().timer(Duration::from_millis(pace.beat)).await;
             BEAT.store(now_ms(), Ordering::Relaxed);
         }
     })
     .detach();
-    std::thread::Builder::new().name("watchdog".into()).spawn(move || watch(ui)).ok();
+    std::thread::Builder::new().name("watchdog".into()).spawn(move || watch(ui, pace)).ok();
+}
+
+/// How closely the UI thread is watched (all in ms).
+#[derive(Clone, Copy)]
+struct Pace {
+    /// Between heartbeats, and between the watchdog's looks at them.
+    beat: u64,
+    /// A heartbeat this late starts a stall; `over` or less late ends it.
+    begins: u64,
+    over: u64,
+    /// How late the heartbeat must be for the first look at the UI thread's stack.
+    first_sample: u64,
+    /// The shortest stall worth a log line.
+    worth: u64,
+}
+
+impl Pace {
+    /// Normally: hitches of a quarter second and up, stacks from a second on. With
+    /// FERRET_GPUI_HITCH_MS=N (tests looking for stutter): hitches of N ms and up, each with
+    /// where the UI thread was.
+    fn from_env() -> Self {
+        match std::env::var("FERRET_GPUI_HITCH_MS").ok().and_then(|v| v.parse::<u64>().ok()).filter(|n| *n >= 10) {
+            Some(n) => Pace { beat: 4, begins: n, over: n / 2, first_sample: n, worth: n },
+            None => Pace { beat: 100, begins: 350, over: 250, first_sample: 1000, worth: 250 },
+        }
+    }
 }
 
 /// A hold-up of the UI thread in progress.
@@ -69,11 +115,11 @@ struct Stall {
     next_sample: u64,
 }
 
-fn watch(ui: Option<stack::UiThread>) {
+fn watch(ui: Option<stack::UiThread>, pace: Pace) {
     let mut stall: Option<Stall> = None;
     let mut last = Instant::now();
     loop {
-        std::thread::sleep(Duration::from_millis(100));
+        std::thread::sleep(Duration::from_millis(pace.beat));
         let gap = last.elapsed();
         last = Instant::now();
         // The whole process (or the computer) was paused: sleep, a debugger. Not a hang.
@@ -85,12 +131,12 @@ fn watch(ui: Option<stack::UiThread>) {
         let beat = BEAT.load(Ordering::Relaxed);
         let late = now.saturating_sub(beat);
         match stall.as_mut() {
-            None if late >= 350 => stall = Some(Stall { since: beat, samples: Vec::new(), next_sample: 1000 }),
-            Some(s) if late < 250 => {
+            None if late >= pace.begins => stall = Some(Stall { since: beat, samples: Vec::new(), next_sample: pace.first_sample }),
+            Some(s) if late < pace.over => {
                 // Over: it lasted from the beat before it to the one after, less a beat's interval.
-                let lasted = beat.saturating_sub(s.since).saturating_sub(100);
+                let lasted = beat.saturating_sub(s.since).saturating_sub(pace.beat);
                 if let Some(s) = stall.take() {
-                    report(&s, lasted);
+                    report(&s, lasted, pace.worth);
                 }
             }
             Some(s) if late >= s.next_sample && s.samples.len() < 4 => {
@@ -104,8 +150,8 @@ fn watch(ui: Option<stack::UiThread>) {
     }
 }
 
-fn report(s: &Stall, lasted: u64) {
-    if lasted < 250 {
+fn report(s: &Stall, lasted: u64, worth: u64) {
+    if lasted < worth {
         return;
     }
     // What was done in the 10 s before it.
@@ -123,7 +169,8 @@ fn report(s: &Stall, lasted: u64) {
         log::info!(target: "ferret::hang", "the window was busy for {lasted} ms ({before})");
         return;
     }
-    let mut text = format!("the window didn't answer for {:.1} s ({before}); where the UI thread was:", lasted as f32 / 1000.);
+    let long = if lasted < 1000 { format!("{lasted} ms") } else { format!("{:.1} s", lasted as f32 / 1000.) };
+    let mut text = format!("the window didn't answer for {long} ({before}); where the UI thread was:");
     let mut seen_same = None;
     for (late, frames) in &s.samples {
         if seen_same.as_ref() == Some(frames) {

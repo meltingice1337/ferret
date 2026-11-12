@@ -42,13 +42,36 @@ fn with_db<T>(f: impl FnOnce(&rusqlite::Connection) -> T) -> Option<T> {
     crate::app::with_db(|c| f(c))
 }
 
+/// The saved connections as last read from the database (None: not read yet).
+fn known() -> &'static Mutex<Option<Vec<Connection>>> {
+    static K: OnceLock<Mutex<Option<Vec<Connection>>>> = OnceLock::new();
+    K.get_or_init(Default::default)
+}
+
+/// The saved connections, from memory: the sidebar asks at every frame it draws, names of
+/// server paths are looked up all over, and each was a turn with the database (and a wait when
+/// another thread had it). Read again from the database when another window may have changed
+/// them ([`connections_reread`]: a window getting the focus) and before changing them.
 pub fn connections() -> Vec<Connection> {
-    with_db(|c| db::kv_get(c, KEY)).flatten().and_then(|v| serde_json::from_value(v).ok()).unwrap_or_default()
+    if let Some(all) = known().lock().unwrap().as_ref() {
+        return all.clone();
+    }
+    connections_reread()
+}
+
+/// The saved connections, read from the database (other windows save theirs there).
+pub fn connections_reread() -> Vec<Connection> {
+    let Some(saved) = with_db(|c| db::kv_get(c, KEY)) else { return Vec::new() };
+    let all: Vec<Connection> = saved.and_then(|v| serde_json::from_value(v).ok()).unwrap_or_default();
+    *known().lock().unwrap() = Some(all.clone());
+    all
 }
 
 fn store(all: &[Connection]) -> Res<()> {
     let v = serde_json::to_value(all).map_err(|e| e.to_string())?;
-    with_db(|c| db::kv_set(c, KEY, &v)).ok_or("no database")?.map_err(|e| e.to_string())
+    with_db(|c| db::kv_set(c, KEY, &v)).ok_or("no database")?.map_err(|e| e.to_string())?;
+    *known().lock().unwrap() = Some(all.to_vec());
+    Ok(())
 }
 
 pub fn find_connection(id: &str) -> Option<Connection> {
@@ -137,7 +160,7 @@ pub async fn remote_save_connection(mut connection: Connection) -> Res<Vec<Conne
     if connection.host.is_empty() && connection.ssh_alias.is_none() {
         return Err("Enter the server's address".into());
     }
-    let mut all = connections();
+    let mut all = connections_reread();
     match all.iter_mut().find(|c| c.id == connection.id && !connection.id.is_empty()) {
         Some(c) => {
             // Settings that change how it logs in or where it opens take effect at the next connect.
@@ -157,7 +180,7 @@ pub async fn remote_save_connection(mut connection: Connection) -> Res<Vec<Conne
 
 pub async fn remote_delete_connection(id: String) -> Res<Vec<Connection>> {
     ssh::disconnect(&id).await;
-    let mut all = connections();
+    let mut all = connections_reread();
     if let Some(c) = all.iter().find(|c| c.id == id) {
         let host = if c.host.is_empty() { c.ssh_alias.clone().unwrap_or_default() } else { c.host.clone() };
         secrets::forget(&secrets::password_target(&c.user, &host, c.port));

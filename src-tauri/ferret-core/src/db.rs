@@ -6,10 +6,22 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::paths;
 
+/// Another connection to a database `open` has set up (its tables are there): readers on one
+/// don't wait for a writer on the other (the write-ahead log).
+pub fn open_again(path: &Path) -> rusqlite::Result<Connection> {
+    let conn = Connection::open(path)?;
+    conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL;")?;
+    Ok(conn)
+}
+
 pub fn open(path: &Path) -> rusqlite::Result<Connection> {
     let conn = Connection::open(path)?;
+    // synchronous=NORMAL: a save doesn't wait for the disk to confirm (tens of ms on a busy one,
+    // with the window waiting); the log is synced when it's copied into the file. A power cut
+    // can lose the last saves, never damage the database.
     conn.execute_batch(
         "PRAGMA journal_mode=WAL;
+         PRAGMA synchronous=NORMAL;
          CREATE TABLE IF NOT EXISTS kv (key TEXT PRIMARY KEY, json TEXT NOT NULL);
          CREATE TABLE IF NOT EXISTS view_settings (
              path_key TEXT PRIMARY KEY, path TEXT NOT NULL, json TEXT NOT NULL,
@@ -390,18 +402,22 @@ pub fn recents(conn: &Connection, limit: i64) -> rusqlite::Result<Vec<Recent>> {
 /// `recents` without folders that were deleted or moved away: on a drive that's there, a folder
 /// that isn't. Their rows stay (an unplugged drive's folders come back with it); network and WSL
 /// folders aren't checked (slow, and looking would start a stopped distro).
-pub fn recents_present(conn: &Connection, limit: i64) -> rusqlite::Result<Vec<Recent>> {
+///
+/// Takes what `recents(conn, RECENTS_KEPT)` read, to be called once the database is let go: it
+/// looks at the disk (a drive that was asleep answers after seconds), and whoever else wants
+/// the database, the window included, would wait for that. It stops looking at `limit` found.
+pub fn recents_present(all: Vec<Recent>, limit: usize) -> Vec<Recent> {
     let gone = |p: &str| match p.get(..3) {
         Some(root) if root.as_bytes()[1] == b':' && root.ends_with('\\') => {
             std::path::Path::new(root).exists() && !std::path::Path::new(&paths::for_io(p)).exists()
         }
         _ => false,
     };
-    let mut all = recents(conn, 200)?;
-    all.retain(|r| !gone(&r.path));
-    all.truncate(limit.max(0) as usize);
-    Ok(all)
+    all.into_iter().filter(|r| !gone(&r.path)).take(limit).collect()
 }
+
+/// How many recents are read for [`recents_present`] to pick from.
+pub const RECENTS_KEPT: i64 = 200;
 
 fn frecency(r: &Recent, now: i64) -> f64 {
     const HOUR: i64 = 3_600_000;

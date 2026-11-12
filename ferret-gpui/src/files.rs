@@ -1235,6 +1235,15 @@ impl Ferret {
         None
     }
 
+    /// A thumbnail that's already made (`thumb` without asking for one).
+    pub fn thumb_ready(&mut self, path: &str, size: u32, icon_only: bool, modified: Option<i64>) -> Option<Arc<Image>> {
+        let key = format!("{}|{size}|{}|{}", paths::key(path), modified.unwrap_or(0), icon_only as u8);
+        match self.thumbs.get(&key) {
+            Some(Thumb::Ready(i)) => Some(i.clone()),
+            _ => None,
+        }
+    }
+
     fn pump_thumbs(&mut self, cx: &mut Context<Self>) {
         // Eight at a time: Windows' thumbnail cache serves them in parallel.
         while self.thumbs_running < 8 {

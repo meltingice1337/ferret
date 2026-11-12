@@ -212,13 +212,43 @@ impl Ferret {
 
 impl Ferret {
     /// Favorites, recents and settings, as other windows may have left them.
+    ///
+    /// Read off the UI thread (the database, and which recent folders are still on the disk: it
+    /// runs each time the window is clicked into), and only what differs is taken, so a window
+    /// nothing else touched isn't drawn again. What this window changed while the read was under
+    /// way stays (the read may be from before it).
     pub fn reread_shared(&mut self, cx: &mut gpui::Context<Self>) {
-        if let Ok(s) = ferret_core::browse::shared_state() {
-            self.favorites = s.favorites;
-            self.recents = s.recents;
-            self.settings = crate::settings::Settings(s.settings);
-            self.settings.apply_theme();
-            cx.notify();
+        fn json<T: serde::Serialize>(v: &T) -> serde_json::Value {
+            serde_json::to_value(v).unwrap_or_default()
         }
+        // Recents by what the sidebar shows of them: their folders, in order.
+        fn folders(r: &[ferret_core::db::Recent]) -> Vec<String> {
+            r.iter().map(|r| r.path.clone()).collect()
+        }
+        let before = (self.settings.0.clone(), json(&self.favorites), folders(&self.recents));
+        cx.spawn(async move |this, cx| {
+            let Ok(s) = cx.background_executor().spawn(async { ferret_core::browse::shared_state() }).await else { return };
+            this.update(cx, |f, cx| {
+                let mut changed = false;
+                if f.settings.0 == before.0 && s.settings != before.0 {
+                    f.settings = crate::settings::Settings(s.settings);
+                    f.settings.apply_theme();
+                    changed = true;
+                }
+                if json(&f.favorites) == before.1 && json(&s.favorites) != before.1 {
+                    f.favorites = s.favorites;
+                    changed = true;
+                }
+                if folders(&f.recents) == before.2 && folders(&s.recents) != before.2 {
+                    f.recents = s.recents;
+                    changed = true;
+                }
+                if changed {
+                    cx.notify();
+                }
+            })
+            .ok();
+        })
+        .detach();
     }
 }
