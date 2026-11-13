@@ -178,6 +178,11 @@ impl TextInput {
         self.focus_handle.is_focused(window)
     }
 
+    /// Where the text was drawn last frame (None before its first).
+    pub fn bounds(&self) -> Option<Bounds<Pixels>> {
+        self.last_bounds
+    }
+
     pub fn set_text(&mut self, text: &str, cx: &mut Context<Self>) {
         self.content = text.to_string().into();
         self.selected_range = text.len()..text.len();

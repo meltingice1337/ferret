@@ -957,7 +957,12 @@ impl Ferret {
                             *s = to.clone();
                         }
                     }
-                    f.pane_mut().pending_select = Some(vec![to]);
+                    // Selected under its new name, unless a click on another item ended the
+                    // rename: that item stays selected (as Explorer).
+                    let p = f.pane();
+                    if p.marked.len() <= 1 && p.cursor_row().is_none_or(|r| same(&r.e.path, &path)) {
+                        f.pane_mut().pending_select = Some(vec![to]);
+                    }
                     let dir = f.pane().path.clone();
                     f.reload_dir(&dir, cx);
                 }

@@ -3148,11 +3148,23 @@ impl Render for Ferret {
             .on_key_down(cx.listener(Self::key))
             // A click anywhere gives the keyboard back to the files (from the area F6 put it in).
             // While autoscroll follows the mouse, the next press only stops it.
-            .capture_any_mouse_down(cx.listener(|f, ev: &gpui::MouseDownEvent, _, cx| {
+            .capture_any_mouse_down(cx.listener(|f, ev: &gpui::MouseDownEvent, window, cx| {
                 if f.autoscroll.as_ref().is_some_and(|a| a.sticky) {
                     f.stop_autoscroll(cx);
                     cx.stop_propagation();
                     return;
+                }
+                // A press anywhere outside the rename box renames (as Explorer). Only a press on
+                // empty space in the list did: one on another row, the sidebar or the preview
+                // left the box open, still taking the keys (user report, 2026-11-13).
+                let outside = f.rename.as_ref().is_some_and(|r| {
+                    r.input.read(cx).bounds().is_none_or(|b| !b.dilate(px(8.)).contains(&ev.position))
+                });
+                if outside {
+                    f.commit_rename(cx);
+                    // The keys come back to the files (the box had them); a field pressed takes
+                    // them after this.
+                    window.focus(&f.focus, cx);
                 }
                 // A press anywhere lets go of the preview's selected text (a press on that text
                 // picks again, after this); Ctrl+C is for the files again.
