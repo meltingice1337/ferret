@@ -190,6 +190,13 @@ fn handed_over() -> bool {
     if let Ok(open) = std::env::var("FERRET_GPUI_OPEN") {
         args = vec![open];
     }
+    // Windows' folder command, run from the desktop, the taskbar or the Start menu: no program's
+    // "Show in folder" is behind it, and the window needn't ask (ferret-core's
+    // `started_by_the_shell`; only this process can tell what started it).
+    let shell = ferret_core::integration::SHELL_ARG;
+    if args.iter().any(|a| a == shell) && ferret_core::integration::started_by_the_shell() {
+        args.retain(|a| a != shell);
+    }
     let cwd = std::env::current_dir().map(|p| p.to_string_lossy().into_owned()).unwrap_or_default();
     ferret_core::standby::hand_over(&exe.to_string_lossy(), &ferret_core::standby::Launch { args, cwd }).is_some()
 }

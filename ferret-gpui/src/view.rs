@@ -463,6 +463,34 @@ pub fn placement_of(hwnd: isize, maximized: bool) -> Option<ferret_core::integra
 }
 
 /// A window restarted as administrator goes exactly where the one it replaces was.
+/// Once this process's window is in front, no other program may take the front from it until
+/// `done` (Windows' own lock for that, `LockSetForegroundWindow`: it lets go by itself when
+/// the user presses Alt or clicks another window, so nothing the user does is held back).
+/// Gives up if the window isn't in front within a second: there's nothing to keep then.
+fn keep_front_until(done: &std::sync::atomic::AtomicBool) {
+    use std::sync::atomic::Ordering;
+    use windows::Win32::UI::WindowsAndMessaging::{GetForegroundWindow, GetWindowThreadProcessId, LockSetForegroundWindow, LSFW_LOCK, LSFW_UNLOCK};
+    let since = Instant::now();
+    let mut locked = false;
+    while !done.load(Ordering::Acquire) && since.elapsed() < Duration::from_secs(25) {
+        if !locked {
+            if since.elapsed() > Duration::from_secs(1) {
+                return;
+            }
+            let mut front = 0;
+            // SAFETY: plain calls with an out-parameter.
+            unsafe { GetWindowThreadProcessId(GetForegroundWindow(), Some(&mut front)) };
+            // SAFETY: a plain call; it fails when this process isn't the one in front.
+            locked = front == std::process::id() && unsafe { LockSetForegroundWindow(LSFW_LOCK) }.is_ok();
+        }
+        std::thread::sleep(Duration::from_millis(15));
+    }
+    if locked {
+        // SAFETY: a plain call.
+        let _ = unsafe { LockSetForegroundWindow(LSFW_UNLOCK) };
+    }
+}
+
 fn apply_placement(hwnd: isize, p: ferret_core::integration::Placement) {
     use windows::Win32::Foundation::HWND;
     use windows::Win32::UI::WindowsAndMessaging::{SW_MAXIMIZE, SWP_NOACTIVATE, SWP_NOZORDER, SetWindowPos, ShowWindow};
@@ -654,6 +682,10 @@ impl Ferret {
             if t.active {
                 this.active = ix;
             }
+        }
+        // Opened by Windows' folder command: a program's "Show in folder" may be behind it.
+        if let Some(folder) = ferret_core::integration::shell_folder().filter(|_| start.is_none()) {
+            this.ask_shown_item(folder, cx);
         }
         let restore = start.is_none() && targets.is_empty() && this.settings.bool("restoreSession", true);
         let mut opened = false;
@@ -1284,6 +1316,53 @@ impl Ferret {
         }
         self.pane_mut().pending_select = Some(vec![path.to_string()]);
         self.go(parent, cx);
+    }
+
+    /// Windows' folder command opened this window on `folder`. That command is all a program's
+    /// "Show in folder" gets to run while Ferret is the default file manager, and the file isn't
+    /// part of it: Windows means to select it in an Explorer window, and waits 20 seconds for
+    /// one. The Explorer redirect gives it that window, out of sight, and says which file was
+    /// selected there (ferret-core's redirect.rs; about a second later): it's selected here then.
+    fn ask_shown_item(&mut self, folder: String, cx: &mut Context<Self>) {
+        let Ok(exe) = std::env::current_exe() else { return };
+        let exe = exe.to_string_lossy().into_owned();
+        let (tell, heard) = futures::channel::oneshot::channel();
+        let dir = folder.clone();
+        // A thread of its own: the answer can take as long as Windows waits.
+        let answered = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let done = answered.clone();
+        std::thread::spawn(move || {
+            let item = ferret_core::redirect::item_to_select(&exe, &dir);
+            done.store(true, std::sync::atomic::Ordering::Release);
+            let _ = tell.send(item);
+        });
+        // Meanwhile this window keeps the front: Explorer's window, which nobody sees, would
+        // take it (Windows gives it to the window it selects in), and keys typed just after
+        // the folder opened would go there.
+        std::thread::spawn(move || keep_front_until(&answered));
+        cx.spawn(async move |this, cx| {
+            let Ok(Some(item)) = heard.await else { return };
+            this.update(cx, |f, cx| f.select_shown_item(&folder, item, cx)).ok();
+        })
+        .detach();
+    }
+
+    /// Selects the file a program asked to be shown in `folder`: only while the window is still
+    /// there, and not over something picked meanwhile.
+    /// (`keep_front_until`, below the impl, holds the front until the answer is in.)
+    fn select_shown_item(&mut self, folder: &str, item: String, cx: &mut Context<Self>) {
+        let p = self.pane();
+        let (here, picked) = (same(&p.path, folder), p.marked.len());
+        log::info!(target: "ferret::act", "a program asked for {item} to be shown{}", if !here { " (the window has gone elsewhere)" } else if picked > 0 { " (something else is selected by now)" } else { "" });
+        if !here || picked > 0 {
+            return;
+        }
+        match p.index_of(&item) {
+            Some(ix) => self.select(ix, cx),
+            // Not listed yet: selected when it is.
+            None if p.loading || !p.loaded_once => self.pane_mut().pending_select = Some(vec![item]),
+            None => {}
+        }
     }
 
     pub fn go_back(&mut self, cx: &mut Context<Self>) {

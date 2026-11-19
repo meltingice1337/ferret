@@ -125,14 +125,85 @@ pub fn hand_launch(launch: crate::standby::Launch) {
     *HANDED.lock().unwrap() = Some(launch);
 }
 
+/// What Windows' folder command passes before the folder (`"ferret.exe" --shell "%1"`): the
+/// start came from Windows opening a folder for some program, not from Ferret, its taskbar
+/// button or the Explorer redirect. (The arguments' parser skips `--` switches, as do the
+/// versions before this one.)
+pub const SHELL_ARG: &str = "--shell";
+
+/// The folder Windows' folder command opened this window on (see `shell_folder`).
+static SHELL_FOLDER: Mutex<Option<String>> = Mutex::new(None);
+
 pub fn init_launch_targets() {
-    let (args, cwd) = match HANDED.lock().unwrap().take() {
-        Some(launch) => (launch.args, launch.cwd),
-        None => (std::env::args().skip(1).collect(), std::env::current_dir().map(|p| p.to_string_lossy().into_owned()).unwrap_or_default()),
+    let (args, cwd, own) = match HANDED.lock().unwrap().take() {
+        Some(launch) => (launch.args, launch.cwd, false),
+        None => (std::env::args().skip(1).collect(), std::env::current_dir().map(|p| p.to_string_lossy().into_owned()).unwrap_or_default(), true),
     };
+    // (A start handed over comes with the switch already dropped when the shell made it: the
+    // process that was started knows what started it, this one doesn't.)
+    let by_windows = args.iter().any(|a| a == SHELL_ARG) && !(own && started_by_the_shell());
     let (targets, placement) = from_args(args, &cwd);
+    *SHELL_FOLDER.lock().unwrap() = shell_folder_of(by_windows, &targets);
     *LAUNCH.lock().unwrap() = Some(targets);
     *PLACEMENT.lock().unwrap() = placement;
+}
+
+/// Whether this process was started by the Explorer that runs the desktop and the taskbar: a
+/// folder's shortcut, the Start menu, Win+R. A folder opened from there is hardly ever a
+/// program's "Show in folder", and finding out costs a hidden Explorer window (redirect.rs:
+/// over a second of processor time, 120 MB for a minute), so those starts drop `--shell`.
+/// (Explorer's own "Open file location" is the exception that stays as it was: the folder
+/// opens without the file selected.)
+#[cfg(windows)]
+pub fn started_by_the_shell() -> bool {
+    use windows::Win32::Foundation::CloseHandle;
+    use windows::Win32::System::Diagnostics::ToolHelp::{CreateToolhelp32Snapshot, Process32FirstW, Process32NextW, PROCESSENTRY32W, TH32CS_SNAPPROCESS};
+    use windows::Win32::UI::WindowsAndMessaging::{GetShellWindow, GetWindowThreadProcessId};
+    let mut shell = 0u32;
+    // SAFETY: plain calls with an out-parameter.
+    unsafe { GetWindowThreadProcessId(GetShellWindow(), Some(&mut shell)) };
+    if shell == 0 {
+        return false;
+    }
+    let me = std::process::id();
+    // SAFETY: the snapshot is closed below; the entry is sized as the calls expect.
+    unsafe {
+        let Ok(snapshot) = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0) else { return false };
+        let mut entry = PROCESSENTRY32W { dwSize: std::mem::size_of::<PROCESSENTRY32W>() as u32, ..Default::default() };
+        let mut parent = 0;
+        let mut more = Process32FirstW(snapshot, &mut entry).is_ok();
+        while more {
+            if entry.th32ProcessID == me {
+                parent = entry.th32ParentProcessID;
+                break;
+            }
+            more = Process32NextW(snapshot, &mut entry).is_ok();
+        }
+        let _ = CloseHandle(snapshot);
+        parent == shell
+    }
+}
+
+#[cfg(not(windows))]
+pub fn started_by_the_shell() -> bool {
+    false
+}
+
+/// One folder, as it is, with nothing to select: what the folder command opens.
+fn shell_folder_of(by_windows: bool, targets: &[LaunchTarget]) -> Option<String> {
+    match targets {
+        [t] if by_windows && t.select.is_none() && !t.path.is_empty() && !recycle::is_recycle(&t.path) => Some(t.path.clone()),
+        _ => None,
+    }
+}
+
+/// The folder this window was opened on by Windows' folder command, handed out once. That
+/// command is all a program's "Show in folder" gets to run while Ferret is the default file
+/// manager: Windows starts it with the folder alone, then waits (20 seconds) for an Explorer
+/// window on that folder to select the file in. The window asks the Explorer redirect for
+/// that file (`redirect::item_to_select`).
+pub fn shell_folder() -> Option<String> {
+    SHELL_FOLDER.lock().unwrap().take()
 }
 
 /// A window handed over by `restart_elevated` (`--restore …`) reopens its tabs and
@@ -261,6 +332,17 @@ mod reg {
         Some(exe)
     }
 
+    /// What Windows runs to open a folder in `exe`. `--shell` says so to the window (earlier
+    /// versions registered the folder alone).
+    fn open_command(exe: &str) -> String {
+        format!("\"{exe}\" {SHELL_ARG} \"%1\"")
+    }
+
+    /// Whether folders and drives are opened with the command this version registers.
+    pub fn command_is_current(exe: &str) -> bool {
+        ["Directory", "Drive"].iter().all(|kind| get(&command(kind), "").is_some_and(|c| c == open_command(exe)))
+    }
+
     /// Writes the keys and returns what they replaced (to restore later).
     pub fn enable(exe: &str, previous: Option<&Value>) -> Res<Value> {
         // Keep the very first backup if we're only refreshing the exe path.
@@ -278,7 +360,7 @@ mod reg {
             let verb = format!(r"{CLASSES}\{kind}\shell\{VERB}");
             set(&verb, "", "Open in Ferret")?;
             set(&verb, "Icon", &format!("\"{exe}\",0"))?;
-            set(&command(kind), "", &format!("\"{exe}\" \"%1\""))?;
+            set(&command(kind), "", &open_command(exe))?;
             set(&format!(r"{CLASSES}\{kind}\shell"), "", VERB)?;
         }
         let win_e = format!(r"{EXPLORER_CLSID}\shell\opennewwindow\command");
@@ -393,7 +475,8 @@ pub fn refresh_registration() {
             return;
         }
         let (Some(target), Ok(me)) = (reg::current_target(), exe()) else { return };
-        if !target.eq_ignore_ascii_case(&me) {
+        // Another copy's, or this one's as an earlier version wrote it (without `--shell`).
+        if !target.eq_ignore_ascii_case(&me) || !reg::command_is_current(&me) {
             let Ok(conn) = state.db.lock() else { return };
             let backup = db::kv_get(&conn, BACKUP_KEY);
             if reg::enable(&me, backup.as_ref()).is_err() {
@@ -620,6 +703,22 @@ mod tests {
         assert!(!in_cargo_target(std::path::Path::new(r"C:\Users\someone\AppData\Local\Ferret\ferret.exe")));
         assert!(!in_cargo_target(&std::env::temp_dir().join("target").join("ferret.exe")));
         let _ = std::fs::remove_dir_all(&project);
+    }
+
+    #[test]
+    fn a_start_by_windows_folder_command_is_told_apart() {
+        let folder = [t(r"D:\Downloads", None)];
+        assert_eq!(shell_folder_of(true, &folder), Some(r"D:\Downloads".to_string()));
+        // The same folder opened any other way (Ferret itself, the taskbar, the redirect).
+        assert_eq!(shell_folder_of(false, &folder), None);
+        // Not with a file already to select, the default place, the bin, or several folders.
+        assert_eq!(shell_folder_of(true, &[t(r"D:\Downloads", Some(r"D:\Downloads\a.txt"))]), None);
+        assert_eq!(shell_folder_of(true, &[t("", None)]), None);
+        assert_eq!(shell_folder_of(true, &[t(recycle::PATH, None)]), None);
+        assert_eq!(shell_folder_of(true, &[t(r"C:\a", None), t(r"C:\b", None)]), None);
+        // The switch itself opens nothing (nor does it in the versions before it).
+        let with: Vec<String> = vec![SHELL_ARG.into(), r"C:\Windows".into()];
+        assert_eq!(parse_args(&with, r"C:\"), parse_args(&with[1..], r"C:\"));
     }
 
     #[test]

@@ -38,14 +38,20 @@ enum Ask {
 }
 
 /// The pipe a standby of `exe` waits on, in this sign-in session.
+#[cfg(test)]
 fn pipe_name(exe: &str, session: u32) -> String {
+    pipe_name_of("ready", exe, session)
+}
+
+/// A pipe of `exe` for one purpose (`kind`), in this sign-in session.
+fn pipe_name_of(kind: &str, exe: &str, session: u32) -> String {
     // FNV-1a: the same name from every copy of the program, whatever built it.
     let tag = exe.to_lowercase().replace('/', "\\").bytes().fold(0xcbf2_9ce4_8422_2325u64, |h, b| (h ^ b as u64).wrapping_mul(0x0000_0100_0000_01b3));
-    format!(r"\\.\pipe\ferret-ready-{session}-{tag:016x}")
+    format!(r"\\.\pipe\ferret-{kind}-{session}-{tag:016x}")
 }
 
 #[cfg(windows)]
-mod win {
+pub(crate) mod win {
     use super::*;
     use std::time::Duration;
     use windows::core::PCWSTR;
@@ -64,16 +70,22 @@ mod win {
     /// A launch is a line of JSON: arguments and a folder. Anything longer isn't one.
     const LONGEST: usize = 256 * 1024;
 
-    fn wide(s: &str) -> Vec<u16> {
+    pub(crate) fn wide(s: &str) -> Vec<u16> {
         s.encode_utf16().chain(Some(0)).collect()
     }
 
     fn name(exe: &str) -> String {
+        name_of("ready", exe)
+    }
+
+    /// The name of `exe`'s pipe for `kind` in this sign-in session (the Explorer redirect has
+    /// one of its own, redirect.rs).
+    pub(crate) fn name_of(kind: &str, exe: &str) -> String {
         use windows::Win32::System::RemoteDesktop::ProcessIdToSessionId;
         let mut session = 0u32;
         // SAFETY: an out-parameter for this process's own id.
         let _ = unsafe { ProcessIdToSessionId(std::process::id(), &mut session) };
-        pipe_name(&true_path(exe), session)
+        pipe_name_of(kind, &true_path(exe), session)
     }
 
     /// The file's path as Windows resolves it, so the helper (which reads the exe's path from
@@ -84,7 +96,7 @@ mod win {
     }
 
     /// A handle closed when dropped.
-    struct Owned(HANDLE);
+    pub(crate) struct Owned(pub(crate) HANDLE);
     impl Drop for Owned {
         fn drop(&mut self) {
             // SAFETY: the handle is this value's own, closed once.
@@ -95,7 +107,7 @@ mod win {
     unsafe impl Send for Owned {}
 
     /// Reads up to the end of a line.
-    fn read_line(h: HANDLE) -> Option<String> {
+    pub(crate) fn read_line(h: HANDLE) -> Option<String> {
         let mut all = Vec::new();
         let mut buf = [0u8; 4096];
         while !all.contains(&b'\n') && all.len() < LONGEST {
@@ -110,7 +122,7 @@ mod win {
         String::from_utf8(all[..end].to_vec()).ok()
     }
 
-    fn write_all(h: HANDLE, mut bytes: &[u8]) -> bool {
+    pub(crate) fn write_all(h: HANDLE, mut bytes: &[u8]) -> bool {
         while !bytes.is_empty() {
             let mut n = 0u32;
             // SAFETY: `bytes` and `n` outlive the call; the write is synchronous.
@@ -151,9 +163,10 @@ mod win {
         }
     }
 
-    /// Connects to the standby of `exe` and sends `ask`; its process id once it answered "ok".
-    fn send(exe: &str, ask: &Ask, allow_front: bool) -> Option<u32> {
-        let name = wide(&name(exe));
+    /// Connects to `exe`'s pipe for `kind`: the pipe, and the process serving it. Only a pipe
+    /// that very exe serves: any program could have made one with this name.
+    pub(crate) fn connect(kind: &str, exe: &str) -> Option<(Owned, u32)> {
+        let name = wide(&name_of(kind, exe));
         // SAFETY: a NUL-terminated name; the handle returned is owned below.
         let h = unsafe { CreateFileW(PCWSTR(name.as_ptr()), GENERIC_READ.0 | GENERIC_WRITE.0, FILE_SHARE_MODE(0), None, OPEN_EXISTING, FILE_FLAGS_AND_ATTRIBUTES(0), None) }.ok()?;
         let pipe = Owned(h);
@@ -162,11 +175,16 @@ mod win {
         if unsafe { GetNamedPipeServerProcessId(pipe.0, &mut pid) }.is_err() || pid == 0 {
             return None;
         }
-        // Only a pipe that very exe serves: any program could have made one with this name.
         if !exe_of(pid).is_some_and(|served_by| same_file(&served_by, exe)) {
-            log::warn!("the pipe of the Ferret kept ready isn't served by {exe}: left alone");
+            log::warn!("the {kind} pipe of {exe} is served by something else: left alone");
             return None;
         }
+        Some((pipe, pid))
+    }
+
+    /// Connects to the standby of `exe` and sends `ask`; its process id once it answered "ok".
+    fn send(exe: &str, ask: &Ask, allow_front: bool) -> Option<u32> {
+        let (pipe, pid) = connect("ready", exe)?;
         if allow_front {
             // SAFETY: plain call. It may fail (this process isn't in front either), which the
             // caller covers by raising the window itself.
@@ -199,7 +217,7 @@ mod win {
     }
 
     /// The exe a process runs.
-    fn exe_of(pid: u32) -> Option<String> {
+    pub(crate) fn exe_of(pid: u32) -> Option<String> {
         use windows::Win32::System::Threading::{OpenProcess, QueryFullProcessImageNameW, PROCESS_NAME_FORMAT, PROCESS_QUERY_LIMITED_INFORMATION};
         // SAFETY: the handle is closed by `Owned`; the buffer and its length outlive the call.
         unsafe {
@@ -211,7 +229,7 @@ mod win {
         }
     }
 
-    fn same_file(a: &str, b: &str) -> bool {
+    pub(crate) fn same_file(a: &str, b: &str) -> bool {
         let plain = |p: &str| true_path(p).replace('/', "\\").to_lowercase();
         plain(a) == plain(b)
     }
