@@ -127,6 +127,9 @@ gpui-pre-windows = { path = "vendor/gpui-pre-windows" }
 # right of where Windows draws it, so the text layer missed the words): fixed in a vendored copy,
 # changes marked "Ferret patch".
 pdf-extract = { path = "vendor/pdf-extract" }
+# ferret-core's RAR library, patched to report progress inside a file and to stop when asked
+# (src-tauri/Cargo.toml says why): the same copy for both programs.
+unrar = { path = "../src-tauri/vendor/unrar" }
 
 [profile.release]
 debug = "line-tables-only"

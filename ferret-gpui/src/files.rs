@@ -869,7 +869,8 @@ impl Ferret {
                     .with_priority(1)
                 }))
                 .into_any_element(),
-            None => div().min_w_0().truncate().child(r.name.clone()).into_any_element(),
+            // (Cut off where the column ends, and whole in a tooltip then.)
+            None => ui::clipped(("name", ix), r.name.clone()).into_any_element(),
         };
         let date = if bin { r.date.clone() } else { r.date.clone() };
         let origin: Option<SharedString> = if bin && width >= 600. {
@@ -966,7 +967,7 @@ impl Ferret {
                     .child(div().flex_none().flex().items_center().when(ghost, |d| d.opacity(0.45)).child(icon_el))
                     .child(name_el),
             )
-            .when_some(origin, |d, o| d.child(div().flex_none().w(px(200.)).px(px(8.)).truncate().text_color(text3).child(o)))
+            .when_some(origin, |d, o| d.child(div().flex_none().w(px(200.)).px(px(8.)).text_color(text3).child(ui::clipped(("origin", ix), o))))
             .when(show(Column::Modified), |d| d.child(cell(w_mod, date, false)))
             .when(show(Column::Type), |d| d.child(cell(w_type, r.ty.clone(), false)))
             .when(show(Column::Size), |d| {

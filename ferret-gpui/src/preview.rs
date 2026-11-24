@@ -379,7 +379,7 @@ impl Ferret {
                     .min_w_0()
                     .flex()
                     .flex_col()
-                    .child(div().truncate().text_size(px(14.)).font_weight(FontWeight::SEMIBOLD).child(title))
+                    .child(ui::clipped("pv-name", title).text_size(px(14.)).font_weight(FontWeight::SEMIBOLD))
                     .child(div().truncate().text_size(px(12.5)).text_color(t::fg3()).child(sub)),
             )
             .when_some(open, |d, path| {
@@ -2089,7 +2089,7 @@ impl Ferret {
                             .border_b_1()
                             .border_color(t::line())
                             .child(icon(kinds::icon(kind), 18., kinds::color(kind)))
-                            .child(div().flex_1().min_w_0().truncate().font_weight(FontWeight::SEMIBOLD).child(name))
+                            .child(ui::clipped("ql-name", name).flex_1().font_weight(FontWeight::SEMIBOLD))
                             .child(div().text_color(t::fg3()).text_size(px(12.)).child(match dims {
                                 Some((w, h)) => format!("{ty} · {size} · {w} × {h}"),
                                 None => format!("{ty} · {size}"),

@@ -267,6 +267,8 @@ pub struct Ferret {
     pub rename: Option<Rename>,
     /// Items cut to the clipboard (shown dimmed until pasted or something else is copied).
     pub cut: HashSet<String>,
+    /// Whole archives being extracted, by archive and place (`extract_once`).
+    pub extracting: HashSet<String>,
     pub clip_seq: u32,
     /// A server's files copied or cut in this window (paths, cut, Windows' clipboard count then).
     pub server_clip: Option<(Vec<String>, bool, u32)>,
@@ -584,6 +586,7 @@ impl Ferret {
             filter_box: None,
             rename: None,
             cut: HashSet::new(),
+            extracting: HashSet::new(),
             clip_seq: ferret_core::shell::clipboard_sequence(),
             server_clip: None,
             undo: Vec::new(),

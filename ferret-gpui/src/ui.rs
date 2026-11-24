@@ -393,7 +393,8 @@ pub fn set_menu_open(open: bool) {
 impl Render for Tip {
     fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
         // `.1`: a tooltip inside the menu itself (its icon row), which stays.
-        if !self.1 && MENU_OPEN.load(std::sync::atomic::Ordering::Relaxed) {
+        // Nothing to say (`clipped`: the text fits): nothing is drawn.
+        if self.0.is_empty() || (!self.1 && MENU_OPEN.load(std::sync::atomic::Ordering::Relaxed)) {
             return div();
         }
         div()
@@ -420,6 +421,44 @@ pub fn ring(radius: f32) -> Div {
 pub fn tip(text: impl Into<SharedString>) -> impl Fn(&mut Window, &mut App) -> AnyView + 'static {
     let text = text.into();
     move |_, cx| cx.new(|_| Tip(text.clone(), false)).into()
+}
+
+/// One line of text, cut off with "…" where it doesn't fit, and then (only then) shown whole
+/// in a tooltip when the mouse rests on it. A name cut off in the list could only be read by
+/// widening the window or its column (user report, 2026-11-24; the Tauri app's rows had the
+/// name as their `title`, on every row, cut off or not).
+pub fn clipped(id: impl Into<ElementId>, text: impl Into<SharedString>) -> Stateful<Div> {
+    let text: SharedString = text.into();
+    let cut = std::rc::Rc::new(std::cell::Cell::new(false));
+    let (measured, shown, whole) = (text.clone(), cut.clone(), text.clone());
+    div()
+        .id(id)
+        .min_w_0()
+        .relative()
+        .truncate()
+        .child(text)
+        // Whether it's cut off is known once it's laid out: how wide the text wants to be,
+        // against the room it got. (The shaped line is the one GPUI draws from: its cache has it.)
+        .child(
+            gpui::canvas(
+                move |bounds, window, _| {
+                    // (A name with a line break in it, from a Linux folder: not measured as one line.)
+                    if measured.contains('\n') {
+                        return cut.set(false);
+                    }
+                    let style = window.text_style();
+                    let size = style.font_size.to_pixels(window.rem_size());
+                    let wants = window.text_system().shape_line(measured.clone(), size, &[style.to_run(measured.len())], None).width;
+                    cut.set(wants > bounds.size.width + px(0.5));
+                },
+                |_, _, _, _| {},
+            )
+            .absolute()
+            .top_0()
+            .left_0()
+            .size_full(),
+        )
+        .tooltip(move |_, cx| cx.new(|_| Tip(if shown.get() { whole.clone() } else { SharedString::default() }, false)).into())
 }
 
 /// A tooltip on something inside an open menu (shown while the menu is open).

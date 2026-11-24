@@ -1297,10 +1297,26 @@ impl Extractor<'_> {
             // Reserve the name, then let unrar (which overwrites) write the file.
             let (file, written) = open_target(&t.target, self.mode)?;
             drop(file);
-            open = match h.extract_to(&written) {
+            // Progress as the file is unpacked, piece by piece, and Cancel between pieces
+            // (vendor/unrar, "Ferret patch"). Counted only once a file was done, a 9.6 GB
+            // file showed 0% for minutes ("stuck", user report 2026-11-24) and Cancel waited
+            // for the whole of it.
+            let p = self.p;
+            let mut reported = 0u64;
+            let mut piece = |n: usize| {
+                reported += n as u64;
+                p.add_bytes(n as u64);
+                p.check().is_ok()
+            };
+            let extracted = unrar::with_data_hook(&mut piece, || h.extract_to(&written));
+            open = match extracted {
                 Ok(o) => o,
                 Err(e) => {
+                    // (The engine removes what it had written itself, now that it's built to clean
+                    // up after a failure: .cargo/config.toml. Before, the file stayed open.)
                     let _ = fs::remove_file(&written);
+                    // Stopped because it was cancelled: that, not "the archive is damaged".
+                    self.p.check()?;
                     return Err(rar_err(e, has_pw, encrypted));
                 }
             };
@@ -1308,7 +1324,8 @@ impl Extractor<'_> {
                 set_file_mtime(&written, ms);
             }
             finish_target(&written, &t.target, self.mode)?;
-            self.p.add_bytes(node.size);
+            // What the pieces didn't cover (nothing, unless the size in the list was off).
+            self.p.add_bytes(node.size.saturating_sub(reported));
             self.p.file_done();
         }
         if !wanted.is_empty() {
@@ -2608,6 +2625,11 @@ mod tests {
     }
 
     fn unrar_data() -> Option<PathBuf> {
+        // The library's sample archives, kept with its vendored copy (src-tauri/vendor/unrar).
+        let vendored = Path::new(env!("CARGO_MANIFEST_DIR")).join("..").join("vendor").join("unrar").join("data");
+        if vendored.join("version.rar").is_file() {
+            return Some(vendored);
+        }
         let home = std::env::var_os("CARGO_HOME")
             .map(PathBuf::from)
             .or_else(|| dirs::home_dir().map(|h| h.join(".cargo")))?;
@@ -2620,6 +2642,88 @@ mod tests {
             }
         }
         None
+    }
+
+    /// A RAR file is counted as it's unpacked, and a cancel between two pieces stops it there:
+    /// once counted and checked only between files, a 9.6 GB one showed 0% until it was done
+    /// and couldn't be cancelled (2026-11-24).
+    #[test]
+    fn rar_counts_and_stops_inside_a_file() {
+        let d = tmp("rar-pieces");
+        let size = 48u64 << 20;
+        let a = d.join("big.rar");
+        make_rar_stored(&a, "big.bin", size);
+        let a = s(&a);
+        assert_eq!(names(&list_children(&a).unwrap()), vec!["big.bin"]);
+        // Cancelled a sixth of the way in: it stops inside the file (not at its end), says it
+        // was cancelled (not that the archive is damaged), and leaves nothing behind. The
+        // engine has to be built to clean up after a failure for that (.cargo/config.toml):
+        // without, the file stays open and can't be removed.
+        let p = TestProgress { cancel_after: Some(8 << 20), ..Default::default() };
+        let out = d.join("stopped");
+        assert_eq!(extract_impl(&a, &s(&out), None, None, &p).unwrap_err(), CANCELLED);
+        let counted = p.bytes.load(Ordering::Relaxed);
+        assert!(counted >= 8 << 20 && counted < size, "stopped after {counted} of {size} bytes");
+        assert_eq!(p.files.load(Ordering::Relaxed), 0);
+        let left: Vec<String> = fs::read_dir(&out).map(|entries| entries.flatten().map(|e| e.file_name().to_string_lossy().into_owned()).collect()).unwrap_or_default();
+        assert_eq!(left, Vec::<String>::new());
+        // All of it: every byte counted, once.
+        let p = TestProgress::default();
+        let out = d.join("out");
+        extract_impl(&a, &s(&out), None, None, &p).unwrap();
+        assert_eq!(p.bytes.load(Ordering::Relaxed), size);
+        assert_eq!(p.files.load(Ordering::Relaxed), 1);
+        assert_eq!(fs::metadata(out.join("big.bin")).unwrap().len(), size);
+    }
+
+    /// A RAR 5 archive holding one stored (uncompressed) file of `size` zero bytes: big enough
+    /// for the engine to hand it over in several pieces. (Nothing here can make a real RAR,
+    /// and the library's samples are a few bytes each; the format's headers are simple enough
+    /// to write out.)
+    fn make_rar_stored(path: &Path, name: &str, size: u64) {
+        use std::io::{Seek, SeekFrom};
+        // A number as RAR 5 writes them: seven bits a byte, the high bit set while more follow.
+        fn vint(mut v: u64, out: &mut Vec<u8>) {
+            loop {
+                let low = (v & 0x7f) as u8;
+                v >>= 7;
+                if v == 0 {
+                    return out.push(low);
+                }
+                out.push(low | 0x80);
+            }
+        }
+        // A block: the CRC32 of the rest, the size of what follows it, then its fields.
+        fn block(fields: &[u8], out: &mut Vec<u8>) {
+            let mut sized = Vec::new();
+            vint(fields.len() as u64, &mut sized);
+            sized.extend_from_slice(fields);
+            let mut crc = flate2::Crc::new();
+            crc.update(&sized);
+            out.extend_from_slice(&crc.sum().to_le_bytes());
+            out.extend_from_slice(&sized);
+        }
+        let mut head = vec![0x52, 0x61, 0x72, 0x21, 0x1a, 0x07, 0x01, 0x00];
+        // The archive's header: type 1, no flags of either kind.
+        block(&[1, 0, 0], &mut head);
+        // The file's: type 2, flag 2 (data follows, this many bytes); then no file flags, its
+        // size, attributes (archive), stored, made on Windows, and its name.
+        let mut file = vec![2u8, 2];
+        vint(size, &mut file);
+        file.push(0);
+        vint(size, &mut file);
+        file.extend_from_slice(&[0x20, 0, 0]);
+        vint(name.len() as u64, &mut file);
+        file.extend_from_slice(name.as_bytes());
+        block(&file, &mut head);
+        let mut out = File::create(path).unwrap();
+        out.write_all(&head).unwrap();
+        // The data (zeros: the file is only made that long), then the end: type 5.
+        out.set_len(head.len() as u64 + size).unwrap();
+        out.seek(SeekFrom::End(0)).unwrap();
+        let mut end = Vec::new();
+        block(&[5, 0, 0], &mut end);
+        out.write_all(&end).unwrap();
     }
 
     #[test]

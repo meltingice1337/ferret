@@ -82,3 +82,7 @@ strip = true
 # gives a \\?\UNC\ path the shell rejects, then unwrap). Patched copy; see "Ferret patch".
 [patch.crates-io]
 drag = { path = "vendor/drag" }
+# unrar said nothing while one file was unpacked and couldn't be stopped before it was done (a
+# 9.6 GB file: 0% for minutes, Cancel ignored). Patched copy with a hook for both; see "Ferret
+# patch". ferret-gpui/Cargo.toml points at the same copy.
+unrar = { path = "vendor/unrar" }

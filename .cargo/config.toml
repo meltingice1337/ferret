@@ -1,0 +1,10 @@
+# For every build made inside this repository (ferret-gpui, src-tauri and its ferret-core).
+
+[env]
+# The RAR engine (the unrar_sys crate, C++) reports every failure by throwing: a wrong password,
+# a damaged archive, a full disk, and Ferret's Cancel (src-tauri/vendor/unrar, "Ferret patch").
+# Microsoft's compiler only cleans up on the way out of a throw when it's told to (/EHsc), and
+# the `cc` crate that builds the engine doesn't tell it. Without it the file being unpacked
+# stayed open after any failure: it couldn't be removed, or even deleted by hand, until Ferret
+# was closed. ferret-core's test `rar_counts_and_stops_inside_a_file` fails without this.
+CXXFLAGS_x86_64_pc_windows_msvc = "/EHsc"

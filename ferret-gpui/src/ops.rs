@@ -1079,14 +1079,17 @@ impl Ferret {
     /// "Extract to “stem\”" / "Extract all": next to the archive, in a folder of its own unless it
     /// holds a single folder.
     pub fn extract_smart(&mut self, archive: String, cx: &mut Context<Self>) {
+        let Some(once) = self.extract_once(&archive, "", false) else { return };
         let a2 = archive.clone();
         let task = cx.background_executor().spawn(async move { ferret_core::rt::block_on(ferret_core::archive::archive_extract_smart(a2, None)) });
         cx.spawn(async move |this, cx| {
             let r = task.await;
             this.update(cx, |f, cx| match r {
-                Ok(id) => f.after_extract(id, util::parent(&archive).unwrap_or_default(), cx),
-                Err(e) if e.contains("password") => f.ask_password(archive.clone(), None, cx),
-                Err(e) => f.toast_error(format!("Extract failed: {e}"), cx),
+                Ok(id) => f.after_extract(id, util::parent(&archive).unwrap_or_default(), once, cx),
+                Err(e) => {
+                    f.extracting.remove(&once);
+                    if e.contains("password") { f.ask_password(archive.clone(), None, cx) } else { f.toast_error(format!("Extract failed: {e}"), cx) }
+                }
             })
             .ok();
         })
@@ -1094,22 +1097,38 @@ impl Ferret {
     }
 
     pub fn extract_into(&mut self, archive: String, dest: String, entries: Option<Vec<String>>, cx: &mut Context<Self>) {
+        let Some(once) = self.extract_once(&archive, &dest, entries.is_some()) else { return };
         let (a2, d2, e2) = (archive.clone(), dest.clone(), entries.clone());
         let task = cx.background_executor().spawn(async move { ferret_core::rt::block_on(ferret_core::archive::archive_extract(a2, d2, e2, None)) });
         cx.spawn(async move |this, cx| {
             let r = task.await;
             this.update(cx, |f, cx| match r {
-                Ok(id) => f.after_extract(id, dest.clone(), cx),
-                Err(e) if e.contains("password") => f.ask_password(archive.clone(), Some((dest.clone(), entries.clone())), cx),
-                Err(e) => f.toast_error(format!("Extract failed: {e}"), cx),
+                Ok(id) => f.after_extract(id, dest.clone(), once, cx),
+                Err(e) => {
+                    f.extracting.remove(&once);
+                    if e.contains("password") { f.ask_password(archive.clone(), Some((dest.clone(), entries.clone())), cx) } else { f.toast_error(format!("Extract failed: {e}"), cx) }
+                }
             })
             .ok();
         })
         .detach();
     }
 
-    fn after_extract(&mut self, id: u64, dest: String, _cx: &mut Context<Self>) {
+    /// A whole archive is extracted into one place once at a time: asked for again while that
+    /// is still going on, nothing more is started (None). "Extract here" pressed twice started
+    /// two jobs unpacking the same 9.6 GB into two folders (2026-11-24). Some: what to take out
+    /// of `extracting` when it's over. (Chosen items of an archive aren't held back: empty.)
+    fn extract_once(&mut self, archive: &str, dest: &str, chosen: bool) -> Option<String> {
+        if chosen {
+            return Some(String::new());
+        }
+        let key = format!("{}|{}", ferret_core::paths::key(archive), ferret_core::paths::key(dest));
+        self.extracting.insert(key.clone()).then_some(key)
+    }
+
+    fn after_extract(&mut self, id: u64, dest: String, once: String, _cx: &mut Context<Self>) {
         when_done(id, move |f, u, cx| {
+            f.extracting.remove(&once);
             if u.status != "done" {
                 if let Some(e) = u.error {
                     f.toast_error(format!("Extract failed: {e}"), cx);
